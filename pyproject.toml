@@ -38,6 +38,8 @@ classifiers = [
 ]
 
 dependencies = [
+    "turboroid>=0.1.0, <1.0.0",
+    "turbolightdi>=0.1.0, <1.0.0",
 ]
 
 [project.optional-dependencies]
