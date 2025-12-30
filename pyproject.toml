@@ -6,8 +6,8 @@ build-backend = "hatchling.build"
 # PEP 621 Standard
 [project]
 name = "turborg"
-version = "0.1.0"
-description = "Turborg: Turborg is a full solution for web frameworks in python."
+version = "0.1.1"
+description = "Turborg is a full solution for web frameworks in python."
 readme = "README.md"
 license = { text = "MIT" }
 license-files = ["LICENSE"]
