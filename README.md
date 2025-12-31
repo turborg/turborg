@@ -2,6 +2,8 @@
 
 <div align="center">
 
+[![CI & CD](https://github.com/turborg/turborg/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/turborg/turborg/actions/workflows/release.yml)
+[![Daily Health Check](https://github.com/turborg/turborg/actions/workflows/test-daily.yml/badge.svg?branch=main)](https://github.com/turborg/turborg/actions/workflows/test-daily.yml)
 ![Python Versions](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue?style=flat-square)
 ![Development Status](https://img.shields.io/badge/status-Alpha-orange?style=flat-square)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/turborg?period=total&units=INTERNATIONAL_SYSTEM&left_color=GREY&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/turborg)
