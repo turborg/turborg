@@ -343,6 +343,11 @@ func (b *Bouncer) handleClient(ctx context.Context, client *BouncerClient) {
 
 func (b *Bouncer) handleLine(client *BouncerClient, line string) {
 	msg := Parse(line)
+	b.log.Debug("bouncer <<",
+		"auth", client.Authenticated(),
+		"cmd", msg.Command,
+		"line", line,
+	)
 	switch msg.Command {
 	case CmdPass:
 		b.handlePass(client, msg.Params)

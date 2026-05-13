@@ -36,6 +36,17 @@ type Connector struct {
 	bouncer  *Bouncer
 	ctcp     *Throttle
 
+	// currentNick is the live nick the server confirmed for us. It
+	// starts as settings.Nick (the requested value), gets updated by
+	// the 001 RPL_WELCOME (where the server tells us the nick it
+	// actually assigned — may differ if it had to truncate / disambig),
+	// and again on any observed self-NICK change. Everything that
+	// surfaces "the bot's nick" outside the connector (bouncer
+	// state replay, web state op, web MESSAGE_SENT.sender) reads it
+	// through CurrentNick so the displays stay in sync.
+	nickMu      sync.RWMutex
+	currentNick string
+
 	stopOnce sync.Once
 }
 
@@ -47,11 +58,12 @@ func New(s *Settings, log *slog.Logger, events *agent.EventBus) *Connector {
 		log = slog.Default()
 	}
 	return &Connector{
-		settings: s,
-		log:      log,
-		events:   events,
-		inbox:    make(chan *agent.InboundEnvelope, 64),
-		state:    NewChannelState(),
+		settings:    s,
+		log:         log,
+		events:      events,
+		inbox:       make(chan *agent.InboundEnvelope, 64),
+		state:       NewChannelState(),
+		currentNick: s.Nick,
 	}
 }
 
@@ -60,11 +72,32 @@ func (c *Connector) Inbound() <-chan *agent.InboundEnvelope { return c.inbox }
 func (c *Connector) ClaimSupervision() bool                { return true }
 func (c *Connector) State() *ChannelState                  { return c.state }
 
-// CurrentNick returns the nick the connector is currently using. For
-// now this just tracks settings.Nick — once the connector observes a
-// successful NICK change for itself, it updates the live value via
-// handleNickChange.
-func (c *Connector) CurrentNick() string { return c.settings.Nick }
+// CurrentNick returns the live nick the server confirmed for the bot.
+// Initially the requested TURBORG_IRC_NICK, then overwritten by the
+// 001 welcome's target field (the nick the server actually assigned)
+// and by any observed self-NICK change.
+func (c *Connector) CurrentNick() string {
+	c.nickMu.RLock()
+	defer c.nickMu.RUnlock()
+	return c.currentNick
+}
+
+// setCurrentNick updates the live nick and propagates the change to
+// the bouncer's upstreamNick so its synthetic JOIN prefixes + the
+// observer's "sender" field stay in sync. Idempotent — calling with
+// the same value is a no-op.
+func (c *Connector) setCurrentNick(nick string) {
+	if nick == "" {
+		return
+	}
+	c.nickMu.Lock()
+	changed := c.currentNick != nick
+	c.currentNick = nick
+	c.nickMu.Unlock()
+	if changed && c.bouncer != nil {
+		c.bouncer.UpdateUpstreamNick(nick)
+	}
+}
 
 // SendRaw writes a raw IRC line directly to the upstream socket. The
 // web gateway uses this to forward client→server ops (JOIN, PART, NICK,
@@ -81,6 +114,7 @@ func (c *Connector) Send(env *agent.OutboundEnvelope) error {
 		return errors.New("irc: not connected")
 	}
 	line := fmt.Sprintf("%s %s :%s", CmdPrivmsg, env.Channel, env.Text)
+	c.log.Debug("irc >>", "line", line, "via", "agent.Send")
 	if err := c.client.WriteLine(line); err != nil {
 		return err
 	}
@@ -186,8 +220,11 @@ func (c *Connector) startBouncer(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	b.AttachState(c.state, c.settings.Nick, c.settings.EffectiveUsername(), "turborg")
-	b.AttachUpstream(func(line string) error { return c.client.WriteLine(line) })
+	b.AttachState(c.state, c.CurrentNick(), c.settings.EffectiveUsername(), "turborg")
+	b.AttachUpstream(func(line string) error {
+		c.log.Debug("irc >>", "line", line, "via", "bouncer")
+		return c.client.WriteLine(line)
+	})
 	if c.events != nil {
 		b.AttachOutboundObserver(func(channel, sender, text, kind string) {
 			c.publish(ctx, agent.Event{
@@ -476,6 +513,17 @@ func (c *Connector) dispatchLine(ctx context.Context, line string) {
 	switch msg.Command {
 	case CmdPing:
 		c.respondPong(msg)
+	case RplWelcome:
+		// :server 001 <actualnick> :Welcome to the [...] network <actualnick>
+		// The first param is the nick the server actually assigned.
+		// On normal-case servers this equals settings.Nick, but Libera
+		// (and any server with truncation / disambiguation policies)
+		// can hand us a different value. Sync the live nick so the
+		// bouncer's upstreamNick + the web's state.nick + the gateway's
+		// MESSAGE_SENT.sender all reflect reality.
+		if len(msg.Params) > 0 {
+			c.setCurrentNick(msg.Params[0])
+		}
 	case CmdPrivmsg:
 		c.handlePrivmsg(ctx, msg, line)
 	case CmdJoin:
@@ -643,8 +691,11 @@ func (c *Connector) handleNickChange(ctx context.Context, msg Message) {
 		return
 	}
 	c.state.OnNickChange(old, newNick)
-	if c.bouncer != nil && old == c.settings.Nick {
-		c.bouncer.UpdateUpstreamNick(newNick)
+	// Self-rename: bump the live nick (and the bouncer's upstreamNick
+	// via setCurrentNick) so every surface that reads CurrentNick
+	// reflects the new identity.
+	if old == c.CurrentNick() {
+		c.setCurrentNick(newNick)
 	}
 	c.publish(ctx, agent.Event{
 		Type: agent.EventUserNickChange,
