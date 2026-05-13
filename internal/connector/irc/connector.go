@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
-	"time"
 
 	"github.com/turborg/turborg/internal/agent"
 	"golang.org/x/sync/errgroup"
@@ -147,12 +147,12 @@ func (c *Connector) dispatch(ctx context.Context, lines <-chan string) error {
 				if len(msg.Params) < 1 {
 					continue
 				}
-				env := &agent.InboundEnvelope{
-					Connector: c.Name(),
-					Channel:   msg.Params[0],
-					Sender:    Nick(msg.Prefix),
-					Text:      msg.Trailing,
-					Time:      time.Now(),
+				target := msg.Params[0]
+				env := agent.NewInbound(c.Name(), target, Nick(msg.Prefix), msg.Trailing)
+				env.Raw = line
+				if !strings.HasPrefix(target, "#") && !strings.HasPrefix(target, "&") {
+					env.IsDirect = true
+					env.Channel = Nick(msg.Prefix)
 				}
 				select {
 				case c.inbox <- env:

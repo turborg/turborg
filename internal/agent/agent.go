@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"strings"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -12,6 +11,8 @@ import (
 
 type Agent struct {
 	connectors []Connector
+	Commands   *CommandRegistry
+	Events     *EventBus
 	log        *slog.Logger
 }
 
@@ -19,23 +20,44 @@ func New(log *slog.Logger) *Agent {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Agent{log: log}
+	a := &Agent{
+		Commands: NewCommandRegistry("!"),
+		Events:   NewEventBus(log),
+		log:      log,
+	}
+	RegisterBuiltins(a.Commands)
+	return a
+}
+
+// NewWithPrefix is the same as New but lets callers pick a non-default
+// command prefix (e.g. "." or ".bot"). Useful for SaaS multi-tenancy where
+// every agent owns its own prefix.
+func NewWithPrefix(log *slog.Logger, prefix string) *Agent {
+	a := New(log)
+	a.Commands = NewCommandRegistry(prefix)
+	RegisterBuiltins(a.Commands)
+	return a
 }
 
 func (a *Agent) AddConnector(c Connector) {
 	a.connectors = append(a.connectors, c)
 }
 
-// Run starts every connector, supervises their Run loops inside an errgroup,
-// and dispatches inbound envelopes through the PoC echo handler. It returns
-// when ctx cancels or any goroutine in the group errors. Stop is then called
-// on every connector with a 500ms budget so SIGTERM unwinds quickly.
+// Run starts every connector, supervises their Run loops inside an
+// errgroup, and drives the inbound envelope → CommandRegistry → outbound
+// envelope pipeline. Returns when ctx cancels or any goroutine in the
+// group errors. Stop is then called on every connector with a 500ms
+// budget so SIGTERM unwinds quickly.
 func (a *Agent) Run(ctx context.Context) error {
+	a.Events.Publish(ctx, &Event{Type: EventBoot})
+
 	for _, c := range a.connectors {
 		if err := c.Start(ctx); err != nil {
 			return err
 		}
 	}
+
+	a.Events.Publish(ctx, &Event{Type: EventReady})
 
 	g, gctx := errgroup.WithContext(ctx)
 
@@ -56,6 +78,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.log.Warn("connector stop", "name", c.Name(), "err", err)
 		}
 	}
+	a.Events.Publish(context.Background(), &Event{Type: EventShutdown})
 
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return runErr
@@ -72,25 +95,37 @@ func (a *Agent) drain(ctx context.Context, c Connector) error {
 			if !ok {
 				return nil
 			}
-			if reply := echoHandler(env); reply != nil {
-				if err := c.Send(reply); err != nil {
-					a.log.Warn("connector send", "name", c.Name(), "err", err)
-				}
-			}
+			a.handle(ctx, c, env)
 		}
 	}
 }
 
-// echoHandler is the PoC's only command handler: it replies to "!ping" with
-// "pong" in the same channel. A real Agent will dispatch through a
-// CommandRegistry; for the PoC we hardcode it to prove the end-to-end loop.
-func echoHandler(env *InboundEnvelope) *OutboundEnvelope {
-	if !strings.HasPrefix(env.Text, "!ping") {
-		return nil
+func (a *Agent) handle(ctx context.Context, c Connector, env *InboundEnvelope) {
+	a.Events.Publish(ctx, &Event{
+		Type:   EventMessage,
+		Fields: map[string]any{"envelope": env},
+	})
+
+	out, err := a.Commands.Dispatch(ctx, env)
+	if err != nil {
+		a.log.Warn("command dispatch", "name", c.Name(), "command", env.Command, "err", err)
+		return
 	}
-	return &OutboundEnvelope{
-		Connector: env.Connector,
-		Channel:   env.Channel,
-		Text:      "pong",
+	if out == nil {
+		return
 	}
+
+	a.Events.Publish(ctx, &Event{
+		Type:   EventCommand,
+		Fields: map[string]any{"envelope": env, "command": env.Command},
+	})
+
+	if err := c.Send(out); err != nil {
+		a.log.Warn("connector send", "name", c.Name(), "err", err)
+		return
+	}
+	a.Events.Publish(ctx, &Event{
+		Type:   EventMessageSent,
+		Fields: map[string]any{"envelope": out},
+	})
 }

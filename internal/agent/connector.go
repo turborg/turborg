@@ -1,23 +1,6 @@
 package agent
 
-import (
-	"context"
-	"time"
-)
-
-type InboundEnvelope struct {
-	Connector string
-	Channel   string
-	Sender    string
-	Text      string
-	Time      time.Time
-}
-
-type OutboundEnvelope struct {
-	Connector string
-	Channel   string
-	Text      string
-}
+import "context"
 
 // Connector is the lifecycle contract every protocol adapter must implement.
 //
