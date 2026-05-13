@@ -31,7 +31,7 @@ func TestEchoPing(t *testing.T) {
 		Username: "turborg",
 		RealName: "turborg PoC",
 		Channels: []string{"#test"},
-	}, nil)
+	}, nil, nil)
 
 	a := agent.New(nil)
 	a.AddConnector(conn)
@@ -109,7 +109,7 @@ func TestSASLSuccess(t *testing.T) {
 		Channels:     []string{"#test"},
 		SASLUser:     "alice",
 		SASLPassword: "secret",
-	}, nil)
+	}, nil, nil)
 
 	a := agent.New(nil)
 	a.AddConnector(conn)
@@ -156,7 +156,7 @@ func TestSASLFailureSurfaces(t *testing.T) {
 		Channels:     []string{"#test"},
 		SASLUser:     "alice",
 		SASLPassword: "wrong",
-	}, nil)
+	}, nil, nil)
 
 	a := agent.New(nil)
 	a.AddConnector(conn)
@@ -178,7 +178,7 @@ func TestSASLUnsupportedFallsBack(t *testing.T) {
 		Channels:     []string{"#test"},
 		SASLUser:     "alice",
 		SASLPassword: "secret",
-	}, nil)
+	}, nil, nil)
 
 	a := agent.New(nil)
 	a.AddConnector(conn)

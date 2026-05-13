@@ -26,7 +26,7 @@ func main() {
 	}
 
 	a := agent.New(log)
-	a.AddConnector(irc.New(settings, log))
+	a.AddConnector(irc.New(settings, log, a.Events))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

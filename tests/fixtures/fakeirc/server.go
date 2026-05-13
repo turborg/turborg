@@ -160,6 +160,14 @@ func (s *Server) handleLine(line string) {
 		nick := s.firstNick()
 		_ = s.SendLine(fmt.Sprintf(":fake 001 %s :Welcome", nick))
 		_ = s.SendLine(fmt.Sprintf(":fake 376 %s :End of MOTD", nick))
+	case strings.HasPrefix(line, "JOIN "):
+		// Real servers echo the client's own JOIN back so it can update
+		// its membership state. fakeirc mirrors that — without it, the
+		// connector never records its self-join, and subsequent member
+		// JOINs to that channel hit a missing-channel no-op.
+		target := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
+		nick := s.firstNick()
+		_ = s.SendLine(fmt.Sprintf(":%s!~u@host JOIN %s", nick, target))
 	}
 }
 

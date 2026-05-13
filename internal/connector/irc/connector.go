@@ -21,40 +21,57 @@ import (
 // Lifecycle (mirrors Python connectors/irc/connector.py):
 //   - Start: open the connection, run CAP/SASL/USER/NICK, await
 //     RPL_ENDOFMOTD or ERR_NOMOTD, JOIN configured channels, send
-//     NickServ IDENTIFY if configured.
+//     NickServ IDENTIFY if configured, start the bouncer if configured.
 //   - Run: long-lived supervised loop owned by Agent's errgroup. Reader
-//     + dispatcher + client-ping ticker, all unwound on ctx cancel via
-//     SetReadDeadline.
-//   - Stop: send QUIT and close. Idempotent.
+//     + dispatcher, all unwound on ctx cancel via SetReadDeadline.
+//   - Stop: send QUIT, close the upstream, stop the bouncer. Idempotent.
 type Connector struct {
 	settings *Settings
 	log      *slog.Logger
+	events   *agent.EventBus
 	client   *Client
 	inbox    chan *agent.InboundEnvelope
+
+	state    *ChannelState
+	bouncer  *Bouncer
+	ctcp     *Throttle
 
 	stopOnce sync.Once
 }
 
-func New(s *Settings, log *slog.Logger) *Connector {
+// New constructs an IRC Connector. Pass nil for events when the agent is
+// not in the loop (e.g. standalone tests that don't care about lifecycle
+// events).
+func New(s *Settings, log *slog.Logger, events *agent.EventBus) *Connector {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &Connector{
 		settings: s,
 		log:      log,
+		events:   events,
 		inbox:    make(chan *agent.InboundEnvelope, 64),
+		state:    NewChannelState(),
 	}
 }
 
 func (c *Connector) Name() string                          { return "irc" }
 func (c *Connector) Inbound() <-chan *agent.InboundEnvelope { return c.inbox }
 func (c *Connector) ClaimSupervision() bool                { return true }
+func (c *Connector) State() *ChannelState                  { return c.state }
 
 func (c *Connector) Send(env *agent.OutboundEnvelope) error {
 	if c.client == nil {
 		return errors.New("irc: not connected")
 	}
-	return c.client.WriteLine(fmt.Sprintf("%s %s :%s", CmdPrivmsg, env.Channel, env.Text))
+	line := fmt.Sprintf("%s %s :%s", CmdPrivmsg, env.Channel, env.Text)
+	if err := c.client.WriteLine(line); err != nil {
+		return err
+	}
+	if c.bouncer != nil {
+		c.bouncer.BroadcastAsSelf(line, nil)
+	}
+	return nil
 }
 
 // Start opens the TCP/TLS connection and completes the IRCv3 handshake,
@@ -89,6 +106,81 @@ func (c *Connector) Start(ctx context.Context) error {
 			return fmt.Errorf("irc NickServ IDENTIFY: %w", err)
 		}
 	}
+
+	if c.settings.CTCPMaxPerWindow > 0 && c.settings.CTCPWindowSeconds > 0 {
+		tr, err := NewThrottle(
+			c.settings.CTCPMaxPerWindow,
+			time.Duration(c.settings.CTCPWindowSeconds)*time.Second,
+			nil,
+		)
+		if err != nil {
+			_ = cli.Close()
+			return fmt.Errorf("irc CTCP throttle: %w", err)
+		}
+		c.ctcp = tr
+	}
+
+	if c.settings.BouncerEnabled() {
+		if err := c.startBouncer(ctx); err != nil {
+			_ = cli.Close()
+			return err
+		}
+	}
+
+	c.publish(ctx, agent.Event{
+		Type: agent.EventReady,
+		Fields: map[string]any{
+			"connector": c.Name(),
+			"nick":      c.settings.Nick,
+		},
+	})
+	return nil
+}
+
+func (c *Connector) startBouncer(ctx context.Context) error {
+	var rl *RateLimiter
+	if c.settings.BouncerRatelimitEnabled {
+		got, err := NewRateLimiter(
+			c.settings.BouncerMaxFailedAttempts,
+			time.Duration(c.settings.BouncerFailureWindowSeconds)*time.Second,
+			time.Duration(c.settings.BouncerLockoutSeconds)*time.Second,
+			nil,
+		)
+		if err != nil {
+			return fmt.Errorf("bouncer ratelimit: %w", err)
+		}
+		rl = got
+	}
+	b, err := NewBouncer(
+		c.settings.BouncerPassword,
+		c.settings.BouncerHost,
+		c.settings.BouncerPort,
+		rl,
+		c.log,
+	)
+	if err != nil {
+		return err
+	}
+	b.AttachState(c.state, c.settings.Nick, c.settings.EffectiveUsername(), "turborg")
+	b.AttachUpstream(func(line string) error { return c.client.WriteLine(line) })
+	if c.events != nil {
+		b.AttachOutboundObserver(func(channel, sender, text, kind string) {
+			c.publish(ctx, agent.Event{
+				Type: agent.EventMessageSent,
+				Fields: map[string]any{
+					"connector": c.Name(),
+					"channel":   channel,
+					"sender":    sender,
+					"text":      text,
+					"kind":      kind,
+				},
+			})
+		})
+	}
+	if err := b.Start(ctx); err != nil {
+		return err
+	}
+	c.bouncer = b
 	return nil
 }
 
@@ -326,15 +418,76 @@ func (c *Connector) dispatch(ctx context.Context, lines <-chan string) error {
 			if !ok {
 				return nil
 			}
-			msg := Parse(line)
-			switch msg.Command {
-			case CmdPing:
-				c.respondPong(msg)
-			case CmdPrivmsg:
-				c.handlePrivmsg(ctx, msg, line)
-			}
+			c.dispatchLine(ctx, line)
 		}
 	}
+}
+
+func (c *Connector) dispatchLine(ctx context.Context, line string) {
+	msg := Parse(line)
+
+	// Forward every observed upstream line to attached bouncer clients
+	// so they see the same wire view we do — modulo PING/PONG and the
+	// CAP * ACK chatter that's only meaningful between this connector
+	// and the server.
+	if c.bouncer != nil && shouldFanOutToBouncer(msg.Command) {
+		c.bouncer.Broadcast(line, nil)
+	}
+
+	switch msg.Command {
+	case CmdPing:
+		c.respondPong(msg)
+	case CmdPrivmsg:
+		c.handlePrivmsg(ctx, msg, line)
+	case CmdJoin:
+		c.handleJoin(ctx, msg)
+	case CmdPart:
+		c.handlePart(ctx, msg)
+	case CmdQuit:
+		c.handleQuit(ctx, msg)
+	case CmdKick:
+		c.handleKick(ctx, msg)
+	case CmdNick:
+		c.handleNickChange(ctx, msg)
+	case CmdTopic:
+		c.handleTopic(ctx, msg)
+	case RplTopic:
+		// :server 332 nick #ch :topic
+		if len(msg.Params) >= 2 {
+			c.state.SetTopic(msg.Params[1], msg.Trailing)
+		}
+	case RplNoTopic:
+		if len(msg.Params) >= 2 {
+			c.state.ClearTopic(msg.Params[1])
+		}
+	case RplTopicWhoTime:
+		// :server 333 nick #ch setter unix
+		if len(msg.Params) >= 4 {
+			setAt := parseUnixSeconds(msg.Params[3])
+			c.state.SetTopicMeta(msg.Params[1], msg.Params[2], setAt)
+		}
+	case RplNamReply:
+		// :server 353 nick = #ch :a b @c +d
+		if len(msg.Params) >= 3 && msg.Trailing != "" {
+			channel := msg.Params[len(msg.Params)-1]
+			c.state.OnNamesReply(channel, strings.Fields(msg.Trailing))
+		}
+	case RplEndOfNames:
+		if len(msg.Params) >= 2 {
+			c.state.OnNamesEnd(msg.Params[1])
+		}
+	}
+}
+
+// shouldFanOutToBouncer keeps protocol noise off bouncer clients.
+func shouldFanOutToBouncer(cmd string) bool {
+	switch cmd {
+	case "", CmdPing, CmdPong, CmdCap, CmdAuthenticate,
+		RplSaslLoggedIn, RplSaslSuccess,
+		ErrSaslFail, ErrSaslAborted, ErrSaslAlready, ErrSaslTooLong:
+		return false
+	}
+	return true
 }
 
 func (c *Connector) handlePrivmsg(ctx context.Context, msg Message, raw string) {
@@ -342,19 +495,180 @@ func (c *Connector) handlePrivmsg(ctx context.Context, msg Message, raw string) 
 		return
 	}
 	target := msg.Params[0]
-	env := agent.NewInbound(c.Name(), target, Nick(msg.Prefix), msg.Trailing)
+	sender := Nick(msg.Prefix)
+	text := msg.Trailing
+
+	// CTCP auto-reply. Standard CTCP is \x01CMD[ args]\x01 inside a
+	// PRIVMSG; ACTION (/me) is chat, not metadata, so we leave it alone.
+	if isCTCP(text) && !isACTION(text) {
+		if c.settings.CTCPAutoReply && c.ctcp != nil && c.ctcp.Allow(strings.ToLower(sender)) {
+			if reply := ctcpReply(text); reply != "" {
+				_ = c.client.WriteLine(fmt.Sprintf("%s %s :\x01%s\x01", CmdNotice, sender, reply))
+			}
+		}
+		return
+	}
+
+	env := agent.NewInbound(c.Name(), target, sender, text)
 	env.Raw = raw
 	if !strings.HasPrefix(target, "#") && !strings.HasPrefix(target, "&") {
 		env.IsDirect = true
-		env.Channel = Nick(msg.Prefix)
+		env.Channel = sender
 	}
+
+	c.publish(ctx, agent.Event{
+		Type: agent.EventMessage,
+		Fields: map[string]any{
+			"connector": c.Name(),
+			"channel":   env.Channel,
+			"sender":    sender,
+			"text":      text,
+		},
+	})
+
 	select {
 	case c.inbox <- env:
 	case <-ctx.Done():
 	}
 }
 
+func (c *Connector) handleJoin(ctx context.Context, msg Message) {
+	channel := joinTarget(msg)
+	if channel == "" {
+		return
+	}
+	nick := Nick(msg.Prefix)
+	if nick == c.settings.Nick {
+		c.state.OnSelfJoin(channel)
+	} else {
+		c.state.OnMemberJoin(channel, nick)
+	}
+	c.publish(ctx, agent.Event{
+		Type:   agent.EventUserJoin,
+		Fields: map[string]any{"connector": c.Name(), "channel": channel, "nick": nick},
+	})
+}
+
+func (c *Connector) handlePart(ctx context.Context, msg Message) {
+	if len(msg.Params) < 1 {
+		return
+	}
+	channel := msg.Params[0]
+	nick := Nick(msg.Prefix)
+	if nick == c.settings.Nick {
+		c.state.OnSelfPart(channel)
+	} else {
+		c.state.OnMemberPart(channel, nick)
+	}
+	c.publish(ctx, agent.Event{
+		Type:   agent.EventUserLeave,
+		Fields: map[string]any{"connector": c.Name(), "channel": channel, "nick": nick},
+	})
+}
+
+func (c *Connector) handleQuit(ctx context.Context, msg Message) {
+	nick := Nick(msg.Prefix)
+	if nick == "" {
+		return
+	}
+	c.state.OnMemberQuit(nick)
+	c.publish(ctx, agent.Event{
+		Type:   agent.EventUserLeave,
+		Fields: map[string]any{"connector": c.Name(), "nick": nick, "reason": msg.Trailing},
+	})
+}
+
+func (c *Connector) handleKick(ctx context.Context, msg Message) {
+	if len(msg.Params) < 2 {
+		return
+	}
+	channel := msg.Params[0]
+	victim := msg.Params[1]
+	c.state.OnMemberKick(channel, victim)
+	c.publish(ctx, agent.Event{
+		Type: agent.EventUserKicked,
+		Fields: map[string]any{
+			"connector": c.Name(),
+			"channel":   channel,
+			"nick":      victim,
+			"by":        Nick(msg.Prefix),
+			"reason":    msg.Trailing,
+		},
+	})
+}
+
+func (c *Connector) handleNickChange(ctx context.Context, msg Message) {
+	old := Nick(msg.Prefix)
+	newNick := msg.Trailing
+	if newNick == "" && len(msg.Params) > 0 {
+		newNick = msg.Params[0]
+	}
+	if old == "" || newNick == "" {
+		return
+	}
+	c.state.OnNickChange(old, newNick)
+	if c.bouncer != nil && old == c.settings.Nick {
+		c.bouncer.UpdateUpstreamNick(newNick)
+	}
+	c.publish(ctx, agent.Event{
+		Type: agent.EventUserNickChange,
+		Fields: map[string]any{
+			"connector": c.Name(),
+			"old":       old,
+			"new":       newNick,
+		},
+	})
+}
+
+func (c *Connector) handleTopic(ctx context.Context, msg Message) {
+	if len(msg.Params) < 1 {
+		return
+	}
+	channel := msg.Params[0]
+	topic := msg.Trailing
+	c.state.SetTopic(channel, topic)
+	c.publish(ctx, agent.Event{
+		Type: agent.EventTopicChanged,
+		Fields: map[string]any{
+			"connector": c.Name(),
+			"channel":   channel,
+			"topic":     topic,
+			"by":        Nick(msg.Prefix),
+		},
+	})
+}
+
+// joinTarget extracts the channel from a JOIN — most servers use a single
+// param ("JOIN #ch"), some send it as trailing (":nick!~u@h JOIN :#ch").
+func joinTarget(msg Message) string {
+	if len(msg.Params) > 0 && msg.Params[0] != "" {
+		return msg.Params[0]
+	}
+	return msg.Trailing
+}
+
+func parseUnixSeconds(s string) int64 {
+	var v int64
+	for _, b := range []byte(s) {
+		if b < '0' || b > '9' {
+			return 0
+		}
+		v = v*10 + int64(b-'0')
+	}
+	return v
+}
+
+func (c *Connector) publish(ctx context.Context, ev agent.Event) {
+	if c.events == nil {
+		return
+	}
+	c.events.Publish(ctx, &ev)
+}
+
 func (c *Connector) Stop(_ context.Context) error {
+	if c.bouncer != nil {
+		_ = c.bouncer.Stop()
+	}
 	if c.client == nil {
 		return nil
 	}
@@ -364,4 +678,45 @@ func (c *Connector) Stop(_ context.Context) error {
 		err = c.client.Close()
 	})
 	return err
+}
+
+// --- CTCP helpers ---------------------------------------------------------
+
+const ctcpDelim = "\x01"
+
+func isCTCP(text string) bool {
+	return len(text) >= 2 && strings.HasPrefix(text, ctcpDelim) && strings.HasSuffix(text, ctcpDelim)
+}
+
+func isACTION(text string) bool {
+	inner := strings.Trim(text, ctcpDelim)
+	return strings.HasPrefix(strings.ToUpper(inner), "ACTION")
+}
+
+func ctcpReply(text string) string {
+	inner := strings.Trim(text, ctcpDelim)
+	if inner == "" {
+		return ""
+	}
+	parts := strings.SplitN(inner, " ", 2)
+	cmd := strings.ToUpper(parts[0])
+	arg := ""
+	if len(parts) > 1 {
+		arg = parts[1]
+	}
+	switch cmd {
+	case "VERSION":
+		return "VERSION turborg-go"
+	case "PING":
+		return "PING " + arg
+	case "TIME":
+		return "TIME " + time.Now().UTC().Format(time.RFC3339)
+	case "CLIENTINFO":
+		return "CLIENTINFO VERSION PING TIME CLIENTINFO SOURCE USERINFO"
+	case "SOURCE":
+		return "SOURCE https://github.com/turborg/turborg"
+	case "USERINFO":
+		return "USERINFO turborg agent"
+	}
+	return ""
 }
