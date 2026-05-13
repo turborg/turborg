@@ -23,14 +23,14 @@ func TestEchoPing(t *testing.T) {
 	fs := fakeirc.New(t)
 	defer fs.Close()
 
-	conn := irc.New(irc.Config{
-		Host:    "127.0.0.1",
-		Port:    fs.Port(),
-		TLS:     false,
-		Nick:    "turborg",
-		User:    "turborg",
-		Real:    "turborg PoC",
-		Channel: "#test",
+	conn := irc.New(&irc.Settings{
+		Hostname: "127.0.0.1",
+		Port:     fs.Port(),
+		UseTLS:   false,
+		Nick:     "turborg",
+		Username: "turborg",
+		RealName: "turborg PoC",
+		Channels: []string{"#test"},
 	}, nil)
 
 	a := agent.New(nil)
@@ -93,5 +93,110 @@ func containsLine(want string) func([]string) bool {
 			}
 		}
 		return false
+	}
+}
+
+func TestSASLSuccess(t *testing.T) {
+	fs := fakeirc.New(t, fakeirc.WithSASL(fakeirc.SASLSuccess))
+	defer fs.Close()
+
+	conn := irc.New(&irc.Settings{
+		Hostname:     "127.0.0.1",
+		Port:         fs.Port(),
+		Nick:         "turborg",
+		Username:     "turborg",
+		RealName:     "turborg",
+		Channels:     []string{"#test"},
+		SASLUser:     "alice",
+		SASLPassword: "secret",
+	}, nil)
+
+	a := agent.New(nil)
+	a.AddConnector(conn)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+
+	require.True(t,
+		fs.WaitFor(containsPrefix("JOIN #test"), 2*time.Second),
+		"connector did not JOIN after SASL success; received: %v", fs.Received(),
+	)
+
+	// Verify the connector sent AUTHENTICATE PLAIN then base64 creds.
+	got := fs.Received()
+	var sawAuthPlain, sawAuthCreds bool
+	for _, l := range got {
+		if l == "AUTHENTICATE PLAIN" {
+			sawAuthPlain = true
+		} else if strings.HasPrefix(l, "AUTHENTICATE ") && l != "AUTHENTICATE PLAIN" && l != "AUTHENTICATE +" {
+			sawAuthCreds = true
+		}
+	}
+	assert.True(t, sawAuthPlain, "missing AUTHENTICATE PLAIN; received: %v", got)
+	assert.True(t, sawAuthCreds, "missing AUTHENTICATE <base64>; received: %v", got)
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent did not shut down")
+	}
+}
+
+func TestSASLFailureSurfaces(t *testing.T) {
+	fs := fakeirc.New(t, fakeirc.WithSASL(fakeirc.SASLFail))
+	defer fs.Close()
+
+	conn := irc.New(&irc.Settings{
+		Hostname:     "127.0.0.1",
+		Port:         fs.Port(),
+		Nick:         "turborg",
+		Channels:     []string{"#test"},
+		SASLUser:     "alice",
+		SASLPassword: "wrong",
+	}, nil)
+
+	a := agent.New(nil)
+	a.AddConnector(conn)
+
+	err := a.Run(context.Background())
+	require.Error(t, err, "SASL 904 must surface as a Run() error")
+	assert.Contains(t, err.Error(), "SASL failed")
+}
+
+func TestSASLUnsupportedFallsBack(t *testing.T) {
+	// SASLDisabled means the server NAKs :sasl in CAP REQ.
+	fs := fakeirc.New(t, fakeirc.WithSASL(fakeirc.SASLDisabled))
+	defer fs.Close()
+
+	conn := irc.New(&irc.Settings{
+		Hostname:     "127.0.0.1",
+		Port:         fs.Port(),
+		Nick:         "turborg",
+		Channels:     []string{"#test"},
+		SASLUser:     "alice",
+		SASLPassword: "secret",
+	}, nil)
+
+	a := agent.New(nil)
+	a.AddConnector(conn)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+
+	require.True(t,
+		fs.WaitFor(containsPrefix("JOIN #test"), 2*time.Second),
+		"connector did not JOIN after SASL fallback; received: %v", fs.Received(),
+	)
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent did not shut down")
 	}
 }

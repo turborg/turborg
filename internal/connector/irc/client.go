@@ -53,11 +53,17 @@ func (c *Client) ReadLine() (string, error) {
 }
 
 // Unblock forces the next pending or in-flight read to return immediately by
-// setting a past read deadline. Used by the connector's ctx watchdog to
+// setting a past read deadline. Used by the connector's Run() loop to
 // unwind the reader goroutine on shutdown without closing the conn yet
 // (Stop still needs to send QUIT cleanly).
 func (c *Client) Unblock() error {
 	return c.conn.SetReadDeadline(time.Now())
+}
+
+// SetReadDeadline forwards to the underlying conn. Pass the zero
+// time.Time to clear an existing deadline.
+func (c *Client) SetReadDeadline(t time.Time) error {
+	return c.conn.SetReadDeadline(t)
 }
 
 func (c *Client) Close() error {
