@@ -13,12 +13,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const (
-	rplWelcome    = "001"
-	rplEndOfMOTD  = "376"
-	errNoMOTD     = "422"
-)
-
 type Config struct {
 	Host    string
 	Port    int
@@ -128,22 +122,22 @@ func (c *Connector) dispatch(ctx context.Context, lines <-chan string) error {
 			}
 			msg := Parse(line)
 			switch msg.Command {
-			case "PING":
+			case CmdPing:
 				target := msg.Trailing
 				if target == "" && len(msg.Params) > 0 {
 					target = msg.Params[0]
 				}
-				if err := c.client.WriteLine("PONG :" + target); err != nil {
+				if err := c.client.WriteLine(CmdPong + " :" + target); err != nil {
 					return fmt.Errorf("irc PONG: %w", err)
 				}
-			case rplEndOfMOTD, errNoMOTD:
+			case RplEndOfMOTD, ErrNoMOTD:
 				if !joined && c.cfg.Channel != "" {
-					if err := c.client.WriteLine("JOIN " + c.cfg.Channel); err != nil {
+					if err := c.client.WriteLine(CmdJoin + " " + c.cfg.Channel); err != nil {
 						return fmt.Errorf("irc JOIN: %w", err)
 					}
 					joined = true
 				}
-			case "PRIVMSG":
+			case CmdPrivmsg:
 				if len(msg.Params) < 1 {
 					continue
 				}
