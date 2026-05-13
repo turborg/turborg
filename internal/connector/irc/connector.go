@@ -60,6 +60,22 @@ func (c *Connector) Inbound() <-chan *agent.InboundEnvelope { return c.inbox }
 func (c *Connector) ClaimSupervision() bool                { return true }
 func (c *Connector) State() *ChannelState                  { return c.state }
 
+// CurrentNick returns the nick the connector is currently using. For
+// now this just tracks settings.Nick — once the connector observes a
+// successful NICK change for itself, it updates the live value via
+// handleNickChange.
+func (c *Connector) CurrentNick() string { return c.settings.Nick }
+
+// SendRaw writes a raw IRC line directly to the upstream socket. The
+// web gateway uses this to forward client→server ops (JOIN, PART, NICK,
+// WHOIS, …) that don't fit the Envelope model.
+func (c *Connector) SendRaw(line string) error {
+	if c.client == nil {
+		return errors.New("irc: not connected")
+	}
+	return c.client.WriteLine(line)
+}
+
 func (c *Connector) Send(env *agent.OutboundEnvelope) error {
 	if c.client == nil {
 		return errors.New("irc: not connected")

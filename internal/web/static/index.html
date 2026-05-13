@@ -1,0 +1,2016 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>turborg</title>
+<!-- SVG favicon — `prefers-color-scheme` flips the brand color so the
+     glyph stays legible against both dark and light browser chrome. -->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><style>.t{fill:%230a66cc}.l{fill:%230a66cc}@media(prefers-color-scheme:dark){.t{fill:%235cb6ff}.l{fill:%235cb6ff}}</style><rect class='t' x='4' y='12' width='36' height='10' rx='2'/><rect class='t' x='17' y='12' width='10' height='40' rx='2'/><rect class='l' x='44' y='18' width='16' height='5' rx='2.5' opacity='.95'/><rect class='l' x='48' y='29' width='12' height='5' rx='2.5' opacity='.75'/><rect class='l' x='46' y='40' width='14' height='5' rx='2.5' opacity='.55'/></svg>" />
+<link rel="alternate icon" type="image/png" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect fill='%235cb6ff' x='4' y='12' width='36' height='10' rx='2'/><rect fill='%235cb6ff' x='17' y='12' width='10' height='40' rx='2'/></svg>" />
+<style>
+  :root {
+    --bg: #14161a;
+    --bg-pane: #1c1f24;
+    --bg-input: #262a31;
+    --bg-elev: #2c313a;
+    --bg-hover: rgba(255,255,255,0.04);
+    --border: #2a2e36;
+    --fg: #dde2e8;
+    --fg-dim: #8a929a;
+    --accent: #5cb6ff;
+    --accent-soft: rgba(92, 182, 255, 0.14);
+    --warn: #ffb86c;
+    --error: #ff7e7e;
+    --ok: #7ee27e;
+    --mention: #ff7e7e;
+    --shadow-pane: 0 1px 0 rgba(255,255,255,0.02) inset, 0 4px 24px rgba(0,0,0,0.3);
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f7f9;
+    --bg-pane: #ffffff;
+    --bg-input: #f0f1f4;
+    --bg-elev: #ffffff;
+    --bg-hover: rgba(20,30,50,0.04);
+    --border: #dde0e5;
+    --fg: #18191c;
+    --fg-dim: #5a6068;
+    --accent: #0a66cc;
+    --accent-soft: rgba(10, 102, 204, 0.10);
+    --warn: #b66400;
+    --error: #c83030;
+    --ok: #2e9b3b;
+    --mention: #c83030;
+    --shadow-pane: 0 1px 2px rgba(20,30,50,0.04), 0 2px 8px rgba(20,30,50,0.04);
+  }
+  * { box-sizing: border-box; }
+  body, html { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 14px/1.45 ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    user-select: none; }
+  #messages, .msg, input, .topic-text { user-select: text; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px;
+    border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--fg-dim); border: 2px solid transparent;
+    background-clip: padding-box; }
+
+  /* Login */
+  #login { display: flex; align-items: center; justify-content: center; height: 100%;
+    background: radial-gradient(at 50% 30%, var(--accent-soft), transparent 60%); }
+  #login form { display: flex; flex-direction: column; gap: 12px; min-width: 320px;
+    padding: 32px; background: var(--bg-pane); border: 1px solid var(--border);
+    border-radius: 14px; box-shadow: var(--shadow-pane); }
+  #login h1 { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: -0.5px;
+    background: linear-gradient(90deg, var(--accent), var(--ok)); -webkit-background-clip: text;
+    background-clip: text; color: transparent; }
+  #login .subtitle { color: var(--fg-dim); font-size: 12px; margin: 0 0 8px; }
+  /* Brand mark — uses currentColor so it inherits via .brand's color and
+     adapts to light/dark theme automatically. */
+  .brand { display: flex; align-items: center; gap: 12px; color: var(--accent);
+    margin: 0 0 4px; }
+  .brand-mark { width: 38px; height: 38px; flex: none; filter: drop-shadow(0 0 12px var(--accent-soft)); }
+  .brand-mark.mini { width: 22px; height: 22px; filter: none; opacity: 0.95; }
+  #userbar .brand-mark.mini { color: var(--accent); }
+  #login label { color: var(--fg-dim); font-size: 12px; }
+  #login-error { color: var(--error); font-size: 12px; min-height: 18px; padding: 2px 0; }
+  input, button { font: inherit; padding: 10px 12px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg-input); color: var(--fg);
+    transition: border-color 0.15s, box-shadow 0.15s; }
+  input:focus, button:focus-visible { outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft); }
+  button { cursor: pointer; background: var(--accent); color: #fff; border-color: transparent;
+    font-weight: 600; }
+  button:hover { filter: brightness(1.08); }
+  button:disabled { cursor: wait; opacity: 0.7; }
+  button.icon { background: transparent; color: var(--fg); border: 0; padding: 4px 8px;
+    font-size: 16px; border-radius: 6px; }
+  button.icon:hover { background: var(--bg-hover); }
+
+  /* App layout. Default desktop columns are CSS so @media can override; JS
+     sets explicit widths inline only on desktop (drag-resize). */
+  #app { display: none; height: 100%; grid-template-areas:
+    "userbar userbar userbar userbar userbar"
+    "channels rs1 chat rs2 members";
+    grid-template-columns: 220px 4px 1fr 4px 220px;
+    grid-template-rows: 44px 1fr; }
+  #app.active { display: grid; }
+  #userbar { grid-area: userbar; display: flex; align-items: center; gap: 12px;
+    padding: 0 16px; background: var(--bg-pane); border-bottom: 1px solid var(--border); }
+  #status-dot { font-size: 9px; transition: color 0.2s; }
+  #status-dot.ok { color: var(--ok); }
+  #status-dot.warn { color: var(--warn); }
+  #status-dot.error { color: var(--error); }
+  #current-nick { font-weight: 700; letter-spacing: -0.2px; cursor: pointer;
+    padding: 2px 6px; border-radius: 4px; transition: background 0.12s; }
+  #current-nick:hover, #current-nick:focus-visible { background: var(--bg-hover); outline: none; }
+  #userbar-spacer { flex: 1; }
+  #userbar .status-text { color: var(--fg-dim); font-size: 11px; }
+
+  /* Resizers */
+  .resizer { width: 4px; cursor: col-resize; background: transparent;
+    border-left: 1px solid var(--border); transition: background 0.15s; }
+  .resizer:hover, .resizer.active { background: var(--accent-soft); }
+  #resizer-left { grid-area: rs1; }
+  #resizer-right { grid-area: rs2; }
+
+  #channels, #members { background: var(--bg-pane); overflow-y: auto; padding: 8px 0; }
+  #channels { grid-area: channels; }
+  #members { grid-area: members; }
+  .pane-title { color: var(--fg-dim); padding: 8px 16px 4px; text-transform: uppercase;
+    font-size: 10px; letter-spacing: 1.2px; font-weight: 700; }
+  .pane-title.with-action { display: flex; align-items: center; justify-content: space-between; }
+  .pane-title button.icon { font-size: 14px; padding: 0 4px; }
+  .channel { padding: 8px 12px 8px 14px; cursor: pointer; display: flex; align-items: center;
+    gap: 8px; border-left: 3px solid transparent; transition: background 0.12s, border-color 0.12s;
+    margin: 1px 6px; border-radius: 6px; }
+  .channel:hover { background: var(--bg-hover); }
+  .channel.active { background: var(--accent-soft); border-left-color: var(--accent);
+    color: var(--accent); }
+  .channel.server { color: var(--warn); }
+  /* Backlog-only tab: bot isn't currently in the channel, so this row is
+     just persisted history. Render dimmed so the user knows the difference
+     between "live" and "browsing the archive". */
+  .channel.parted { color: var(--fg-dim); font-style: italic; }
+  .channel.parted .icon { opacity: 0.4; }
+  .channel.parted.active { background: rgba(138,146,154,0.10);
+    border-left-color: var(--fg-dim); color: var(--fg-dim); }
+  /* Kicked / banned tab: stronger error styling so the operator sees at a
+     glance that this isn't just a closed channel — they're locked out. */
+  .channel.kicked { color: var(--error); font-style: italic;
+    text-decoration: line-through; text-decoration-thickness: 1px;
+    text-decoration-color: rgba(220,80,80,0.45); }
+  .channel.kicked .icon { opacity: 0.9; }
+  .channel.kicked.active { background: rgba(220,80,80,0.10);
+    border-left-color: var(--error); color: var(--error); }
+  .channel.server.active { background: rgba(255,184,108,0.10); border-left-color: var(--warn);
+    color: var(--warn); }
+  .channel .icon { width: 18px; flex: none; opacity: 0.85; font-size: 13px; text-align: center; }
+  .channel .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-weight: 500; }
+  .channel.active .name { font-weight: 600; }
+  .channel .badge { background: var(--accent); color: #fff; font-size: 10px;
+    padding: 2px 7px; border-radius: 9px; min-width: 20px; text-align: center;
+    font-weight: 700; line-height: 1.4; }
+  .channel .badge.mention { background: var(--mention); }
+  .channel .close { margin-left: auto; opacity: 0.4; visibility: hidden; padding: 0 4px;
+    font-size: 16px; line-height: 1; }
+  .channel:hover .close { visibility: visible; }
+  .channel:hover .close:hover { opacity: 1; }
+  .member { padding: 4px 16px; cursor: pointer; display: flex; align-items: center; gap: 6px;
+    border-radius: 4px; margin: 0 6px; transition: background 0.12s; }
+  .member:hover { background: var(--bg-hover); }
+  .member .mode { display: inline-block; width: 10px; text-align: center;
+    color: var(--accent); font-weight: 700; }
+  .member.op .mode { color: var(--warn); }
+  .member.halfop .mode { color: var(--ok); }
+  .member.voice .mode { color: var(--accent); }
+
+  /* Chat pane */
+  #chat { grid-area: chat; display: flex; flex-direction: column; min-width: 0; position: relative; }
+  #topic { padding: 9px 18px; border-bottom: 1px solid var(--border); color: var(--fg-dim);
+    font-size: 12px; min-height: 36px; display: flex; align-items: center; gap: 8px; }
+  #topic .topic-icon { color: var(--accent); }
+  #topic .topic-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #messages { flex: 1; overflow-y: auto; padding: 10px 18px 14px; scroll-behavior: smooth; }
+  .msg { padding: 1px 0; word-wrap: break-word; animation: msgIn 0.18s ease; }
+  @keyframes msgIn { from { opacity: 0; transform: translateY(2px); }
+    to { opacity: 1; transform: none; } }
+  .msg .ts { color: var(--fg-dim); margin-right: 10px; font-size: 11px;
+    font-variant-numeric: tabular-nums; }
+  .msg .nick { font-weight: 600; margin-right: 8px; }
+  .msg.system { color: var(--fg-dim); font-style: italic; }
+  .msg.system .nick { font-style: normal; }
+  .msg.mention { background: rgba(255,126,126,0.10); border-left: 2px solid var(--mention);
+    margin-left: -18px; padding-left: 16px; padding-right: 18px; }
+  .msg.help { white-space: pre-wrap; }
+  .msg.server { color: var(--fg-dim); }
+  .msg.server.welcome { color: var(--accent); }
+  .msg.server.error { color: var(--error); }
+  .msg a { color: var(--accent); text-decoration: none; border-bottom: 1px dotted; }
+  .msg a:hover { border-bottom-style: solid; }
+  .day-sep { color: var(--fg-dim); font-size: 11px; text-transform: uppercase;
+    letter-spacing: 1px; padding: 14px 0 6px; display: flex; align-items: center; gap: 12px; }
+  .day-sep::before, .day-sep::after { content: ""; flex: 1; height: 1px;
+    background: var(--border); }
+  .new-sep { color: var(--mention); font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 1.5px; padding: 8px 0 6px;
+    display: flex; align-items: center; gap: 12px; }
+  .new-sep::before, .new-sep::after { content: ""; flex: 1; height: 1px;
+    background: var(--mention); opacity: 0.4; }
+  .msg .quote-btn { opacity: 0; margin-left: 6px; cursor: pointer; color: var(--fg-dim);
+    font-size: 11px; transition: opacity 0.12s; }
+  .msg:hover .quote-btn { opacity: 0.8; }
+  .msg .quote-btn:hover { opacity: 1; color: var(--accent); }
+
+  /* Compose + autocomplete */
+  #compose { display: flex; padding: 10px; border-top: 1px solid var(--border); gap: 8px;
+    position: relative; }
+  #compose textarea { flex: 1; padding: 10px 13px; border-radius: 6px; resize: none;
+    font: inherit; min-height: 38px; max-height: 120px; line-height: 1.4; }
+  #compose textarea:disabled { opacity: 0.5; cursor: not-allowed; }
+  #autocomplete { position: absolute; bottom: calc(100% - 1px); left: 10px; right: 10px;
+    max-height: 240px; overflow-y: auto; background: var(--bg-elev);
+    border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-pane);
+    z-index: 5; padding: 4px; transform: translateY(4px); opacity: 0; pointer-events: none;
+    transition: opacity 0.12s, transform 0.12s; }
+  #autocomplete.open { opacity: 1; transform: none; pointer-events: auto; }
+  .ac-item { display: grid; grid-template-columns: 24px 110px 1fr auto; align-items: center;
+    gap: 10px; padding: 6px 8px; border-radius: 4px; cursor: pointer; }
+  .ac-item.mention-item { grid-template-columns: 24px 1fr; }
+  .ac-item:hover, .ac-item.selected { background: var(--accent-soft); }
+  .ac-emoji { text-align: center; font-size: 14px; }
+  .ac-cmd { font-weight: 700; color: var(--accent); }
+  .ac-syntax { color: var(--fg-dim); font-size: 12px; }
+  .ac-desc { color: var(--fg-dim); font-size: 11px; text-align: right; }
+
+  /* Context menu */
+  #ctxmenu { position: fixed; min-width: 180px; background: var(--bg-elev);
+    border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-pane);
+    padding: 4px; z-index: 100; opacity: 0; pointer-events: none;
+    transform: translateY(-4px); transition: opacity 0.1s, transform 0.1s; }
+  #ctxmenu.open { opacity: 1; transform: none; pointer-events: auto; }
+  .ctx-item { display: flex; align-items: center; gap: 10px; padding: 7px 10px;
+    border-radius: 4px; cursor: pointer; font-size: 13px; }
+  .ctx-item:hover { background: var(--accent-soft); }
+  .ctx-item.danger:hover { background: rgba(255,126,126,0.18); color: var(--error); }
+  .ctx-sep { height: 1px; background: var(--border); margin: 4px 6px; }
+
+  /* Whois modal */
+  #whois-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+    display: flex; align-items: center; justify-content: center; z-index: 200;
+    opacity: 0; pointer-events: none; transition: opacity 0.15s; }
+  #whois-overlay.open { opacity: 1; pointer-events: auto; }
+  #whois-modal { background: var(--bg-pane); border: 1px solid var(--border);
+    border-radius: 12px; box-shadow: var(--shadow-pane); padding: 24px;
+    min-width: 380px; max-width: 520px; max-height: 80vh; overflow-y: auto; }
+  #whois-modal h3 { margin: 0 0 4px; font-size: 18px; font-weight: 700; }
+  #whois-modal .whois-host { color: var(--fg-dim); font-size: 13px; margin-bottom: 16px; }
+  #whois-modal .whois-row { display: grid; grid-template-columns: 110px 1fr;
+    gap: 8px; padding: 4px 0; font-size: 13px; }
+  #whois-modal .whois-row .label { color: var(--fg-dim); }
+  #whois-modal .whois-row .value { word-break: break-word; }
+  #whois-modal .whois-error { color: var(--error); font-style: italic; }
+  #whois-modal .close-btn { float: right; margin-top: -4px; }
+  #whois-modal .channel-chip { display: inline-block; padding: 1px 6px; margin: 2px;
+    background: var(--bg-input); border-radius: 4px; font-size: 12px; }
+
+  /* Channel/who list overlay (reuses whois-overlay pattern but bigger) */
+  #list-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+    display: flex; align-items: center; justify-content: center; z-index: 200;
+    opacity: 0; pointer-events: none; transition: opacity 0.15s; }
+  #list-overlay.open { opacity: 1; pointer-events: auto; }
+  #list-modal { background: var(--bg-pane); border: 1px solid var(--border);
+    border-radius: 12px; box-shadow: var(--shadow-pane); padding: 16px;
+    width: 90vw; max-width: 720px; height: 80vh; display: flex;
+    flex-direction: column; gap: 10px; }
+  #list-modal header { display: flex; align-items: center; gap: 10px; }
+  #list-modal header h3 { margin: 0; flex: 1; font-size: 16px; }
+  #list-modal input[type=search] { flex: 0 0 220px; padding: 6px 10px; font-size: 12px; }
+  #list-modal .list-rows { flex: 1; overflow-y: auto; }
+  #list-modal .list-row { padding: 6px 8px; border-radius: 4px; cursor: pointer;
+    display: grid; grid-template-columns: 1fr 60px 2fr; gap: 10px; align-items: baseline;
+    border-bottom: 1px solid var(--border); }
+  #list-modal .list-row:hover { background: var(--accent-soft); }
+  #list-modal .list-row .users { color: var(--fg-dim); font-size: 11px;
+    font-variant-numeric: tabular-nums; text-align: right; }
+  #list-modal .list-row .topic { color: var(--fg-dim); font-size: 12px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #list-modal.who .list-row { grid-template-columns: 1fr 1fr 1fr; }
+  #list-modal .empty { color: var(--fg-dim); font-style: italic; padding: 20px;
+    text-align: center; }
+
+  /* Mobile sidebars (overlay) */
+  #app .sidebar-toggle { display: none; }
+  @media (max-width: 760px) {
+    #app { grid-template-columns: 1fr !important; grid-template-areas:
+      "userbar"
+      "chat" !important; }
+    #app .sidebar-toggle { display: inline-flex; }
+    .resizer { display: none; }
+    #channels, #members { position: fixed; top: 44px; bottom: 0; width: 80%;
+      max-width: 320px; z-index: 50; transform: translateX(-100%);
+      transition: transform 0.18s ease; box-shadow: 6px 0 24px rgba(0,0,0,0.4); }
+    #channels { left: 0; }
+    #members { right: 0; transform: translateX(100%); box-shadow: -6px 0 24px rgba(0,0,0,0.4); }
+    #channels.open { transform: none; }
+    #members.open { transform: none; }
+    #userbar .desktop-only { display: none; }
+  }
+  @media (min-width: 761px) {
+    #userbar .mobile-only { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <form id="loginForm">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"
+           aria-label="turborg" role="img">
+        <!-- T crossbar + stem (overlap so it renders as a single solid glyph) -->
+        <rect x="4" y="12" width="36" height="10" rx="2" fill="currentColor"/>
+        <rect x="17" y="12" width="10" height="40" rx="2" fill="currentColor"/>
+        <!-- Speed lines: three trailing dashes of decreasing weight to suggest motion. -->
+        <rect x="44" y="18" width="16" height="5" rx="2.5" fill="currentColor" opacity="0.95"/>
+        <rect x="48" y="29" width="12" height="5" rx="2.5" fill="currentColor" opacity="0.7"/>
+        <rect x="46" y="40" width="14" height="5" rx="2.5" fill="currentColor" opacity="0.5"/>
+      </svg>
+      <h1>turborg</h1>
+    </div>
+    <p class="subtitle">real-time IRC, in the browser</p>
+    <label for="token">access token</label>
+    <input id="token" type="password" autocomplete="off" required />
+    <div id="login-error"></div>
+    <button type="submit" id="login-submit">Connect</button>
+  </form>
+</div>
+
+<div id="app">
+  <header id="userbar">
+    <button class="icon mobile-only sidebar-toggle" id="toggleChannels"
+      title="channels">☰</button>
+    <svg class="brand-mark mini desktop-only" viewBox="0 0 64 64"
+         xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <rect x="4" y="12" width="36" height="10" rx="2" fill="currentColor"/>
+      <rect x="17" y="12" width="10" height="40" rx="2" fill="currentColor"/>
+      <rect x="44" y="18" width="16" height="5" rx="2.5" fill="currentColor" opacity="0.95"/>
+      <rect x="48" y="29" width="12" height="5" rx="2.5" fill="currentColor" opacity="0.7"/>
+      <rect x="46" y="40" width="14" height="5" rx="2.5" fill="currentColor" opacity="0.5"/>
+    </svg>
+    <span id="status-dot" title="connection status">●</span>
+    <span id="current-nick" role="button" tabindex="0"
+      title="click to change your IRC nick">—</span>
+    <span class="status-text desktop-only" id="status-text">disconnected</span>
+    <span id="userbar-spacer"></span>
+    <button id="notifyToggle" class="icon" title="enable browser notifications">🔕</button>
+    <button id="themeToggle" class="icon" title="toggle theme">🌓</button>
+    <button class="icon mobile-only sidebar-toggle" id="toggleMembers"
+      title="members">👥</button>
+  </header>
+  <aside id="channels"></aside>
+  <div class="resizer" id="resizer-left" data-pane="left"></div>
+  <main id="chat">
+    <div id="topic"></div>
+    <div id="messages"></div>
+    <form id="compose" autocomplete="off">
+      <div id="autocomplete"></div>
+      <textarea id="input" autocomplete="off" rows="1"
+        placeholder="message — type / for commands… (Shift+Enter newline)"
+        disabled></textarea>
+    </form>
+  </main>
+  <div class="resizer" id="resizer-right" data-pane="right"></div>
+  <aside id="members"></aside>
+</div>
+
+<div id="ctxmenu"></div>
+
+<div id="whois-overlay">
+  <div id="whois-modal" role="dialog" aria-modal="true"></div>
+</div>
+
+<div id="list-overlay">
+  <div id="list-modal" role="dialog" aria-modal="true"></div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const SERVER_TAB = "*server*";
+
+  const COMMANDS = [
+    { name: "join",     syntax: "#channel",          desc: "join a channel",          emoji: "🚪" },
+    { name: "part",     syntax: "[#channel]",        desc: "leave (default: current)",emoji: "👋" },
+    { name: "cycle",    syntax: "[#channel]",        desc: "part + rejoin",           emoji: "♻️" },
+    { name: "topic",    syntax: "[new topic]",       desc: "set/show channel topic",  emoji: "📌" },
+    { name: "nick",     syntax: "<newnick>",         desc: "change nickname",         emoji: "👤" },
+    { name: "msg",      syntax: "<nick> [message]",  desc: "open a query and send",   emoji: "💬" },
+    { name: "query",    syntax: "<nick>",            desc: "open a query",            emoji: "💬" },
+    { name: "me",       syntax: "<action>",          desc: "emote in current channel",emoji: "🎭" },
+    { name: "ctcp",     syntax: "<target> <verb> [args]", desc: "send a CTCP request", emoji: "📡" },
+    { name: "ignore",   syntax: "<nick>",            desc: "mute a user (client-side)",emoji: "🙉" },
+    { name: "unignore", syntax: "<nick>",            desc: "unmute a user",           emoji: "👂" },
+    { name: "ignores",  syntax: "",                  desc: "list ignored users",      emoji: "🙊" },
+    { name: "notice",   syntax: "<target> <text>",   desc: "send a NOTICE",           emoji: "📣" },
+    { name: "whois",    syntax: "<nick>",            desc: "look up a user",          emoji: "🔍" },
+    { name: "list",     syntax: "[pattern]",         desc: "browse channels",         emoji: "📚" },
+    { name: "who",      syntax: "<channel|mask>",    desc: "list users in target",    emoji: "👥" },
+    { name: "invite",   syntax: "<nick> [#channel]", desc: "invite user to channel",  emoji: "✉️" },
+    { name: "away",     syntax: "[reason]",          desc: "mark yourself away",      emoji: "💤" },
+    { name: "back",     syntax: "",                  desc: "clear away status",       emoji: "👋" },
+    { name: "op",       syntax: "<nick>",            desc: "give op (+o)",            emoji: "⬆️" },
+    { name: "deop",     syntax: "<nick>",            desc: "remove op (-o)",          emoji: "⬇️" },
+    { name: "voice",    syntax: "<nick>",            desc: "give voice (+v)",         emoji: "🎙️" },
+    { name: "devoice",  syntax: "<nick>",            desc: "remove voice (-v)",       emoji: "🤐" },
+    { name: "halfop",   syntax: "<nick>",            desc: "give halfop (+h)",        emoji: "🔼" },
+    { name: "dehalfop", syntax: "<nick>",            desc: "remove halfop (-h)",      emoji: "🔽" },
+    { name: "kick",     syntax: "<nick> [reason]",   desc: "kick user from channel",  emoji: "🦶" },
+    { name: "raw",      syntax: "<line>",            desc: "send raw IRC line",       emoji: "🛠️" },
+    { name: "theme",    syntax: "",                  desc: "toggle light/dark",       emoji: "🌓" },
+    { name: "help",     syntax: "",                  desc: "show this list",          emoji: "❓" },
+  ];
+
+  const $ = (id) => document.getElementById(id);
+  const channelsEl = $("channels");
+  const membersEl = $("members");
+  const messagesEl = $("messages");
+  const topicEl = $("topic");
+  const statusDotEl = $("status-dot");
+  const statusTextEl = $("status-text");
+  const nickEl = $("current-nick");
+  // Click (or Enter) on the nick label opens a prompt to change it. The
+  // server will echo back a `nick` op (or an ERR_ numeric → server tab)
+  // so the userbar updates itself; we just send the request here.
+  function promptNickChange() {
+    if (!ws || ws.readyState !== 1) return;
+    const next = window.prompt("New nick:", myNick === "—" ? "" : myNick);
+    if (next === null) return;
+    const trimmed = next.trim();
+    if (!trimmed || trimmed === myNick) return;
+    send({ op: "nick", nick: trimmed });
+  }
+  nickEl.addEventListener("click", promptNickChange);
+  nickEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); promptNickChange(); }
+  });
+  const inputEl = $("input");
+  const acEl = $("autocomplete");
+  const ctxEl = $("ctxmenu");
+  const loginEl = $("login");
+  const loginErrEl = $("login-error");
+  const loginBtn = $("login-submit");
+  const appEl = $("app");
+
+  const channels = new Map();
+  let activeChannel = null;
+  let myNick = "—";
+  let ws = null;
+  let storedToken = null;
+  let reconnectAttempt = 0;
+  let reconnectTimer = null;
+  let everConnected = false;  // toggled true on first ws.onopen — gates auto-reconnect
+
+  ensureServerTab();
+  applyPaneWidths();
+
+  // --- Mobile sidebar toggles -----------------------------------------------
+  $("toggleChannels").addEventListener("click", () => {
+    channelsEl.classList.toggle("open");
+    if (channelsEl.classList.contains("open")) membersEl.classList.remove("open");
+  });
+  $("toggleMembers").addEventListener("click", () => {
+    membersEl.classList.toggle("open");
+    if (membersEl.classList.contains("open")) channelsEl.classList.remove("open");
+  });
+
+  // --- "New since last visit" markers ---------------------------------------
+  // Per-channel timestamp of the latest message the user has actually seen
+  // (i.e. the channel was active when the message arrived). On selectChannel
+  // the active log is rendered with a "── new ──" separator inserted before
+  // the first message > lastSeen, like Discord/Slack.
+  function loadLastSeen(name) {
+    const v = localStorage.getItem(`turborg.lastSeen.${name}`);
+    return v ? parseFloat(v) : 0;
+  }
+  function saveLastSeen(name, ts) {
+    localStorage.setItem(`turborg.lastSeen.${name}`, String(ts));
+  }
+
+  // --- Client-side ignore list ----------------------------------------------
+  // Pure local — we don't tell the server. On receive, drop any message
+  // whose lowercase nick is in the set. Persisted in localStorage so the
+  // mute survives reloads.
+  // /ignore + autocomplete inserts an `@nick` token (mention completion);
+  // bare nick or IRC-mode-prefixed nick (~&@%+) should also work. Strip
+  // them so the stored entry matches what message events carry.
+  function stripNickPrefix(raw) { return String(raw || "").replace(/^[~&@%+]+/, ""); }
+  // Migrate any pre-fix entries (e.g. literal "@stephens" stored before
+  // stripNickPrefix existed) — without this, /unignore can't match them.
+  const ignored = new Set(
+    JSON.parse(localStorage.getItem("turborg.ignore") || "[]")
+      .map((n) => stripNickPrefix(String(n)).toLowerCase())
+      .filter(Boolean),
+  );
+  function addIgnore(nick) { ignored.add(stripNickPrefix(nick).toLowerCase()); saveIgnores(); }
+  function removeIgnore(nick) {
+    const lc = String(nick || "").toLowerCase();
+    // Lenient: drop the stripped form, the raw form, and any leftover
+    // prefixed variants. Migration safety net.
+    let removed = ignored.delete(stripNickPrefix(lc));
+    removed = ignored.delete(lc) || removed;
+    saveIgnores();
+    return removed;
+  }
+  function saveIgnores() {
+    localStorage.setItem("turborg.ignore", JSON.stringify([...ignored]));
+  }
+  // Persist the migrated set immediately so subsequent page loads aren't
+  // re-migrating the same legacy data on every boot.
+  saveIgnores();
+  function isIgnored(nick) {
+    return typeof nick === "string" && ignored.has(nick.toLowerCase());
+  }
+
+  // --- Browser notifications ------------------------------------------------
+  let notifyEnabled = localStorage.getItem("turborg.notify") === "yes";
+  const notifyBtn = $("notifyToggle");
+  function syncNotifyButton() {
+    if (typeof Notification === "undefined") {
+      notifyBtn.textContent = "🔕";
+      notifyBtn.title = "notifications unsupported";
+      notifyBtn.disabled = true;
+      return;
+    }
+    if (Notification.permission === "denied") {
+      notifyBtn.textContent = "🔕";
+      notifyBtn.title = "notifications blocked by browser";
+    } else if (notifyEnabled && Notification.permission === "granted") {
+      notifyBtn.textContent = "🔔";
+      notifyBtn.title = "notifications on (click to mute)";
+    } else {
+      notifyBtn.textContent = "🔕";
+      notifyBtn.title = "click to enable notifications";
+    }
+  }
+  syncNotifyButton();
+  notifyBtn.addEventListener("click", async () => {
+    if (typeof Notification === "undefined") return;
+    let justEnabled = false;
+    if (Notification.permission === "default") {
+      const p = await Notification.requestPermission();
+      if (p === "granted") {
+        notifyEnabled = true;
+        localStorage.setItem("turborg.notify", "yes");
+        justEnabled = true;
+      }
+    } else if (Notification.permission === "granted") {
+      const wasOn = notifyEnabled;
+      notifyEnabled = !notifyEnabled;
+      localStorage.setItem("turborg.notify", notifyEnabled ? "yes" : "no");
+      justEnabled = !wasOn && notifyEnabled;
+    } else if (Notification.permission === "denied") {
+      // Browser-level block — surface a hint so the user knows they have
+      // to fix it in chrome://settings, not in the UI.
+      systemHint(
+        "browser blocked notifications for this site. " +
+        "Open the lock icon in the URL bar → Site settings → Notifications → Allow.",
+      );
+    }
+    syncNotifyButton();
+    // Fire a probe so the user immediately sees whether their OS
+    // popups work (Chrome on macOS in particular sometimes requires
+    // System Settings → Notifications → Chrome → Allow).
+    if (justEnabled) sendTestNotification();
+  });
+  function maybeNotify(channel, msg) {
+    if (!notifyEnabled || typeof Notification === "undefined") return;
+    if (Notification.permission !== "granted") return;
+    // Suppress while the tab is focused AND the message is in the
+    // currently-visible channel — anything else is "you might miss it",
+    // so notify. (Previously we required the whole tab to be hidden,
+    // which meant a focused tab on #foo never got notified about #bar.)
+    const tabFocused = document.visibilityState === "visible" && document.hasFocus();
+    if (tabFocused && channel === activeChannel) return;
+    // Filter out system / self messages and ignored users.
+    if (msg.system || !msg.text || msg.nick === myNick) return;
+    if (isIgnored(msg.nick)) return;
+    const isDM = !channel.startsWith("#") && !channel.startsWith("&");
+    let title;
+    if (msg.mention) title = `🔔 ${msg.nick} mentioned you in ${channel}`;
+    else if (isDM) title = `📬 ${msg.nick} (private message)`;
+    else title = `${msg.nick} in ${channel}`;
+    try {
+      new Notification(title, {
+        body: msg.text, tag: `turborg-${channel}`, silent: false,
+      });
+    } catch {}
+  }
+
+  // Send a probe notification so the user can verify their permission /
+  // OS settings work without having to wait for inbound traffic.
+  function sendTestNotification() {
+    if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    try {
+      new Notification("🔔 turborg notifications enabled", {
+        body: "You'll be pinged for mentions, DMs, and channel activity outside the active tab.",
+        tag: "turborg-test", silent: false,
+      });
+    } catch {}
+  }
+
+  // --- IndexedDB backlog ----------------------------------------------------
+  // Per-channel scrollback persisted across reloads. The DB is *scoped by
+  // bot nick*: each session opens `turborg:<nick>` so changing
+  // TURBORG_IRC_NICK doesn't leak the previous session's channels into the
+  // new one. The first state op (which carries `nick`) is what triggers
+  // the open, so we don't pick a wrong scope before we know who the bot is.
+  const persistedHistory = new Map();
+  let db = null;
+  let dbScope = null;
+  function dbNameFor(nick) { return "turborg:" + String(nick || "").toLowerCase(); }
+  function ensureDbForNick(nick) {
+    if (typeof indexedDB === "undefined") return Promise.resolve();
+    const target = dbNameFor(nick);
+    if (db && dbScope === target) return Promise.resolve();
+    if (db) { db.close(); db = null; }
+    persistedHistory.clear();
+    dbScope = target;
+    return new Promise((res) => {
+      const req = indexedDB.open(target, 1);
+      req.onupgradeneeded = (e) => {
+        const dbInst = e.target.result;
+        const store = dbInst.createObjectStore("messages", { keyPath: "id", autoIncrement: true });
+        store.createIndex("channel", "channel");
+        store.createIndex("ts", "ts");
+      };
+      req.onsuccess = (e) => {
+        db = e.target.result;
+        loadAllHistory().finally(res);
+      };
+      req.onerror = () => res();
+    });
+  }
+  async function loadAllHistory() {
+    if (!db) return;
+    return new Promise((res) => {
+      const tx = db.transaction("messages", "readonly");
+      const store = tx.objectStore("messages");
+      const req = store.getAll();
+      req.onsuccess = () => {
+        for (const m of req.result || []) {
+          if (!persistedHistory.has(m.channel)) persistedHistory.set(m.channel, []);
+          persistedHistory.get(m.channel).push(m);
+        }
+        for (const arr of persistedHistory.values()) arr.sort((a, b) => a.ts - b.ts);
+        // Cap each channel at 500 in-memory; older entries stay in IndexedDB
+        // but aren't loaded.
+        for (const [k, arr] of persistedHistory) {
+          if (arr.length > 500) persistedHistory.set(k, arr.slice(-500));
+        }
+        res();
+      };
+      req.onerror = () => res();
+    });
+  }
+  function persistMessage(channel, msg) {
+    if (!db || channel === SERVER_TAB) return;
+    try {
+      const tx = db.transaction("messages", "readwrite");
+      tx.objectStore("messages").add({ channel, ...msg });
+    } catch {}
+  }
+  // True if the channel already shows a message identical to `ev` (same
+  // ts + nick + text). Used to drop replayed events the client already
+  // saw live this session OR loaded from persisted backlog at startup.
+  // Checks the channel's in-memory log (which is the union of seedLog +
+  // live-received messages) rather than persistedHistory, since live
+  // messages don't write back into persistedHistory.
+  function hasPersistedTwin(channel, ev) {
+    const seed = persistedHistory.get(channel);
+    const live = channels.get(channel)?.log;
+    for (const log of [live, seed]) {
+      if (!log || !log.length) continue;
+      for (let i = log.length - 1; i >= 0; i--) {
+        const m = log[i];
+        if (m.ts !== ev.ts) {
+          if (typeof m.ts === "number" && typeof ev.ts === "number" && m.ts < ev.ts - 5) break;
+          continue;
+        }
+        if (m.nick === ev.nick && m.text === ev.text) return true;
+      }
+    }
+    return false;
+  }
+
+  // --- Theme ----------------------------------------------------------------
+  let theme = localStorage.getItem("turborg.theme") || "dark";
+  document.documentElement.setAttribute("data-theme", theme);
+  $("themeToggle").addEventListener("click", () => {
+    theme = theme === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("turborg.theme", theme);
+    renderMembers();
+    if (activeChannel) renderActiveLog();
+  });
+
+  // --- Pane resizing --------------------------------------------------------
+  function applyPaneWidths() {
+    // On mobile we let the @media rule (1fr single column + overlay panes)
+    // own the layout. Inline grid-template-columns from JS would override
+    // it because inline beats @media specificity.
+    if (window.matchMedia("(max-width: 760px)").matches) {
+      appEl.style.removeProperty("grid-template-columns");
+      return;
+    }
+    const left = parseInt(localStorage.getItem("turborg.leftPane") || "220", 10);
+    const right = parseInt(localStorage.getItem("turborg.rightPane") || "220", 10);
+    appEl.style.gridTemplateColumns = `${left}px 4px 1fr 4px ${right}px`;
+  }
+  window.addEventListener("resize", applyPaneWidths);
+  for (const handle of document.querySelectorAll(".resizer")) {
+    handle.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const which = handle.dataset.pane;
+      const start = e.clientX;
+      const startLeft = parseInt(localStorage.getItem("turborg.leftPane") || "220", 10);
+      const startRight = parseInt(localStorage.getItem("turborg.rightPane") || "220", 10);
+      handle.classList.add("active");
+      document.body.style.cursor = "col-resize";
+      const onMove = (ev) => {
+        const dx = ev.clientX - start;
+        if (which === "left") {
+          const next = Math.min(420, Math.max(140, startLeft + dx));
+          localStorage.setItem("turborg.leftPane", String(next));
+        } else {
+          const next = Math.min(360, Math.max(140, startRight - dx));
+          localStorage.setItem("turborg.rightPane", String(next));
+        }
+        applyPaneWidths();
+      };
+      const onUp = () => {
+        handle.classList.remove("active");
+        document.body.style.cursor = "";
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    });
+  }
+
+  // --- Login & connect ------------------------------------------------------
+  $("loginForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    storedToken = $("token").value;
+    reconnectAttempt = 0;
+    everConnected = false;
+    loginErrEl.textContent = "";
+    loginBtn.disabled = true;
+    loginBtn.textContent = "Connecting…";
+    connect();
+  });
+
+  function showLoginError(msg) {
+    loginErrEl.textContent = msg;
+    loginBtn.disabled = false;
+    loginBtn.textContent = "Connect";
+  }
+
+  function enterAppView() {
+    if (appEl.classList.contains("active")) return;
+    loginEl.style.display = "none";
+    appEl.classList.add("active");
+    selectChannel(SERVER_TAB);
+  }
+
+  async function connect() {
+    setStatus("connecting…", "warn");
+    // IndexedDB is now opened lazily by the state op (it's keyed by the
+    // bot's nick, which we don't know until the gateway tells us). The
+    // state handler awaits ensureDbForNick before seeding channel logs.
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const url = `${proto}//${location.host}/ws?token=${encodeURIComponent(storedToken)}`;
+    ws = new WebSocket(url);
+    ws.onopen = () => {
+      reconnectAttempt = 0;
+      everConnected = true;
+      enterAppView();
+      setStatus("connected", "ok");
+      inputEl.disabled = activeChannel === SERVER_TAB;
+      appendServer("welcome", "Gateway connected.");
+    };
+    ws.onmessage = (e) => handle(JSON.parse(e.data));
+    ws.onerror = () => {};
+    ws.onclose = (e) => {
+      inputEl.disabled = true;
+      // Auth/rate-limit closes never get a retry.
+      if (e.code === 4401 || e.code === 4429) {
+        if (!everConnected) {
+          // Closed before we ever opened — bring the user back to the login
+          // screen with an inline error rather than dumping them in an empty
+          // chat pane.
+          showLoginError(
+            e.code === 4401
+              ? "Incorrect password."
+              : "Too many attempts — wait a few minutes and try again.",
+          );
+          storedToken = null;
+          return;
+        }
+        setStatus(`auth failed (${e.code})`, "error");
+        appendServer("error", `Authentication failed: ${e.reason || e.code}`);
+        storedToken = null;
+        return;
+      }
+      // Otherwise: backoff reconnect (only after a successful connect).
+      if (!everConnected) {
+        showLoginError(`Could not connect (${e.code}). Try again.`);
+        return;
+      }
+      const delay = Math.min(30000, 1000 * Math.pow(2, reconnectAttempt));
+      reconnectAttempt++;
+      setStatus(`reconnecting in ${Math.round(delay / 1000)}s…`, "warn");
+      appendServer("info", `Disconnected (${e.code}). Reconnecting in ${Math.round(delay / 1000)}s…`);
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(connect, delay);
+    };
+  }
+
+  // --- Compose / commands ---------------------------------------------------
+  inputEl.addEventListener("input", updateAutocomplete);
+  inputEl.addEventListener("keydown", onComposeKey);
+  $("compose").addEventListener("submit", (e) => {
+    e.preventDefault();
+    submitCompose();
+  });
+
+  // Input history: HexChat-style Up/Down navigation through recently
+  // submitted lines. Persisted across reloads in localStorage so a quick
+  // tab refresh doesn't lose the draft buffer. Capped at 100 entries.
+  const INPUT_HISTORY_MAX = 100;
+  let inputHistory = [];
+  try {
+    const raw = JSON.parse(localStorage.getItem("turborg.inputHistory") || "[]");
+    if (Array.isArray(raw)) inputHistory = raw.filter((s) => typeof s === "string");
+  } catch {}
+  let historyIndex = inputHistory.length;
+  let historyDraft = "";
+
+  function pushInputHistory(text) {
+    if (!text) return;
+    if (inputHistory.length && inputHistory[inputHistory.length - 1] === text) {
+      historyIndex = inputHistory.length;
+      return;
+    }
+    inputHistory.push(text);
+    if (inputHistory.length > INPUT_HISTORY_MAX) {
+      inputHistory = inputHistory.slice(-INPUT_HISTORY_MAX);
+    }
+    historyIndex = inputHistory.length;
+    try {
+      localStorage.setItem("turborg.inputHistory", JSON.stringify(inputHistory));
+    } catch {}
+  }
+
+  function navigateHistory(delta) {
+    if (!inputHistory.length) return false;
+    if (historyIndex === inputHistory.length) historyDraft = inputEl.value;
+    const next = Math.max(0, Math.min(inputHistory.length, historyIndex + delta));
+    if (next === historyIndex) return false;
+    historyIndex = next;
+    inputEl.value = next === inputHistory.length ? historyDraft : inputHistory[next];
+    const len = inputEl.value.length;
+    inputEl.setSelectionRange(len, len);
+    autoGrowInput();
+    return true;
+  }
+
+  function submitCompose() {
+    if (acEl.classList.contains("open")) {
+      const sel = acEl.querySelector(".ac-item.selected");
+      if (sel) {
+        commitAutocomplete(sel);
+        return;
+      }
+    }
+    const text = inputEl.value.trim();
+    if (!text) return;
+    pushInputHistory(text);
+    if (text.startsWith("/")) {
+      if (handleCommand(text)) {
+        inputEl.value = "";
+        autoGrowInput();
+      }
+      return;
+    }
+    if (activeChannel === SERVER_TAB) {
+      systemHint("you can only run /commands here. switch to a channel to chat.");
+      return;
+    }
+    const activeCh = channels.get(activeChannel);
+    if (activeCh?.kicked) {
+      // Belt-and-suspenders: input is disabled in this state, but if the
+      // user pasted via clipboard or the disabled flag race-conditioned,
+      // catch it here and explain instead of silently dropping the line.
+      const why = activeCh.kicked.by === "server"
+        ? activeCh.kicked.reason
+        : `kicked by ${activeCh.kicked.by}`;
+      systemHint(`can't send to ${activeChannel} — ${why}. /join ${activeChannel} first.`);
+      return;
+    }
+    if (!activeChannel || !ws || ws.readyState !== 1) return;
+    // Multi-line: split, send each line as its own PRIVMSG with a small gap
+    // to respect IRC excess-flood throttles (most networks: ~4-5 lines/sec).
+    const lines = text.split("\n").map((l) => l.trimEnd()).filter(Boolean);
+    sendLinesPaced(activeChannel, lines);
+    inputEl.value = "";
+    autoGrowInput();
+  }
+
+  function sendLinesPaced(channel, lines) {
+    let i = 0;
+    const tick = () => {
+      if (i >= lines.length) return;
+      ws.send(JSON.stringify({ op: "say", channel, text: lines[i] }));
+      i++;
+      if (i < lines.length) setTimeout(tick, 250);
+    };
+    tick();
+  }
+
+  function autoGrowInput() {
+    inputEl.style.height = "auto";
+    inputEl.style.height = Math.min(120, inputEl.scrollHeight) + "px";
+  }
+  inputEl.addEventListener("input", autoGrowInput);
+
+  function onComposeKey(e) {
+    if (acEl.classList.contains("open")) {
+      const items = [...acEl.querySelectorAll(".ac-item")];
+      if (!items.length) return;
+      const cur = items.findIndex((el) => el.classList.contains("selected"));
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        selectAcIndex(items, (cur + 1) % items.length);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        selectAcIndex(items, (cur - 1 + items.length) % items.length);
+      } else if (e.key === "Tab" || e.key === "Enter") {
+        e.preventDefault();
+        commitAutocomplete(items[cur >= 0 ? cur : 0]);
+      } else if (e.key === "Escape") {
+        hideAutocomplete();
+      }
+      return;
+    }
+    // Enter submits; Shift+Enter inserts a newline (textarea default).
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      submitCompose();
+      return;
+    }
+    // Up/Down: walk the input history (HexChat / shell convention). Only
+    // for single-line drafts — once the user adds a newline, the arrows
+    // belong to the textarea cursor.
+    if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !inputEl.value.includes("\n")) {
+      if (navigateHistory(e.key === "ArrowUp" ? -1 : +1)) {
+        e.preventDefault();
+        return;
+      }
+    }
+    // Tab outside an open dropdown: complete the last word against the
+    // active channel's member list. mIRC/HexChat-style nick completion.
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const v = inputEl.value;
+      const m = v.match(/(\S+)$/);
+      if (!m || !activeChannel || activeChannel === SERVER_TAB) return;
+      const ch = channels.get(activeChannel);
+      if (!ch) return;
+      const word = m[1];
+      const lower = word.toLowerCase();
+      const candidates = [...ch.members.keys()]
+        .filter((n) => n.toLowerCase().startsWith(lower) && n !== myNick);
+      if (!candidates.length) return;
+      const completed = candidates[0];
+      const before = v.slice(0, v.length - word.length);
+      // Conventional mIRC: prepend a colon if completing at start of input.
+      const sep = before === "" ? ": " : " ";
+      inputEl.value = before + completed + sep;
+    }
+  }
+
+  function updateAutocomplete() {
+    const v = inputEl.value;
+    // Slash commands at start of input.
+    const slash = v.match(/^\/([a-z]*)$/i);
+    if (slash) return showSlashAutocomplete(slash[1].toLowerCase());
+    // @-mention: last token starts with @ in the active channel.
+    const m = v.match(/(?:^|\s)@([\w\-\[\]\\^{}|`]*)$/);
+    if (m && activeChannel && activeChannel !== SERVER_TAB) {
+      return showMentionAutocomplete(m[1].toLowerCase());
+    }
+    hideAutocomplete();
+  }
+
+  function showSlashAutocomplete(prefix) {
+    const matches = COMMANDS.filter((c) => c.name.startsWith(prefix));
+    if (!matches.length) return hideAutocomplete();
+    acEl.innerHTML = "";
+    for (const cmd of matches) {
+      const el = document.createElement("div");
+      el.className = "ac-item";
+      el.dataset.kind = "slash";
+      el.dataset.cmd = cmd.name;
+      el.innerHTML =
+        `<span class="ac-emoji">${cmd.emoji}</span>` +
+        `<span class="ac-cmd">/${cmd.name}</span>` +
+        `<span class="ac-syntax">${escapeHtml(cmd.syntax)}</span>` +
+        `<span class="ac-desc">${escapeHtml(cmd.desc)}</span>`;
+      el.addEventListener("mousedown", (e) => { e.preventDefault(); commitAutocomplete(el); });
+      acEl.appendChild(el);
+    }
+    selectAcIndex([...acEl.querySelectorAll(".ac-item")], 0);
+    acEl.classList.add("open");
+  }
+
+  function showMentionAutocomplete(prefix) {
+    const ch = channels.get(activeChannel);
+    if (!ch) return hideAutocomplete();
+    const matches = [...ch.members.keys()]
+      .filter((n) => n.toLowerCase().startsWith(prefix) && n !== myNick)
+      .slice(0, 8);
+    if (!matches.length) return hideAutocomplete();
+    acEl.innerHTML = "";
+    for (const nick of matches) {
+      const el = document.createElement("div");
+      el.className = "ac-item mention-item";
+      el.dataset.kind = "mention";
+      el.dataset.nick = nick;
+      el.innerHTML =
+        `<span class="ac-emoji">@</span>` +
+        `<span style="color: ${nickColor(nick)}">${escapeHtml(nick)}</span>`;
+      el.addEventListener("mousedown", (e) => { e.preventDefault(); commitAutocomplete(el); });
+      acEl.appendChild(el);
+    }
+    selectAcIndex([...acEl.querySelectorAll(".ac-item")], 0);
+    acEl.classList.add("open");
+  }
+
+  function selectAcIndex(items, idx) {
+    items.forEach((el, i) => el.classList.toggle("selected", i === idx));
+    items[idx]?.scrollIntoView({ block: "nearest" });
+  }
+
+  function commitAutocomplete(item) {
+    if (item.dataset.kind === "slash") {
+      inputEl.value = "/" + item.dataset.cmd + " ";
+    } else if (item.dataset.kind === "mention") {
+      const v = inputEl.value;
+      const replaced = v.replace(/@([\w\-\[\]\\^{}|`]*)$/, `@${item.dataset.nick} `);
+      inputEl.value = replaced;
+    }
+    hideAutocomplete();
+    inputEl.focus();
+  }
+
+  function hideAutocomplete() { acEl.classList.remove("open"); }
+
+  function handleCommand(line) {
+    const [cmd, ...rest] = line.slice(1).split(/\s+/);
+    const arg = rest.join(" ").trim();
+    switch (cmd.toLowerCase()) {
+      case "join": {
+        if (!arg) return systemHint("usage: /join #channel");
+        const ch = arg.startsWith("#") || arg.startsWith("&") ? arg : "#" + arg;
+        send({ op: "join", channel: ch });
+        return true;
+      }
+      case "part":
+      case "leave": {
+        const ch = arg || (activeChannel === SERVER_TAB ? null : activeChannel);
+        if (!ch) return systemHint("usage: /part [#channel]");
+        send({ op: "part", channel: ch });
+        return true;
+      }
+      case "nick": {
+        if (!arg) return systemHint("usage: /nick <newnick>");
+        send({ op: "nick", nick: arg });
+        return true;
+      }
+      case "msg":
+      case "query": {
+        const [target, ...words] = arg.split(/\s+/);
+        if (!target) return systemHint(`usage: /${cmd} <nick> [message]`);
+        ensureChannel(target);
+        selectChannel(target);
+        const body = words.join(" ");
+        if (body) send({ op: "say", channel: target, text: body });
+        return true;
+      }
+      case "me": {
+        if (!arg || !activeChannel || activeChannel === SERVER_TAB)
+          return systemHint("usage: /me <action> (in a channel)");
+        send({ op: "say", channel: activeChannel, text: `\x01ACTION ${arg}\x01` });
+        return true;
+      }
+      case "ctcp": {
+        const [target, verb, ...rest] = arg.split(/\s+/);
+        if (!target || !verb) return systemHint("usage: /ctcp <target> <verb> [args]");
+        const body = rest.length ? ` ${rest.join(" ")}` : "";
+        send({ op: "say", channel: target, text: `\x01${verb.toUpperCase()}${body}\x01` });
+        appendSystem(activeChannel || SERVER_TAB, "→ CTCP",
+          `${target}: ${verb.toUpperCase()}${body}`);
+        return true;
+      }
+      case "notice": {
+        const [target, ...rest] = arg.split(/\s+/);
+        const body = rest.join(" ");
+        if (!target || !body) return systemHint("usage: /notice <target> <text>");
+        send({ op: "raw", line: `NOTICE ${target} :${body}` });
+        appendSystem(activeChannel || SERVER_TAB, "→ NOTICE", `${target}: ${body}`);
+        return true;
+      }
+      case "whois": {
+        if (!arg) return systemHint("usage: /whois <nick>");
+        send({ op: "whois", nick: arg });
+        return true;
+      }
+      case "list": {
+        send({ op: "list", pattern: arg });
+        systemHint(`/list dispatched${arg ? ` (pattern: ${arg})` : ""} — fetching…`);
+        return true;
+      }
+      case "who": {
+        if (!arg) return systemHint("usage: /who <#channel | mask>");
+        send({ op: "who", target: arg });
+        return true;
+      }
+      case "topic": {
+        if (!activeChannel || activeChannel === SERVER_TAB || !activeChannel.startsWith("#"))
+          return systemHint("usage: /topic [new topic] (in a channel)");
+        if (!arg) {
+          send({ op: "topic", channel: activeChannel });
+        } else {
+          send({ op: "topic", channel: activeChannel, topic: arg });
+        }
+        return true;
+      }
+      case "cycle": {
+        const ch = arg || (activeChannel === SERVER_TAB ? null : activeChannel);
+        if (!ch) return systemHint("usage: /cycle [#channel]");
+        send({ op: "part", channel: ch });
+        send({ op: "join", channel: ch });
+        return true;
+      }
+      case "invite": {
+        const [target, chan] = arg.split(/\s+/);
+        const channel = chan || (activeChannel?.startsWith("#") ? activeChannel : null);
+        if (!target || !channel) return systemHint("usage: /invite <nick> [#channel]");
+        send({ op: "raw", line: `INVITE ${target} ${channel}` });
+        return true;
+      }
+      case "away":
+        send({ op: "raw", line: arg ? `AWAY :${arg}` : "AWAY" });
+        return true;
+      case "back":
+        send({ op: "raw", line: "AWAY" });
+        return true;
+      case "raw":
+      case "quote": {
+        if (!arg) return systemHint("usage: /raw <line>");
+        send({ op: "raw", line: arg });
+        return true;
+      }
+      case "op":       return modeShortcut("+o", arg);
+      case "deop":     return modeShortcut("-o", arg);
+      case "voice":    return modeShortcut("+v", arg);
+      case "devoice":  return modeShortcut("-v", arg);
+      case "halfop":   return modeShortcut("+h", arg);
+      case "dehalfop": return modeShortcut("-h", arg);
+      case "kick": {
+        const [target, ...rest] = arg.split(/\s+/);
+        if (!target || !activeChannel?.startsWith("#"))
+          return systemHint("usage: /kick <nick> [reason] (in a channel)");
+        send({ op: "kick", channel: activeChannel, nick: target,
+               reason: rest.join(" ") });
+        return true;
+      }
+      case "ignore": {
+        if (!arg) return systemHint("usage: /ignore <nick>");
+        const nick = stripNickPrefix(arg);
+        if (!nick) return systemHint("usage: /ignore <nick>");
+        addIgnore(nick);
+        systemHint(`muted ${nick}. /unignore to undo.`);
+        return true;
+      }
+      case "unignore": {
+        if (!arg) return systemHint("usage: /unignore <nick>");
+        const nick = stripNickPrefix(arg);
+        if (!nick) return systemHint("usage: /unignore <nick>");
+        removeIgnore(nick);
+        systemHint(`unmuted ${nick}.`);
+        return true;
+      }
+      case "ignores":
+        if (ignored.size === 0) return systemHint("(no ignored users)");
+        systemHint(`ignored: ${[...ignored].sort().join(", ")}`);
+        return true;
+      case "theme":
+        $("themeToggle").click();
+        return true;
+      case "help":
+        appendMessage(activeChannel || SERVER_TAB, {
+          ts: Date.now() / 1000, nick: "*",
+          text: COMMANDS.map((c) =>
+            `${c.emoji}  /${c.name.padEnd(7)} ${c.syntax.padEnd(24)} — ${c.desc}`).join("\n"),
+          system: true, help: true,
+        });
+        return true;
+      default:
+        return systemHint(`unknown command: /${cmd}. try /help`);
+    }
+  }
+
+  function send(payload) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(payload)); }
+
+  function modeShortcut(modes, arg) {
+    if (!arg) return systemHint(`usage: /${modes[1]}... <nick> (in a channel)`);
+    if (!activeChannel || !activeChannel.startsWith("#"))
+      return systemHint("must be in a channel");
+    send({ op: "mode", channel: activeChannel, modes, target: arg.trim() });
+    return true;
+  }
+
+  function systemHint(text) {
+    appendMessage(activeChannel || SERVER_TAB, {
+      ts: Date.now() / 1000, nick: "*", text, system: true,
+    });
+    return true;
+  }
+
+  // --- Server events --------------------------------------------------------
+  // All inbound events serialize through this promise chain so an async
+  // step (state op opening IndexedDB) doesn't let later events overtake
+  // it. Without this, replayed messages can land before applyState seeds
+  // channels, producing partial sidebars and missing backlog.
+  let eventChain = Promise.resolve();
+  function handle(ev) {
+    eventChain = eventChain
+      .then(() => handleInternal(ev))
+      .catch((err) => console.warn("handle:", err));
+  }
+  async function handleInternal(ev) {
+    switch (ev.op) {
+      case "state":
+        myNick = ev.nick || myNick;
+        nickEl.textContent = myNick;
+        // Open / swap to the per-nick IndexedDB *before* seeding channel
+        // logs from persistedHistory; otherwise the seed runs against a
+        // stale (or empty) map. Subsequent state ops with the same nick
+        // are no-ops here.
+        await ensureDbForNick(myNick);
+        applyState(ev);
+        break;
+      case "server":
+        appendServer(ev.kind || "info", ev.text, ev.ts);
+        break;
+      case "message":
+        if (isIgnored(ev.nick)) break;
+        // Replayed messages come from the gateway's per-channel ring on
+        // (re)connect — for channels we kept open during the gap, this
+        // fills in lines we missed. Dedupe against persisted history so
+        // a busy channel that was always live doesn't re-render its
+        // last 200 lines on every reconnect.
+        if (ev.replayed && hasPersistedTwin(ev.channel, ev)) break;
+        appendMessage(ev.channel, ev);
+        break;
+      case "join": {
+        const ch = ensureChannel(ev.channel);
+        ch.members.set(ev.nick, "");
+        // Bot rejoined a backlog-only or kicked tab — clear the badges
+        // and re-enable the input. This is the self-healing path for
+        // the "you were kicked" UI.
+        if (ev.nick === myNick && (ch.parted || ch.kicked)) {
+          ch.parted = false;
+          ch.kicked = null;
+          renderChannels();
+          if (activeChannel === ev.channel) updateComposeForChannel(ev.channel);
+        }
+        appendSystem(ev.channel, ev.nick, "joined");
+        if (ev.nick === myNick) selectChannel(ev.channel);
+        else if (ev.channel === activeChannel) renderMembers();
+        break;
+      }
+      case "part": {
+        ensureChannel(ev.channel).members.delete(ev.nick);
+        appendSystem(ev.channel, ev.nick, ev.reason ? `left (${ev.reason})` : "left");
+        if (ev.channel === activeChannel) renderMembers();
+        if (ev.nick === myNick) closeChannel(ev.channel);
+        break;
+      }
+      case "kick": {
+        const ch = ensureChannel(ev.channel);
+        ch.members.delete(ev.nick);
+        const reason = ev.reason ? ` (${ev.reason})` : "";
+        appendSystem(ev.channel, ev.nick, `was kicked by ${ev.kicker}${reason}`);
+        if (ev.channel === activeChannel) renderMembers();
+        if (ev.nick === myNick) {
+          // Bot was kicked — keep the tab visible so the operator sees
+          // *why* and can /join back. Without this we silently drop the
+          // channel and the user keeps "sending" into a vanished tab.
+          ch.parted = true;
+          ch.kicked = { by: ev.kicker, reason: ev.reason || "", ts: Date.now() / 1000 };
+          ch.members = new Map();
+          appendSystem(
+            ev.channel,
+            "*",
+            `you were kicked by ${ev.kicker}${reason} — type /join ${ev.channel} to come back`,
+          );
+          renderChannels();
+          if (activeChannel === ev.channel) {
+            renderMembers();
+            updateComposeForChannel(ev.channel);
+          }
+        }
+        break;
+      }
+      case "join_failed": {
+        // Server rejected our JOIN. Open a tab with the error so the
+        // user sees what happened instead of a silent no-op.
+        const ch = ensureChannel(ev.channel);
+        ch.parted = true;
+        ch.kicked = {
+          by: "server",
+          reason: ev.reason || JOIN_FAIL_LABELS[ev.code] || ev.code || "join rejected",
+          code: ev.code,
+          ts: Date.now() / 1000,
+        };
+        ch.members = new Map();
+        appendSystem(
+          ev.channel,
+          "*",
+          `cannot join ${ev.channel}: ${ch.kicked.reason}`,
+        );
+        renderChannels();
+        if (activeChannel === ev.channel) updateComposeForChannel(ev.channel);
+        break;
+      }
+      case "nick":
+        for (const ch of channels.values()) {
+          if (ch.members?.has(ev.old)) {
+            ch.members.set(ev.new, ch.members.get(ev.old));
+            ch.members.delete(ev.old);
+          }
+        }
+        if (ev.old === myNick) {
+          myNick = ev.new;
+          nickEl.textContent = myNick;
+        }
+        for (const name of channels.keys()) {
+          if (name === SERVER_TAB) continue;
+          appendSystem(name, ev.old, `is now known as ${ev.new}`);
+        }
+        renderMembers();
+        break;
+      case "topic": {
+        const ch = ensureChannel(ev.channel);
+        ch.topic = ev.topic;
+        if (ev.channel === activeChannel) renderTopic();
+        appendSystem(ev.channel, ev.setBy || "*",
+          `set topic to: ${ev.topic || "(none)"}`);
+        break;
+      }
+      case "names": {
+        const ch = ensureChannel(ev.channel);
+        ch.members = new Map(ev.members.map((m) => [m.nick, m.mode || ""]));
+        if (ev.channel === activeChannel) renderMembers();
+        break;
+      }
+      case "mode_changed": {
+        const args = ev.args ? ` ${ev.args}` : "";
+        appendSystem(ev.channel, ev.setBy || "*",
+          `sets mode ${ev.modes}${args}`);
+        break;
+      }
+      case "whois_result":
+        showWhois(ev);
+        break;
+      case "list_result":
+        showListOverlay(ev.channels || []);
+        break;
+      case "who_result":
+        showWhoOverlay(ev.target, ev.users || []);
+        break;
+    }
+  }
+
+  // --- Whois ----------------------------------------------------------------
+  function requestWhois(nick) { send({ op: "whois", nick }); }
+
+  function showWhois(info) {
+    const overlay = $("whois-overlay");
+    const modal = $("whois-modal");
+    if (info.error) {
+      modal.innerHTML =
+        `<button class="icon close-btn" onclick="this.closest('#whois-overlay').classList.remove('open')">×</button>` +
+        `<h3>${escapeHtml(info.nick)}</h3>` +
+        `<div class="whois-error">${escapeHtml(info.error)}</div>`;
+    } else {
+      const rows = [];
+      const userHost = [info.user, info.host].filter(Boolean).join("@");
+      rows.push(["nick", info.nick]);
+      if (userHost) rows.push(["user@host", userHost]);
+      if (info.realName) rows.push(["real name", info.realName]);
+      if (info.account) rows.push(["account", info.account]);
+      if (info.server) rows.push(["server", info.server +
+        (info.serverInfo ? ` (${info.serverInfo})` : "")]);
+      if (info.idleSeconds != null) rows.push(["idle", formatIdle(info.idleSeconds)]);
+      if (info.signonAt != null)
+        rows.push(["signed on", new Date(info.signonAt * 1000).toLocaleString()]);
+      if (info.secure) rows.push(["secure", "TLS"]);
+      if (info.isOperator) rows.push(["status", "IRC operator"]);
+      const channelHtml = (info.channels || []).length
+        ? (info.channels.map((c) =>
+            `<span class="channel-chip">${escapeHtml(c)}</span>`).join(""))
+        : "<span style='color: var(--fg-dim)'>(none visible)</span>";
+      rows.push(["channels", channelHtml]);
+      modal.innerHTML =
+        `<button class="icon close-btn" onclick="this.closest('#whois-overlay').classList.remove('open')">×</button>` +
+        `<h3 style="color: ${nickColor(info.nick)}">${escapeHtml(info.nick)}</h3>` +
+        `<div class="whois-host">${escapeHtml(userHost || "—")}</div>` +
+        rows.map(([label, value]) => {
+          const isHtml = label === "channels";
+          return `<div class="whois-row"><span class="label">${label}</span>` +
+            `<span class="value">${isHtml ? value : escapeHtml(String(value))}</span></div>`;
+        }).join("");
+    }
+    overlay.classList.add("open");
+  }
+
+  function formatIdle(seconds) {
+    if (!seconds) return "0s";
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    return [h && `${h}h`, m && `${m}m`, `${s}s`].filter(Boolean).join(" ");
+  }
+
+  $("whois-overlay").addEventListener("click", (e) => {
+    if (e.target === $("whois-overlay")) e.target.classList.remove("open");
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      $("whois-overlay").classList.remove("open");
+      $("list-overlay").classList.remove("open");
+    }
+  });
+  $("list-overlay").addEventListener("click", (e) => {
+    if (e.target === $("list-overlay")) e.target.classList.remove("open");
+  });
+
+  // --- /list and /who overlays ---------------------------------------------
+  function showListOverlay(channels) {
+    const modal = $("list-modal");
+    modal.classList.remove("who");
+    const sorted = [...channels].sort((a, b) => (b.users || 0) - (a.users || 0));
+    renderListModal(modal, "Channels", sorted, (q) => {
+      const ql = q.toLowerCase();
+      return sorted.filter((c) =>
+        c.name.toLowerCase().includes(ql) || (c.topic || "").toLowerCase().includes(ql),
+      );
+    }, (rows) => {
+      if (!rows.length) return '<div class="empty">no channels match</div>';
+      return rows.map((c) =>
+        `<div class="list-row" data-action="join" data-name="${escapeAttr(c.name)}">` +
+        `<div class="name">${escapeHtml(c.name)}</div>` +
+        `<div class="users">${c.users || 0}</div>` +
+        `<div class="topic" title="${escapeAttr(c.topic || "")}">${escapeHtml(c.topic || "")}</div>` +
+        `</div>`,
+      ).join("");
+    });
+    modal.addEventListener("click", listOverlayClickHandler);
+    $("list-overlay").classList.add("open");
+  }
+
+  function showWhoOverlay(target, users) {
+    const modal = $("list-modal");
+    modal.classList.add("who");
+    renderListModal(modal, `Who: ${target}`, users, (q) => {
+      const ql = q.toLowerCase();
+      return users.filter((u) =>
+        u.nick.toLowerCase().includes(ql)
+        || (u.user || "").toLowerCase().includes(ql)
+        || (u.host || "").toLowerCase().includes(ql),
+      );
+    }, (rows) => {
+      if (!rows.length) return '<div class="empty">no users</div>';
+      return rows.map((u) =>
+        `<div class="list-row" data-action="query" data-name="${escapeAttr(u.nick)}">` +
+        `<div class="nick" style="color: ${nickColor(u.nick)}">${escapeHtml(u.flags || "")} ${escapeHtml(u.nick)}</div>` +
+        `<div class="userhost">${escapeHtml((u.user || "") + "@" + (u.host || ""))}</div>` +
+        `<div class="real">${escapeHtml(u.realName || "")}</div>` +
+        `</div>`,
+      ).join("");
+    });
+    modal.addEventListener("click", listOverlayClickHandler);
+    $("list-overlay").classList.add("open");
+  }
+
+  function renderListModal(modal, title, items, filterFn, renderFn) {
+    modal.innerHTML =
+      `<header><h3>${escapeHtml(title)} <span style="color: var(--fg-dim); font-weight: 400">(${items.length})</span></h3>` +
+      `<input type="search" placeholder="filter…" />` +
+      `<button class="icon" data-close="1">×</button></header>` +
+      `<div class="list-rows">${renderFn(items)}</div>`;
+    const search = modal.querySelector("input[type=search]");
+    const rows = modal.querySelector(".list-rows");
+    search.addEventListener("input", () => {
+      const filtered = filterFn(search.value.trim());
+      rows.innerHTML = renderFn(filtered);
+    });
+    search.focus();
+  }
+
+  function listOverlayClickHandler(e) {
+    const row = e.target.closest(".list-row");
+    if (row) {
+      const action = row.dataset.action;
+      const name = row.dataset.name;
+      if (action === "join") send({ op: "join", channel: name });
+      else if (action === "query") { ensureChannel(name); selectChannel(name); }
+      $("list-overlay").classList.remove("open");
+      return;
+    }
+    if (e.target.dataset.close) $("list-overlay").classList.remove("open");
+  }
+
+  function escapeAttr(s) { return escapeHtml(s).replace(/"/g, "&quot;"); }
+
+  // --- Channels & messages --------------------------------------------------
+  function applyState(ev) {
+    for (const c of ev.channels) {
+      const existing = channels.get(c.name);
+      const seedLog = existing?.log?.length
+        ? existing.log
+        : (persistedHistory.get(c.name) || []).slice();
+      channels.set(c.name, {
+        topic: c.topic,
+        members: new Map(c.members.map((m) => [m.nick, m.mode || ""])),
+        log: seedLog,
+        unread: 0, mentions: 0,
+      });
+    }
+    // Surface tabs for channels that have persisted backlog but aren't
+    // in the state op (the bot isn't currently joined — e.g. an upstream
+    // reconnect dropped them, or another client /parted before we
+    // reconnected). Without this, after a tab reload the user sees an
+    // empty sidebar and the backlog is invisible. Mark these as "parted"
+    // so the user knows the bot isn't there to send to.
+    const liveNames = new Set(ev.channels.map((c) => c.name));
+    for (const [name, log] of persistedHistory) {
+      if (name === SERVER_TAB || liveNames.has(name) || channels.has(name)) continue;
+      if (!log || log.length === 0) continue;
+      channels.set(name, {
+        topic: null, members: new Map(), log: log.slice(),
+        unread: 0, mentions: 0, parted: true,
+      });
+    }
+    renderChannels();
+    if (activeChannel) renderActiveLog();
+    else if (channels.size > 1) {
+      const first = [...channels.keys()].find((k) => k !== SERVER_TAB);
+      if (first) selectChannel(first);
+    }
+  }
+
+  function ensureServerTab() {
+    if (!channels.has(SERVER_TAB)) {
+      channels.set(SERVER_TAB, {
+        topic: null, members: new Map(), log: [], unread: 0, mentions: 0, special: true,
+      });
+    }
+  }
+
+  function ensureChannel(name) {
+    if (!channels.has(name)) {
+      const seedLog = persistedHistory.get(name) || [];
+      channels.set(name, {
+        topic: null, members: new Map(), log: [...seedLog],
+        unread: 0, mentions: 0,
+      });
+      renderChannels();
+    }
+    return channels.get(name);
+  }
+
+  function appendMessage(name, msg) {
+    const ch = ensureChannel(name);
+    ch.log.push(msg);
+    const isMention = msg.text && !msg.system && msg.nick !== myNick && mentionsMe(msg.text);
+    if (isMention) {
+      msg.mention = true;
+      if (name !== activeChannel) ch.mentions = (ch.mentions || 0) + 1;
+    }
+    persistMessage(name, msg);
+    maybeNotify(name, msg);
+    if (name !== activeChannel) {
+      ch.unread = (ch.unread || 0) + 1;
+      renderChannels();
+      updateTitle();
+    } else {
+      renderMessage(msg, ch);
+      // Channel is active and visible — user has "seen" this message.
+      if (msg.ts) saveLastSeen(name, msg.ts);
+    }
+  }
+
+  function appendSystem(name, nick, what) {
+    appendMessage(name, { ts: Date.now() / 1000, nick, text: what, system: true });
+  }
+
+  function appendServer(kind, text, ts) {
+    appendMessage(SERVER_TAB, {
+      ts: ts ?? Date.now() / 1000, nick: kindLabel(kind), text,
+      system: true, server: true, kind,
+    });
+  }
+
+  function kindLabel(kind) {
+    return ({ welcome: "welcome", motd: "motd", info: "info",
+              notice: "notice", error: "error" })[kind] || "*";
+  }
+
+  function closeChannel(name) {
+    if (name === SERVER_TAB) return;
+    channels.delete(name);
+    if (activeChannel === name) {
+      activeChannel = null;
+      const next = [...channels.keys()].find((k) => k !== SERVER_TAB) || SERVER_TAB;
+      selectChannel(next);
+    }
+    renderChannels();
+  }
+
+  function mentionsMe(text) {
+    if (!myNick || myNick === "—") return false;
+    const re = new RegExp(
+      `(^|[^\\w])${myNick.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}([^\\w]|$)`, "i");
+    return re.test(text);
+  }
+
+  // --- Rendering ------------------------------------------------------------
+  function sortedChannels() {
+    const all = [...channels.keys()];
+    const server = all.filter((n) => n === SERVER_TAB);
+    const chans = all.filter((n) => n !== SERVER_TAB && n.startsWith("#")).sort();
+    const queries = all.filter((n) => n !== SERVER_TAB && !n.startsWith("#")).sort();
+    return [...server, ...chans, ...queries];
+  }
+
+  function renderChannels() {
+    channelsEl.innerHTML = '<div class="pane-title">channels</div>';
+    for (const name of sortedChannels()) {
+      const ch = channels.get(name);
+      const el = document.createElement("div");
+      el.className = "channel" + (name === activeChannel ? " active" : "")
+        + (ch.special ? " server" : "")
+        + (ch.kicked ? " kicked" : (ch.parted ? " parted" : ""));
+      if (ch.kicked) {
+        const why = ch.kicked.by === "server"
+          ? ch.kicked.reason
+          : `kicked by ${ch.kicked.by}${ch.kicked.reason ? ` — ${ch.kicked.reason}` : ""}`;
+        el.title = `${why} — /join to retry`;
+      } else if (ch.parted) {
+        el.title = "not currently joined — backlog only";
+      } else {
+        el.title = "";
+      }
+      const icon = ch.kicked ? "⛔" : (ch.special ? "⚡" : (name.startsWith("#") ? "#" : "@"));
+      el.innerHTML =
+        `<span class="icon">${icon}</span>` +
+        `<span class="name">${escapeHtml(ch.special ? "server" : name.replace(/^#/, ""))}</span>`;
+      if (ch.unread > 0) {
+        const b = document.createElement("span");
+        b.className = "badge" + (ch.mentions > 0 ? " mention" : "");
+        b.textContent = String(ch.unread);
+        el.appendChild(b);
+      }
+      if (!ch.special) {
+        const close = document.createElement("span");
+        close.className = "close";
+        close.textContent = "×";
+        close.title = "leave";
+        close.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (ch.parted || ch.kicked) {
+            // Backlog-only or kicked tab: close locally — the bot isn't
+            // in the channel, so PART would 442 (NOTONCHANNEL).
+            closeChannel(name);
+          } else if (name.startsWith("#") || name.startsWith("&")) {
+            send({ op: "part", channel: name });
+          } else {
+            closeChannel(name);
+          }
+        });
+        el.appendChild(close);
+      }
+      el.addEventListener("click", () => selectChannel(name));
+      channelsEl.appendChild(el);
+    }
+  }
+
+  const MODE_RANK = { "~": 0, "&": 1, "@": 2, "%": 3, "+": 4, "": 5 };
+  const MODE_CLASS = { "~": "op", "&": "op", "@": "op", "%": "halfop", "+": "voice" };
+
+  function renderMembers() {
+    membersEl.innerHTML = '<div class="pane-title">members</div>';
+    if (!activeChannel || activeChannel === SERVER_TAB) return;
+    const ch = channels.get(activeChannel);
+    if (!ch) return;
+    const sorted = [...ch.members.entries()].sort((a, b) => {
+      const ra = MODE_RANK[a[1]] ?? 5;
+      const rb = MODE_RANK[b[1]] ?? 5;
+      if (ra !== rb) return ra - rb;
+      return a[0].localeCompare(b[0], undefined, { sensitivity: "base" });
+    });
+    for (const [nick, mode] of sorted) {
+      const el = document.createElement("div");
+      el.className = "member" + (MODE_CLASS[mode] ? " " + MODE_CLASS[mode] : "");
+      el.innerHTML =
+        `<span class="mode">${mode || "·"}</span>` +
+        `<span style="color: ${nickColor(nick)}">${escapeHtml(nick)}</span>`;
+      el.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        showMemberMenu(e.clientX, e.clientY, nick, mode);
+      });
+      el.addEventListener("dblclick", () => {
+        if (nick === myNick) return;
+        ensureChannel(nick);
+        selectChannel(nick);
+      });
+      membersEl.appendChild(el);
+    }
+  }
+
+  function renderTopic() {
+    const ch = channels.get(activeChannel);
+    if (!ch) { topicEl.innerHTML = ""; return; }
+    if (ch.special) {
+      topicEl.innerHTML =
+        `<span class="topic-icon">⚡</span><span class="topic-text">turborg server messages</span>`;
+      return;
+    }
+    if (ch.topic) {
+      topicEl.innerHTML =
+        `<span class="topic-icon">📌</span>` +
+        `<span class="topic-text">${linkify(escapeHtml(ch.topic))}</span>`;
+    } else {
+      topicEl.innerHTML = "";
+    }
+  }
+
+  function renderActiveLog() {
+    messagesEl.innerHTML = "";
+    const ch = channels.get(activeChannel);
+    if (!ch) return;
+    const lastSeen = loadLastSeen(activeChannel);
+    let lastDay = null;
+    let newSepDrawn = false;
+    for (const msg of ch.log) {
+      const day = new Date((msg.ts || 0) * 1000).toDateString();
+      if (day !== lastDay) {
+        const sep = document.createElement("div");
+        sep.className = "day-sep";
+        sep.innerHTML = `<span>${day}</span>`;
+        messagesEl.appendChild(sep);
+        lastDay = day;
+      }
+      // Discord-style "new messages since last visit" marker. Drawn once,
+      // before the first message strictly newer than what the user has
+      // seen, and only if some have been seen before (lastSeen > 0).
+      if (!newSepDrawn && lastSeen > 0 && (msg.ts || 0) > lastSeen) {
+        const newSep = document.createElement("div");
+        newSep.className = "new-sep";
+        newSep.innerHTML = `<span>new messages</span>`;
+        messagesEl.appendChild(newSep);
+        newSepDrawn = true;
+      }
+      renderMessage(msg, ch, true);
+    }
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function renderMessage(msg, ch, append = false) {
+    const el = document.createElement("div");
+    el.className = "msg"
+      + (msg.system ? " system" : "")
+      + (msg.help ? " help" : "")
+      + (msg.server ? " server " + (msg.kind || "") : "")
+      + (msg.mention ? " mention" : "");
+    const ts = new Date((msg.ts || 0) * 1000)
+      .toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    let nickHtml = msg.system
+      ? `<span class="nick">${escapeHtml(msg.nick)}</span>`
+      : `<span class="nick" style="color: ${nickColor(msg.nick)}">${escapeHtml(msg.nick)}</span>`;
+    let body;
+    if (!msg.system && isAction(msg.text)) {
+      el.classList.add("system");
+      nickHtml = `<span class="nick">* ${escapeHtml(msg.nick)}</span>`;
+      body = linkify(escapeHtml(actionText(msg.text)));
+    } else if (!msg.system && isCTCP(msg.text)) {
+      el.classList.add("system");
+      const verb = ctcpVerb(msg.text);
+      const ctArgs = ctcpArgs(msg.text);
+      nickHtml = `<span class="nick">* ${escapeHtml(msg.nick)}</span>`;
+      body = `[CTCP ${escapeHtml(verb)}]${ctArgs ? " " + escapeHtml(ctArgs) : ""}`;
+    } else {
+      body = linkify(escapeHtml(msg.text));
+    }
+    el.innerHTML = `<span class="ts">${ts}</span>${nickHtml}${body}`;
+    // Quote button on hover — inserts "> nick wrote: text" at the bottom
+    // of the compose box. Skip on system/server messages.
+    if (!msg.system && !msg.server) {
+      const quote = document.createElement("span");
+      quote.className = "quote-btn";
+      quote.textContent = " ↪";
+      quote.title = "quote into compose";
+      quote.addEventListener("click", () => quoteMessage(msg));
+      el.appendChild(quote);
+    }
+    messagesEl.appendChild(el);
+    if (!append) messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function quoteMessage(msg) {
+    const text = isAction(msg.text) ? actionText(msg.text)
+               : isCTCP(msg.text) ? `[CTCP ${ctcpVerb(msg.text)}]` : msg.text;
+    const quoted = `> ${msg.nick} wrote: ${text}\n`;
+    inputEl.value = (inputEl.value ? inputEl.value + "\n" : "") + quoted;
+    autoGrowInput();
+    inputEl.focus();
+    // Cursor at end.
+    inputEl.selectionStart = inputEl.selectionEnd = inputEl.value.length;
+  }
+
+  // Human-readable labels for the JOIN_FAILED `code` field — kept out of
+  // the case branch so they're easy to extend.
+  const JOIN_FAIL_LABELS = {
+    banned: "you're banned from this channel",
+    invite_only: "channel is invite-only",
+    full: "channel is full",
+    bad_key: "wrong channel key",
+  };
+
+  function updateComposeForChannel(name) {
+    const ch = channels.get(name);
+    const wsReady = ws && ws.readyState === 1;
+    if (ch?.kicked) {
+      // Locked-out tab — typing into chat would silently drop. Disable
+      // the input so the user knows; /commands still work via the
+      // dedicated handler (it inspects the raw text before this guard).
+      inputEl.disabled = !wsReady;
+      const why = ch.kicked.by === "server"
+        ? ch.kicked.reason
+        : `kicked by ${ch.kicked.by}${ch.kicked.reason ? ` — ${ch.kicked.reason}` : ""}`;
+      inputEl.placeholder = `${why} — /join ${name} to retry`;
+    } else if (ch?.parted) {
+      inputEl.disabled = !wsReady;
+      inputEl.placeholder = `not joined — type /join ${name} to come back`;
+    } else {
+      inputEl.disabled = !wsReady;
+      inputEl.placeholder = name === SERVER_TAB
+        ? "(server tab — only / commands here)"
+        : "message — type / for commands…";
+    }
+  }
+
+  function selectChannel(name) {
+    // Commit lastSeen for the channel we're leaving so the "new messages"
+    // marker is positioned correctly the next time we visit.
+    if (activeChannel && activeChannel !== name) {
+      const prev = channels.get(activeChannel);
+      const last = prev?.log?.length ? prev.log[prev.log.length - 1].ts : 0;
+      if (last) saveLastSeen(activeChannel, last);
+    }
+    activeChannel = name;
+    const ch = channels.get(name);
+    if (ch) { ch.unread = 0; ch.mentions = 0; }
+    renderChannels();
+    renderTopic();
+    renderMembers();
+    renderActiveLog();
+    updateComposeForChannel(name);
+    if (!inputEl.disabled) inputEl.focus();
+    updateTitle();
+    // Update lastSeen to "now" once the user has actually viewed the
+    // channel (so subsequent new-marker logic works).
+    if (ch?.log?.length) {
+      saveLastSeen(name, ch.log[ch.log.length - 1].ts || 0);
+    }
+  }
+
+  function setStatus(text, kind = "ok") {
+    statusTextEl.textContent = text;
+    statusDotEl.className = kind;
+    statusDotEl.title = text;
+  }
+
+  function updateTitle() {
+    let total = 0;
+    for (const ch of channels.values()) total += ch.mentions || 0;
+    document.title = total > 0 ? `(${total}) turborg` : "turborg";
+  }
+
+  // --- Right-click context menu --------------------------------------------
+  function showMemberMenu(x, y, nick, mode) {
+    if (!activeChannel || activeChannel === SERVER_TAB) return;
+    const channel = activeChannel;
+    const isOp = (channels.get(channel)?.members.get(myNick) || "") === "@" ||
+                 (channels.get(channel)?.members.get(myNick) || "") === "&" ||
+                 (channels.get(channel)?.members.get(myNick) || "") === "~";
+    const items = [];
+    items.push({ label: "🔍 Whois", action: () => requestWhois(nick) });
+    items.push({ label: "💬 Open query", action: () => {
+      ensureChannel(nick); selectChannel(nick);
+    }});
+    items.push({ label: "📋 Copy nick", action: () => {
+      if (navigator.clipboard) navigator.clipboard.writeText(nick);
+    }});
+    if (isOp) {
+      items.push({ sep: true });
+      if (mode !== "@") {
+        items.push({ label: "⬆️ Op (+o)", action: () =>
+          send({ op: "mode", channel, modes: "+o", target: nick }) });
+      } else {
+        items.push({ label: "⬇️ Deop (-o)", action: () =>
+          send({ op: "mode", channel, modes: "-o", target: nick }) });
+      }
+      if (mode !== "+") {
+        items.push({ label: "🎙️ Voice (+v)", action: () =>
+          send({ op: "mode", channel, modes: "+v", target: nick }) });
+      } else {
+        items.push({ label: "🤐 Devoice (-v)", action: () =>
+          send({ op: "mode", channel, modes: "-v", target: nick }) });
+      }
+      items.push({ sep: true });
+      items.push({ label: "🦶 Kick", danger: true, action: () => {
+        const reason = prompt(`Kick ${nick} — reason (optional)?`, "");
+        if (reason !== null) send({ op: "kick", channel, nick, reason });
+      }});
+    }
+    ctxEl.innerHTML = "";
+    for (const it of items) {
+      if (it.sep) {
+        const s = document.createElement("div");
+        s.className = "ctx-sep";
+        ctxEl.appendChild(s);
+        continue;
+      }
+      const el = document.createElement("div");
+      el.className = "ctx-item" + (it.danger ? " danger" : "");
+      el.textContent = it.label;
+      el.addEventListener("click", () => { hideCtx(); it.action(); });
+      ctxEl.appendChild(el);
+    }
+    // Position then constrain to viewport.
+    ctxEl.style.left = "0px";
+    ctxEl.style.top = "0px";
+    ctxEl.classList.add("open");
+    const r = ctxEl.getBoundingClientRect();
+    const left = Math.min(x, window.innerWidth - r.width - 8);
+    const top = Math.min(y, window.innerHeight - r.height - 8);
+    ctxEl.style.left = left + "px";
+    ctxEl.style.top = top + "px";
+  }
+  function hideCtx() { ctxEl.classList.remove("open"); }
+  document.addEventListener("click", (e) => {
+    if (!ctxEl.contains(e.target)) hideCtx();
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideCtx(); });
+  window.addEventListener("blur", hideCtx);
+
+  // --- Helpers --------------------------------------------------------------
+  function isAction(t) { return typeof t === "string" && t.startsWith("\x01ACTION ") && t.endsWith("\x01"); }
+  function actionText(t) { return t.slice("\x01ACTION ".length, -1); }
+
+  // CTCP wrap: \x01VERB [args]\x01. We don't auto-reply (saner default for a
+  // bot); just surface the request/reply as a visible system line.
+  function isCTCP(t) {
+    return typeof t === "string" && t.length > 2 && t.startsWith("\x01") && t.endsWith("\x01");
+  }
+  function ctcpVerb(t) {
+    const inner = t.slice(1, -1);
+    const sp = inner.indexOf(" ");
+    return (sp === -1 ? inner : inner.slice(0, sp)).toUpperCase();
+  }
+  function ctcpArgs(t) {
+    const inner = t.slice(1, -1);
+    const sp = inner.indexOf(" ");
+    return sp === -1 ? "" : inner.slice(sp + 1);
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    })[c]);
+  }
+  function linkify(escaped) {
+    return escaped.replace(/(https?:\/\/[^\s<&]+)/g, (url) =>
+      `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
+  }
+  function nickColor(nick) {
+    let hash = 0;
+    for (let i = 0; i < nick.length; i++) hash = (hash * 31 + nick.charCodeAt(i)) | 0;
+    const hue = Math.abs(hash) % 360;
+    const light = theme === "dark" ? 70 : 38;
+    return `hsl(${hue} 55% ${light}%)`;
+  }
+})();
+</script>
+
+</body>
+</html>
