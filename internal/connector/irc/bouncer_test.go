@@ -254,6 +254,95 @@ func TestBouncerEchoMessageFansBackToOriginator(t *testing.T) {
 	}
 }
 
+func TestBouncerZNCSelfMessageTagsBroadcast(t *testing.T) {
+	// HexChat 2.12-2.15 supports znc.in/self-message but not the
+	// standardized echo-message cap. The bouncer should advertise both
+	// and prefix fan-out lines with the @znc.in/self-message tag for
+	// clients that negotiated the legacy cap.
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#test")
+	b.AttachState(state, "bot", "user", "host")
+
+	// Connect a SECOND bouncer client (so the originator and observer
+	// roles are clearly separated). The observer negotiates the legacy
+	// cap; we then have the bouncer fan a self-message to it.
+	conn, r := bouncerClient(t, addr)
+	_, _ = r.ReadString('\n')
+	writeLine(t, conn, "CAP REQ :znc.in/self-message")
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	_, _ = r.ReadString('\n') // ACK
+	writeLine(t, conn, "PASS hunter2")
+	writeLine(t, conn, "CAP END")
+	for {
+		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		line, err := r.ReadString('\n')
+		if err != nil || strings.Contains(line, "366") {
+			break
+		}
+	}
+
+	b.BroadcastAsSelf("PRIVMSG StephenS :from somewhere else", nil)
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var sawTagged bool
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		if strings.Contains(line, "PRIVMSG StephenS :from somewhere else") {
+			assert.True(t, strings.HasPrefix(line, "@znc.in/self-message "),
+				"client with znc.in/self-message cap must receive the tag prefix; got %q", line)
+			sawTagged = true
+			break
+		}
+	}
+	assert.True(t, sawTagged, "broadcast never reached the cap-aware client")
+}
+
+func TestBouncerEchoMessageOnlyNoSelfMessageTag(t *testing.T) {
+	// Conversely, a client that negotiated echo-message (but NOT
+	// znc.in/self-message) must NOT see the legacy tag prepended —
+	// modern clients reject lines with unknown tags they didn't
+	// negotiate to receive.
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#test")
+	b.AttachState(state, "bot", "user", "host")
+
+	conn, r := bouncerClient(t, addr)
+	_, _ = r.ReadString('\n')
+	writeLine(t, conn, "CAP REQ :echo-message")
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	_, _ = r.ReadString('\n') // ACK
+	writeLine(t, conn, "PASS hunter2")
+	writeLine(t, conn, "CAP END")
+	for {
+		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		line, err := r.ReadString('\n')
+		if err != nil || strings.Contains(line, "366") {
+			break
+		}
+	}
+
+	b.BroadcastAsSelf("PRIVMSG StephenS :no tag here", nil)
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		if strings.Contains(line, "PRIVMSG StephenS :no tag here") {
+			assert.False(t, strings.HasPrefix(line, "@znc.in/self-message "),
+				"echo-message-only client must NOT see the legacy tag; got %q", line)
+			return
+		}
+	}
+	t.Fatal("broadcast never reached the echo-message client")
+}
+
 func TestBouncerWithoutEchoMessageExcludesOriginator(t *testing.T) {
 	b, addr := freshBouncer(t, "hunter2")
 	b.AttachUpstream(func(string) error { return nil })

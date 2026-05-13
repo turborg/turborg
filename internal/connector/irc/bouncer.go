@@ -499,13 +499,24 @@ func (b *Bouncer) handleLine(client *BouncerClient, line string) {
 }
 
 // supportedCaps is the set of IRCv3 capabilities the bouncer
-// advertises + ACKs. echo-message is the key one for multi-client
-// UX: with it negotiated, clients (HexChat, irssi, weechat) correctly
-// route bouncer-fanned self-echoes into the recipient's tab as
-// outgoing instead of opening a new query window with the bot's own
-// nick as the contact.
+// advertises + ACKs. Both serve the same multi-client UX: route
+// bouncer-fanned self-PRIVMSGs into the recipient's tab as outgoing
+// instead of opening a new query window with the bot's own nick.
+//
+//   - echo-message: standardized IRCv3 cap. HexChat 2.16+, recent
+//     irssi, weechat, KVIrc all support it natively. The bouncer
+//     uses the client-supplied prefix as-is.
+//   - znc.in/self-message: ZNC's pre-IRCv3 vendor cap. HexChat 2.12
+//     to 2.15 ship with built-in support for this but NOT for
+//     echo-message. When negotiated, the bouncer prefixes the fan-out
+//     line with `@znc.in/self-message` so the client knows it's a
+//     self-message echo.
+//
+// Advertising both is conservative: any client that handles either
+// gets the right rendering with no user config.
 var supportedCaps = map[string]bool{
-	"echo-message": true,
+	"echo-message":        true,
+	"znc.in/self-message": true,
 }
 
 func supportedCapsList() string {
@@ -727,14 +738,43 @@ func (b *Bouncer) Broadcast(line string, exclude *BouncerClient) {
 	}
 }
 
-// BroadcastAsSelf prepends the bot's nick!ident@host prefix and
-// broadcasts. Used so other bouncer clients see traffic the bot (or one
-// of them) sent — IRC servers don't echo own messages back.
+// BroadcastAsSelf prepends the bot's nick!ident@host prefix and fans
+// the resulting line to every authenticated bouncer client (except
+// `exclude`). Clients that negotiated `znc.in/self-message` additionally
+// get the line prefixed with the `@znc.in/self-message` IRCv3 tag so
+// their parser routes the line as outgoing instead of as a stranger
+// who shares the bouncer-identity nick.
+//
+// Channels are also recorded for replay. Note: clients that negotiated
+// `echo-message` (newer cap) need no extra tag — the spec says the
+// server's job is just to send the line and the client's job is to
+// recognize self-prefix.
 func (b *Bouncer) BroadcastAsSelf(line string, exclude *BouncerClient) {
-	if prefix := b.upstreamPrefix(); prefix != "" {
+	prefix := b.upstreamPrefix()
+	if prefix != "" {
 		line = prefix + " " + line
 	}
-	b.Broadcast(line, exclude)
+	b.recordForReplay(line)
+	b.mu.Lock()
+	clients := make([]*BouncerClient, 0, len(b.clients))
+	for c := range b.clients {
+		clients = append(clients, c)
+	}
+	b.mu.Unlock()
+	for _, c := range clients {
+		if c == exclude || !c.Authenticated() {
+			continue
+		}
+		toSend := line
+		if c.hasCap("znc.in/self-message") {
+			toSend = "@znc.in/self-message " + line
+		}
+		if err := c.sendLine(toSend); err != nil {
+			b.mu.Lock()
+			delete(b.clients, c)
+			b.mu.Unlock()
+		}
+	}
 }
 
 func (b *Bouncer) recordForReplay(line string) {
