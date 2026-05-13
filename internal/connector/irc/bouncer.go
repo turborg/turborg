@@ -65,6 +65,16 @@ type BouncerClient struct {
 
 	capMu sync.RWMutex
 	caps  map[string]bool
+	// capStarted is set on the client's first CAP LS / CAP REQ and
+	// cleared on CAP END. While true, registration is "suspended" per
+	// IRCv3 spec — the bouncer must hold the 001 welcome + state replay
+	// back until CAP END, so the client finishes cap negotiation before
+	// it processes its welcome. Without this, the 001 arrives before
+	// CAP END and the client treats every cap it negotiates as inactive
+	// for the current session, which (among other things) broke
+	// echo-message-driven self-message routing in HexChat.
+	capStarted      bool
+	welcomeDeferred bool
 }
 
 func newBouncerClient(conn net.Conn) *BouncerClient {
@@ -100,6 +110,40 @@ func (b *BouncerClient) ackCap(name string) {
 	b.capMu.Lock()
 	defer b.capMu.Unlock()
 	b.caps[name] = true
+}
+
+// startCapNeg marks the client as having entered IRCv3 cap negotiation
+// (sent CAP LS or CAP REQ). Registration is suspended until CAP END.
+func (b *BouncerClient) startCapNeg() {
+	b.capMu.Lock()
+	defer b.capMu.Unlock()
+	b.capStarted = true
+}
+
+// endCapNeg marks negotiation as done and returns whether a deferred
+// welcome should be flushed.
+func (b *BouncerClient) endCapNeg() bool {
+	b.capMu.Lock()
+	defer b.capMu.Unlock()
+	b.capStarted = false
+	if b.welcomeDeferred {
+		b.welcomeDeferred = false
+		return true
+	}
+	return false
+}
+
+// deferOrAllowWelcome reports whether the bouncer must defer the
+// welcome / state replay until CAP END, marking it as queued when so.
+// Returns true when the caller should send immediately.
+func (b *BouncerClient) deferOrAllowWelcome() bool {
+	b.capMu.Lock()
+	defer b.capMu.Unlock()
+	if b.capStarted {
+		b.welcomeDeferred = true
+		return false
+	}
+	return true
 }
 
 func (b *BouncerClient) Address() string {
@@ -382,12 +426,17 @@ func (b *Bouncer) handleLine(client *BouncerClient, line string) {
 		}
 		_ = client.sendLine(":turborg-bouncer PONG turborg-bouncer :" + cookie)
 		return
+	case CmdCap:
+		// CAP is handled regardless of auth state — it can arrive
+		// pre-registration (CAP LS / REQ / END) AND post-auth (CAP
+		// LIST, mid-session re-negotiation). Without this, a CAP END
+		// that arrived after PASS would fall through the forwardable
+		// filter and the deferred welcome would never flush.
+		b.handleCap(client, msg)
+		return
 	}
 
 	if !client.Authenticated() {
-		if msg.Command == CmdCap {
-			b.handleCap(client, msg)
-		}
 		// Real clients send a varied bag of pre-PASS commands; silently drop.
 		return
 	}
@@ -461,8 +510,10 @@ func (b *Bouncer) handleCap(client *BouncerClient, msg Message) {
 	}
 	switch sub {
 	case "LS":
+		client.startCapNeg()
 		_ = client.sendLine(":turborg-bouncer CAP * LS :" + supportedCapsList())
 	case "REQ":
+		client.startCapNeg()
 		requested := msg.Trailing
 		if requested == "" && len(msg.Params) > 1 {
 			requested = strings.Join(msg.Params[1:], " ")
@@ -491,9 +542,14 @@ func (b *Bouncer) handleCap(client *BouncerClient, msg Message) {
 		}
 		client.capMu.RUnlock()
 		_ = client.sendLine(":turborg-bouncer CAP * LIST :" + strings.Join(names, " "))
+	case "END":
+		// Registration unblocked. If PASS landed during negotiation,
+		// flush the welcome + state replay we held back so the client
+		// only sees them once its cap set is fully active.
+		if client.endCapNeg() {
+			b.sendWelcome(client)
+		}
 	}
-	// CAP END is silently accepted — clients send it to leave
-	// negotiation; we have nothing to do there.
 }
 
 func (b *Bouncer) handlePass(client *BouncerClient, params []string) {
@@ -513,15 +569,15 @@ func (b *Bouncer) handlePass(client *BouncerClient, params []string) {
 		}
 		b.log.Info("bouncer auth success", "ip", ip)
 
-		b.upstreamMu.RLock()
-		target := b.upstreamNick
-		b.upstreamMu.RUnlock()
-		if target == "" {
-			target = "*"
+		// IRCv3: if the client is mid-CAP-negotiation, hold the
+		// welcome + state replay until CAP END. Sending 001 now would
+		// finalize registration before the client's cap set is active
+		// — echo-message in particular wouldn't apply to the channel
+		// replay that follows, and HexChat then treats every
+		// bouncer-echoed self-PRIVMSG as an incoming stranger message.
+		if client.deferOrAllowWelcome() {
+			b.sendWelcome(client)
 		}
-		_ = client.sendLine(fmt.Sprintf(":turborg-bouncer 001 %s :Welcome to the turborg bouncer", target))
-		b.replayState(client)
-		b.replayChannelLogs(client)
 		return
 	}
 
@@ -539,6 +595,22 @@ func (b *Bouncer) handlePass(client *BouncerClient, params []string) {
 	}
 	_ = client.sendLine("ERROR :Closing Link (Bad password)")
 	_ = client.close()
+}
+
+// sendWelcome emits the 001 welcome + state replay + channel-log
+// replay for a freshly-authenticated client. Called either inline
+// from handlePass (no CAP negotiation in progress) or from CAP END
+// (client was negotiating caps when PASS authenticated).
+func (b *Bouncer) sendWelcome(client *BouncerClient) {
+	b.upstreamMu.RLock()
+	target := b.upstreamNick
+	b.upstreamMu.RUnlock()
+	if target == "" {
+		target = "*"
+	}
+	_ = client.sendLine(fmt.Sprintf(":turborg-bouncer 001 %s :Welcome to the turborg bouncer", target))
+	b.replayState(client)
+	b.replayChannelLogs(client)
 }
 
 func (b *Bouncer) replayState(client *BouncerClient) {

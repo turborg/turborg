@@ -134,6 +134,69 @@ func TestBouncerCapReqEchoMessageAcked(t *testing.T) {
 	assert.Contains(t, line, "CAP * ACK :echo-message")
 }
 
+func TestBouncerWelcomeDeferredUntilCapEnd(t *testing.T) {
+	// IRCv3: when a client enters CAP negotiation (CAP LS or CAP REQ),
+	// registration is suspended until CAP END. The bouncer must NOT
+	// emit the 001 welcome immediately after PASS — it must hold it
+	// until CAP END so the cap set is active at registration time.
+	_, addr := freshBouncer(t, "hunter2")
+	conn, r := bouncerClient(t, addr)
+	_, _ = r.ReadString('\n') // pre-auth NOTICE
+
+	writeLine(t, conn, "CAP LS")
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	line, err := r.ReadString('\n')
+	require.NoError(t, err)
+	require.Contains(t, line, "CAP * LS")
+
+	writeLine(t, conn, "CAP REQ :echo-message")
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	line, err = r.ReadString('\n')
+	require.NoError(t, err)
+	require.Contains(t, line, "CAP * ACK :echo-message")
+
+	writeLine(t, conn, "PASS hunter2")
+
+	// Before CAP END, 001 must NOT have arrived — read with a short
+	// deadline and expect a timeout.
+	conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	got, err := r.ReadString('\n')
+	if err == nil {
+		assert.NotContains(t, got, " 001 ",
+			"001 welcome leaked before CAP END; got %q", got)
+	}
+
+	writeLine(t, conn, "CAP END")
+
+	// Now 001 must arrive (the deferred welcome flushes).
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	found001 := false
+	for !found001 {
+		l, err := r.ReadString('\n')
+		if err != nil {
+			t.Fatalf("expected 001 after CAP END; got error %v", err)
+		}
+		if strings.Contains(l, " 001 ") {
+			found001 = true
+		}
+	}
+}
+
+func TestBouncerWelcomeImmediateWithoutCap(t *testing.T) {
+	// Client that never sends CAP LS gets normal registration —
+	// 001 fires immediately after PASS success. Regression for the
+	// non-IRCv3 client path.
+	_, addr := freshBouncer(t, "hunter2")
+	conn, r := bouncerClient(t, addr)
+	_, _ = r.ReadString('\n')
+
+	writeLine(t, conn, "PASS hunter2")
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	line, err := r.ReadString('\n')
+	require.NoError(t, err)
+	assert.Contains(t, line, " 001 ", "without CAP negotiation, 001 is immediate")
+}
+
 func TestBouncerCapReqMixedAckAndNak(t *testing.T) {
 	_, addr := freshBouncer(t, "hunter2")
 	conn, r := bouncerClient(t, addr)
