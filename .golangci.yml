@@ -1,0 +1,54 @@
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  default: none
+  enable:
+    # Default stdlib quality bar.
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    # Extras for production code.
+    - bodyclose          # http response.Body always closed
+    - copyloopvar        # forgotten i := i in goroutines
+    - gocyclo            # complexity ceiling
+    - gosec              # common security smells
+    - misspell           # English-language typos in comments + identifiers
+    - nakedret           # named returns must not be implicit
+    - prealloc           # slice grow-loops without preallocation
+    - revive             # style + common bugs
+    - unconvert          # redundant type conversions
+    - whitespace         # trailing/leading whitespace in funcs
+
+  settings:
+    gocyclo:
+      min-complexity: 18
+    revive:
+      rules:
+        - name: var-naming
+        - name: unused-parameter
+          disabled: true   # noisy; we use _ where the parameter is intentional
+        - name: indent-error-flow
+        - name: superfluous-else
+    gosec:
+      excludes:
+        - G104   # errors.Is/As preferred; we use _ = WriteLine for fire-and-forget
+        - G404   # math/rand seed is fine for test fixtures + non-crypto needs
+
+  exclusions:
+    rules:
+      # Tests get a more relaxed bar — fixtures + table tests + sleeps.
+      - path: _test\.go$
+        linters:
+          - gocyclo
+          - gosec
+          - errcheck
+      # Generated SDK code (none today, but reserve the pattern).
+      - path: ^vendor/
+        linters:
+          - all

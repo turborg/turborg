@@ -1,0 +1,82 @@
+version: 2
+
+project_name: turborg
+
+builds:
+  - id: turborg
+    main: ./cmd/turborg
+    binary: turborg
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/turborg/turborg/internal/version.Version={{.Version}}
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - NOTICE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+dockers:
+  - id: turborg-linux-amd64
+    use: buildx
+    goos: linux
+    goarch: amd64
+    image_templates:
+      - "ghcr.io/turborg/turborg:{{ .Version }}-amd64"
+      - "ghcr.io/turborg/turborg:latest-amd64"
+    dockerfile: Dockerfile.goreleaser
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.source=https://github.com/turborg/turborg"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+
+  - id: turborg-linux-arm64
+    use: buildx
+    goos: linux
+    goarch: arm64
+    image_templates:
+      - "ghcr.io/turborg/turborg:{{ .Version }}-arm64"
+      - "ghcr.io/turborg/turborg:latest-arm64"
+    dockerfile: Dockerfile.goreleaser
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.source=https://github.com/turborg/turborg"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+
+docker_manifests:
+  - name_template: "ghcr.io/turborg/turborg:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/turborg/turborg:{{ .Version }}-amd64"
+      - "ghcr.io/turborg/turborg:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/turborg/turborg:latest"
+    image_templates:
+      - "ghcr.io/turborg/turborg:latest-amd64"
+      - "ghcr.io/turborg/turborg:latest-arm64"
+
+changelog:
+  # release-please owns CHANGELOG.md; GoReleaser doesn't generate one.
+  disable: true
+
+release:
+  draft: false
+  prerelease: auto

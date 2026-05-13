@@ -1,0 +1,15 @@
+# Minimal Dockerfile consumed by GoReleaser's `dockers:` stage. The
+# binary is already built by GoReleaser; this file only assembles the
+# final image.
+FROM gcr.io/distroless/static-debian12:nonroot
+
+LABEL org.opencontainers.image.source="https://github.com/turborg/turborg"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
+COPY turborg /turborg
+
+EXPOSE 8765
+
+USER nonroot:nonroot
+ENTRYPOINT ["/turborg"]
+CMD ["run"]

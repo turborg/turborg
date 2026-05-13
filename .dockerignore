@@ -1,0 +1,32 @@
+# Build context exclusions — keep the image build cache layer cheap.
+.git
+.github
+.vscode
+.idea
+
+# Test + coverage artifacts
+*.test
+*.prof
+coverage.out
+coverage.html
+tests/
+
+# Local plans / Claude notes (gitignored anyway, but belt-and-suspenders).
+PLAN-*.md
+CLAUDE.md
+
+# Local environment overrides.
+.env
+.envrc
+
+# Docs / meta — not needed in the image.
+docs/
+CHANGELOG.md
+CONTRIBUTING.md
+SECURITY.md
+TRADEMARKS.md
+CODE_OF_CONDUCT.md
+CLA.md
+
+# Compose + override files.
+docker-compose*.yml
