@@ -1,44 +1,114 @@
+// Command turborg runs a turborg-go agent from environment-derived
+// settings. See README.md for the env-var contract.
 package main
 
 import (
 	"context"
 	"errors"
-	"log/slog"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"github.com/turborg/turborg/internal/agent"
-	"github.com/turborg/turborg/internal/connector/irc"
+	"github.com/spf13/cobra"
+	"github.com/turborg/turborg/internal/config"
+	"github.com/turborg/turborg/internal/logging"
+	"github.com/turborg/turborg/internal/runtime"
+	"github.com/turborg/turborg/internal/version"
 )
 
 func main() {
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if err := newRootCmd().Execute(); err != nil {
+		os.Exit(1)
+	}
+}
 
-	settings, err := irc.LoadSettings()
+func newRootCmd() *cobra.Command {
+	root := &cobra.Command{
+		Use:           "turborg",
+		Short:         "turborg — modular AI agent framework",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Version:       version.Version,
+	}
+	root.SetVersionTemplate("{{.Version}}\n")
+	root.AddCommand(newRunCmd())
+	return root
+}
+
+func newRunCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "run",
+		Short: "Run a turborg agent from environment-derived settings.",
+		Long: `Run a turborg agent from environment-derived settings.
+
+Default path: a single IRC connector. Required env:
+  TURBORG_IRC_HOSTNAME, TURBORG_IRC_NICK, TURBORG_IRC_CHANNELS
+
+Optional: TURBORG_ANTHROPIC_API_KEY enables the !ask command.
+
+Multi-connector: set TURBORG_CONNECTORS=irc[,...] to register every listed
+connector under one agent process. Each connector reads its own
+configuration from its prefixed env.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runE(cmd.OutOrStderr())
+		},
+	}
+}
+
+func runE(stderr interface{ Write(p []byte) (int, error) }) error {
+	settings, err := config.Load()
 	if err != nil {
-		log.Error("config", "err", err)
-		os.Exit(2)
+		return fmt.Errorf("config: %w", err)
 	}
-	if err := settings.Validate(); err != nil {
-		log.Error("config", "err", err)
-		os.Exit(2)
+	ircSettings, err := runtime.LoadIRCSettings()
+	if err != nil {
+		return err
 	}
 
-	a := agent.New(log)
-	a.AddConnector(irc.New(settings, log, a.Events))
+	log, err := logging.New(stderr, settings.LogLevel, settings.LogFormat)
+	if err != nil {
+		return err
+	}
+
+	built, err := runtime.Build(settings, ircSettings, log)
+	if err != nil {
+		return err
+	}
+
+	mode := "standalone"
+	if built.LLM != nil {
+		mode = "llm"
+	}
+	bouncerState := "off"
+	if ircSettings.BouncerEnabled() {
+		bouncerState = fmt.Sprintf("on@%s:%d", ircSettings.BouncerHost, ircSettings.BouncerPort)
+	}
+	webState := "off"
+	if built.Gateway != nil {
+		webState = fmt.Sprintf("on@%s:%d", settings.WebHost, settings.WebPort)
+	}
+	log.Info("turborg starting",
+		"version", version.Version,
+		"mode", mode,
+		"connectors", connectorNames(settings),
+		"bouncer", bouncerState,
+		"web", webState,
+	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	log.Info("turborg starting",
-		"host", settings.Hostname, "port", settings.Port, "tls", settings.UseTLS,
-		"nick", settings.Nick, "channels", settings.NormalizedChannels(),
-	)
-
-	if err := a.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		log.Error("agent run", "err", err)
-		os.Exit(1)
+	if err := runtime.Run(ctx, built); err != nil && !errors.Is(err, context.Canceled) {
+		return err
 	}
 	log.Info("turborg exited cleanly")
+	return nil
+}
+
+func connectorNames(s *config.Settings) []string {
+	if len(s.Connectors) > 0 {
+		return s.Connectors
+	}
+	return []string{"irc"}
 }

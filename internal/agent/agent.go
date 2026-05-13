@@ -43,6 +43,10 @@ func (a *Agent) AddConnector(c Connector) {
 	a.connectors = append(a.connectors, c)
 }
 
+// Log exposes the agent's logger for handlers + runtime composers that
+// want to attribute log lines back to the agent's scope.
+func (a *Agent) Log() *slog.Logger { return a.log }
+
 // Run starts every connector, supervises their Run loops inside an
 // errgroup, and drives the inbound envelope → CommandRegistry → outbound
 // envelope pipeline. Returns when ctx cancels or any goroutine in the
