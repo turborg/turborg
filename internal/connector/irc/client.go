@@ -18,11 +18,23 @@ type Client struct {
 }
 
 func Dial(ctx context.Context, host string, port int, useTLS bool) (*Client, error) {
+	return dial(ctx, host, port, useTLS, nil)
+}
+
+// dial is the internal Dial that accepts a custom *tls.Config. Tests
+// supply one with InsecureSkipVerify against a self-signed listener so
+// the TLS path can be exercised without setting up a real cert chain.
+// Production callers go through Dial, which passes nil → defaults.
+func dial(ctx context.Context, host string, port int, useTLS bool, tlsCfg *tls.Config) (*Client, error) {
 	addr := fmt.Sprintf("%s:%d", host, port)
 	var conn net.Conn
 	var err error
 	if useTLS {
-		d := &tls.Dialer{Config: &tls.Config{MinVersion: tls.VersionTLS12}}
+		cfg := tlsCfg
+		if cfg == nil {
+			cfg = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		d := &tls.Dialer{Config: cfg}
 		conn, err = d.DialContext(ctx, "tcp", addr)
 	} else {
 		var nd net.Dialer

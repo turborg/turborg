@@ -208,6 +208,47 @@ func TestRunStandaloneReturnsOnCtxCancel(t *testing.T) {
 	cancel()
 }
 
+func TestRunWithGatewayUnwindsOnAgentStartFailure(t *testing.T) {
+	// Web gateway is enabled; the IRC connector points at a port that
+	// is closed so Agent.Run fails fast. Run() must cancel the shared
+	// ctx so gateway.Serve also returns, and Wait must surface the
+	// agent error.
+	s := &config.Settings{
+		CommandPrefix:           "!",
+		WebPassword:             "p",
+		WebHost:                 "127.0.0.1",
+		WebPort:                 0,
+		WebMaxFailedAttempts:    5,
+		WebFailureWindowSeconds: 60,
+		WebLockoutSeconds:       300,
+	}
+	ircCfg := &irc.Settings{
+		Hostname:         "127.0.0.1",
+		Port:             1, // port 1 is the discard port — nothing listens
+		UseTLS:           false,
+		Nick:             "turborg",
+		HandshakeTimeout: 200 * time.Millisecond,
+	}
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	require.NotNil(t, b.Gateway)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- runtime.Run(ctx, b) }()
+
+	select {
+	case <-done:
+		// Either the agent's Dial-refused error surfaced, or the
+		// gateway listener race won — both unwound the pair, which is
+		// what we're testing.
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return within timeout when IRC start failed")
+	}
+}
+
+
 // --- fakeLLM stub --------------------------------------------------------
 
 type fakeLLM struct {

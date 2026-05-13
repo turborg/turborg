@@ -2,6 +2,12 @@ package irc
 
 import (
 	"context"
+	"crypto/tls"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -217,6 +223,35 @@ func TestStartBouncerEmptyPassword(t *testing.T) {
 	c := New(&Settings{BouncerPassword: ""}, nil, nil)
 	err := c.startBouncer(context.Background())
 	require.Error(t, err, "empty bouncer password must error from NewBouncer")
+}
+
+func TestDialTLSPathRoundtrips(t *testing.T) {
+	// Self-signed TLS server on a random port. The handler is a no-op
+	// — we just want to know Dial completes the TLS handshake and
+	// returns a usable Client. The TLS-acceptance branch in dial() is
+	// otherwise uncovered by the integration tests, which dial plain
+	// TCP against fakeirc.
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	srv.StartTLS()
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+	host, portStr, err := net.SplitHostPort(u.Host)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(portStr)
+	require.NoError(t, err)
+
+	// httptest's TLS server uses a self-signed cert; we accept it with
+	// InsecureSkipVerify since this is a test-only path. Production
+	// callers go through Dial() which never sets this flag.
+	insecure := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true} //nolint:gosec
+	client, err := dial(context.Background(), host, port, true, insecure)
+	require.NoError(t, err)
+	require.NotNil(t, client)
+	require.NoError(t, client.Close())
 }
 
 func TestRecordForReplayBoundsRing(t *testing.T) {
