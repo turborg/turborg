@@ -62,10 +62,17 @@ type BouncerClient struct {
 
 	authMu sync.Mutex
 	auth   bool
+
+	capMu sync.RWMutex
+	caps  map[string]bool
 }
 
 func newBouncerClient(conn net.Conn) *BouncerClient {
-	return &BouncerClient{conn: conn, reader: bufio.NewReader(conn)}
+	return &BouncerClient{
+		conn:   conn,
+		reader: bufio.NewReader(conn),
+		caps:   map[string]bool{},
+	}
 }
 
 func (b *BouncerClient) Authenticated() bool {
@@ -78,6 +85,21 @@ func (b *BouncerClient) setAuthenticated() {
 	b.authMu.Lock()
 	defer b.authMu.Unlock()
 	b.auth = true
+}
+
+// hasCap reports whether the client successfully negotiated the named
+// IRCv3 capability. The bouncer uses this to decide whether to fan
+// echoed self-messages back to clients that asked for echo-message.
+func (b *BouncerClient) hasCap(name string) bool {
+	b.capMu.RLock()
+	defer b.capMu.RUnlock()
+	return b.caps[name]
+}
+
+func (b *BouncerClient) ackCap(name string) {
+	b.capMu.Lock()
+	defer b.capMu.Unlock()
+	b.caps[name] = true
 }
 
 func (b *BouncerClient) Address() string {
@@ -391,8 +413,17 @@ func (b *Bouncer) handleLine(client *BouncerClient, line string) {
 	}
 	if msg.Command == CmdPrivmsg || msg.Command == CmdNotice {
 		// Server doesn't echo PRIVMSG / NOTICE back; broadcast to other
-		// bouncer clients ourselves.
-		b.BroadcastAsSelf(line, client)
+		// bouncer clients ourselves. If the originator negotiated
+		// echo-message (IRCv3), fan to them too — that's what the cap
+		// promises: "your own messages will come back to you so you
+		// can render them through the same incoming-message path that
+		// every other client uses." Without the cap, exclude the
+		// originator to avoid double-display.
+		var exclude *BouncerClient
+		if !client.hasCap("echo-message") {
+			exclude = client
+		}
+		b.BroadcastAsSelf(line, exclude)
 		if observer != nil && len(msg.Params) > 0 {
 			b.upstreamMu.RLock()
 			sender := b.upstreamNick
@@ -405,6 +436,24 @@ func (b *Bouncer) handleLine(client *BouncerClient, line string) {
 	}
 }
 
+// supportedCaps is the set of IRCv3 capabilities the bouncer
+// advertises + ACKs. echo-message is the key one for multi-client
+// UX: with it negotiated, clients (HexChat, irssi, weechat) correctly
+// route bouncer-fanned self-echoes into the recipient's tab as
+// outgoing instead of opening a new query window with the bot's own
+// nick as the contact.
+var supportedCaps = map[string]bool{
+	"echo-message": true,
+}
+
+func supportedCapsList() string {
+	out := make([]string, 0, len(supportedCaps))
+	for c := range supportedCaps {
+		out = append(out, c)
+	}
+	return strings.Join(out, " ")
+}
+
 func (b *Bouncer) handleCap(client *BouncerClient, msg Message) {
 	sub := ""
 	if len(msg.Params) > 0 {
@@ -412,14 +461,39 @@ func (b *Bouncer) handleCap(client *BouncerClient, msg Message) {
 	}
 	switch sub {
 	case "LS":
-		_ = client.sendLine(":turborg-bouncer CAP * LS :")
+		_ = client.sendLine(":turborg-bouncer CAP * LS :" + supportedCapsList())
 	case "REQ":
 		requested := msg.Trailing
 		if requested == "" && len(msg.Params) > 1 {
 			requested = strings.Join(msg.Params[1:], " ")
 		}
-		_ = client.sendLine(":turborg-bouncer CAP * NAK :" + requested)
+		ack := make([]string, 0)
+		nak := make([]string, 0)
+		for _, c := range strings.Fields(requested) {
+			if supportedCaps[c] {
+				client.ackCap(c)
+				ack = append(ack, c)
+			} else {
+				nak = append(nak, c)
+			}
+		}
+		if len(ack) > 0 {
+			_ = client.sendLine(":turborg-bouncer CAP * ACK :" + strings.Join(ack, " "))
+		}
+		if len(nak) > 0 {
+			_ = client.sendLine(":turborg-bouncer CAP * NAK :" + strings.Join(nak, " "))
+		}
+	case "LIST":
+		client.capMu.RLock()
+		names := make([]string, 0, len(client.caps))
+		for c := range client.caps {
+			names = append(names, c)
+		}
+		client.capMu.RUnlock()
+		_ = client.sendLine(":turborg-bouncer CAP * LIST :" + strings.Join(names, " "))
 	}
+	// CAP END is silently accepted — clients send it to leave
+	// negotiation; we have nothing to do there.
 }
 
 func (b *Bouncer) handlePass(client *BouncerClient, params []string) {

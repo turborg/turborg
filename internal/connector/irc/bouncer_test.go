@@ -111,6 +111,121 @@ func TestBouncerCapReqNak(t *testing.T) {
 	assert.Contains(t, line, "CAP * NAK :sasl multi-prefix")
 }
 
+func TestBouncerCapLSAdvertisesEchoMessage(t *testing.T) {
+	_, addr := freshBouncer(t, "hunter2")
+	conn, r := bouncerClient(t, addr)
+	_, _ = r.ReadString('\n')
+	writeLine(t, conn, "CAP LS")
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	line, err := r.ReadString('\n')
+	require.NoError(t, err)
+	assert.Contains(t, line, "echo-message",
+		"LS must advertise echo-message so attached clients can negotiate self-echo")
+}
+
+func TestBouncerCapReqEchoMessageAcked(t *testing.T) {
+	_, addr := freshBouncer(t, "hunter2")
+	conn, r := bouncerClient(t, addr)
+	_, _ = r.ReadString('\n')
+	writeLine(t, conn, "CAP REQ :echo-message")
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	line, err := r.ReadString('\n')
+	require.NoError(t, err)
+	assert.Contains(t, line, "CAP * ACK :echo-message")
+}
+
+func TestBouncerCapReqMixedAckAndNak(t *testing.T) {
+	_, addr := freshBouncer(t, "hunter2")
+	conn, r := bouncerClient(t, addr)
+	_, _ = r.ReadString('\n')
+	writeLine(t, conn, "CAP REQ :echo-message multi-prefix")
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	// Two replies: one ACK + one NAK; order isn't strictly defined.
+	first, err := r.ReadString('\n')
+	require.NoError(t, err)
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	second, err := r.ReadString('\n')
+	require.NoError(t, err)
+	combined := first + second
+	assert.Contains(t, combined, "ACK :echo-message")
+	assert.Contains(t, combined, "NAK :multi-prefix")
+}
+
+func TestBouncerEchoMessageFansBackToOriginator(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	b.AttachUpstream(func(string) error { return nil })
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#test")
+	b.AttachState(state, "bot", "user", "host")
+
+	conn, r := bouncerClient(t, addr)
+	_, _ = r.ReadString('\n')
+	// Negotiate echo-message before PASS so we have it active at PRIVMSG time.
+	writeLine(t, conn, "CAP REQ :echo-message")
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	_, _ = r.ReadString('\n') // ACK line
+	writeLine(t, conn, "PASS hunter2")
+	// Drain welcome + replay until 001.
+	for {
+		conn.SetReadDeadline(time.Now().Add(time.Second))
+		line, err := r.ReadString('\n')
+		if err != nil || strings.Contains(line, "001") {
+			break
+		}
+	}
+
+	writeLine(t, conn, "PRIVMSG #test :hello to myself")
+
+	// With echo-message active, the originator should receive a copy
+	// of its own PRIVMSG back. Without echo-message it would not.
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			t.Fatalf("expected echoed PRIVMSG but got error: %v", err)
+		}
+		if strings.Contains(line, "PRIVMSG #test :hello to myself") &&
+			strings.Contains(line, ":bot!user@host") {
+			return
+		}
+	}
+}
+
+func TestBouncerWithoutEchoMessageExcludesOriginator(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	b.AttachUpstream(func(string) error { return nil })
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#test")
+	b.AttachState(state, "bot", "user", "host")
+
+	conn, r := bouncerClient(t, addr)
+	_, _ = r.ReadString('\n')
+	// No CAP negotiation — echo-message not requested.
+	writeLine(t, conn, "PASS hunter2")
+	for {
+		conn.SetReadDeadline(time.Now().Add(time.Second))
+		line, err := r.ReadString('\n')
+		if err != nil || strings.Contains(line, "001") {
+			break
+		}
+	}
+
+	writeLine(t, conn, "PRIVMSG #test :hello local-only")
+
+	// 200ms should be more than enough — the originator must NOT
+	// see an echo of its own PRIVMSG when echo-message wasn't negotiated.
+	conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return // timeout = success: no echo received
+		}
+		if strings.Contains(line, "PRIVMSG #test :hello local-only") {
+			t.Fatalf("originator received its own message without echo-message cap: %s", line)
+		}
+	}
+}
+
 // --- PASS auth ------------------------------------------------------------
 
 func TestBouncerPassSuccess(t *testing.T) {

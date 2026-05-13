@@ -610,7 +610,29 @@ func (c *Connector) dispatchLine(ctx context.Context, line string) {
 		}
 	case RplEndOfNames:
 		if len(msg.Params) >= 2 {
-			c.state.OnNamesEnd(msg.Params[1])
+			channel := msg.Params[1]
+			c.state.OnNamesEnd(channel)
+			// Publish so the web gateway can push a fresh member
+			// list to attached WS clients. Without this, the
+			// `state` op the gateway sends on WS connect can be
+			// empty (server hasn't yet replied to JOIN with NAMES
+			// when the client connected) and the UI shows an empty
+			// member list until a full page reload triggers another
+			// `state` op.
+			if info := c.state.Get(channel); info != nil {
+				members := make([]map[string]string, 0, len(info.Members))
+				for nick, mode := range info.Members {
+					members = append(members, map[string]string{"nick": nick, "mode": mode})
+				}
+				c.publish(ctx, agent.Event{
+					Type: agent.EventChannelNames,
+					Fields: map[string]any{
+						"connector": c.Name(),
+						"channel":   channel,
+						"members":   members,
+					},
+				})
+			}
 		}
 	}
 }

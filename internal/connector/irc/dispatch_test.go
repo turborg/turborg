@@ -3,6 +3,7 @@ package irc_test
 import (
 	"context"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -172,6 +173,69 @@ func TestConnectorTracksTopicAndNumerics(t *testing.T) {
 }
 
 // --- Events fired -------------------------------------------------------
+
+func TestEndOfNamesPublishesChannelNamesEvent(t *testing.T) {
+	// Regression: state.OnNamesEnd was firing but nothing was publishing
+	// EventChannelNames, so the web gateway never pushed a refreshed
+	// member list to existing WS clients. After a bot restart, the WS
+	// `state` op on connect saw an empty channel (NAMES hadn't arrived
+	// yet) and the member list stayed empty until a full page reload.
+	a := agent.New(nil)
+	var (
+		gotMu sync.Mutex
+		got   *agent.Event
+	)
+	a.Events.Subscribe(agent.EventChannelNames, func(_ context.Context, ev *agent.Event) {
+		gotMu.Lock()
+		got = ev
+		gotMu.Unlock()
+	})
+
+	fs := fakeirc.New(t)
+	conn := irc.New(&irc.Settings{
+		Hostname: "127.0.0.1",
+		Port:     fs.Port(),
+		Nick:     "turborg",
+		Channels: []string{"#test"},
+	}, nil, a.Events)
+	a.AddConnector(conn)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+	defer func() {
+		cancel()
+		<-done
+		fs.Close()
+	}()
+
+	require.True(t, fs.WaitFor(containsPrefix("JOIN #test"), 2*time.Second))
+
+	require.NoError(t, fs.SendLine(":fake 353 turborg = #test :@turborg +alice bob"))
+	require.NoError(t, fs.SendLine(":fake 366 turborg #test :End of /NAMES list"))
+
+	require.Eventually(t, func() bool {
+		gotMu.Lock()
+		defer gotMu.Unlock()
+		return got != nil
+	}, time.Second, 10*time.Millisecond,
+		"RplEndOfNames must publish EventChannelNames so the gateway can refresh WS clients")
+
+	gotMu.Lock()
+	captured := got
+	gotMu.Unlock()
+	assert.Equal(t, "#test", captured.Fields["channel"])
+
+	members, ok := captured.Fields["members"].([]map[string]string)
+	require.True(t, ok, "members field must be []map[string]string")
+	nicks := map[string]string{}
+	for _, m := range members {
+		nicks[m["nick"]] = m["mode"]
+	}
+	assert.Equal(t, "@", nicks["turborg"])
+	assert.Equal(t, "+", nicks["alice"])
+	assert.Equal(t, "", nicks["bob"])
+}
 
 func TestConnectorPublishesLifecycleEvents(t *testing.T) {
 	a := agent.New(nil)
