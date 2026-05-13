@@ -416,12 +416,37 @@ func (g *Gateway) dispatchInbound(p map[string]any) {
 		if ch == "" || text == "" {
 			return
 		}
-		_ = g.sender.Send(&agent.OutboundEnvelope{
+		if err := g.sender.Send(&agent.OutboundEnvelope{
 			Connector:         "irc",
 			ConnectorInstance: "default",
 			Channel:           ch,
 			Text:              text,
-		})
+		}); err != nil {
+			g.log.Warn("web say send", "err", err)
+			return
+		}
+		// Publish MESSAGE_SENT so the gateway's own onMessageSent
+		// handler echoes the message back to every connected WS client
+		// (including the one that typed it). Without this, the sender
+		// types into the box, the message goes to IRC and to other WS
+		// clients via the bus, but the originator never sees it in
+		// their own UI because IRC servers don't echo own PRIVMSGs and
+		// the only path that would have triggered MESSAGE_SENT — the
+		// agent's command dispatch — isn't on the WS "say" code path.
+		g.mu.Lock()
+		bus := g.bus
+		g.mu.Unlock()
+		if bus != nil {
+			bus.Publish(context.Background(), &agent.Event{
+				Type: agent.EventMessageSent,
+				Fields: map[string]any{
+					"connector": "irc",
+					"channel":   ch,
+					"sender":    g.bridge.CurrentNick(),
+					"text":      text,
+				},
+			})
+		}
 	case "join":
 		if ch, _ := p["channel"].(string); ch != "" {
 			_ = g.bridge.SendRaw(irc.CmdJoin + " " + ch)

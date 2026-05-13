@@ -555,15 +555,12 @@ func (c *Connector) handlePrivmsg(ctx context.Context, msg Message, raw string) 
 		env.Channel = sender
 	}
 
-	c.publish(ctx, agent.Event{
-		Type: agent.EventMessage,
-		Fields: map[string]any{
-			"connector": c.Name(),
-			"channel":   env.Channel,
-			"sender":    sender,
-			"text":      text,
-		},
-	})
+	// EventMessage is the agent's responsibility — Agent.handle publishes
+	// it when it drains the inbox. Publishing from here too produced
+	// duplicate fan-outs to subscribers (most visibly: the WS gateway
+	// broadcasting every inbound PRIVMSG twice). The connector only
+	// owns lifecycle + IRC-specific events (USER_JOIN, TOPIC_CHANGED,
+	// etc.); message-shaped events are the agent's lane.
 
 	select {
 	case c.inbox <- env:
