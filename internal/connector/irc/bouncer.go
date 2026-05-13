@@ -499,24 +499,40 @@ func (b *Bouncer) handleLine(client *BouncerClient, line string) {
 }
 
 // supportedCaps is the set of IRCv3 capabilities the bouncer
-// advertises + ACKs. Both serve the same multi-client UX: route
-// bouncer-fanned self-PRIVMSGs into the recipient's tab as outgoing
-// instead of opening a new query window with the bot's own nick.
+// advertises + ACKs. The set mirrors what ZNC offers (minus SASL,
+// which the bouncer handles via PASS instead) — empirically HexChat
+// 2.16's auto-cap-request only kicks in when it sees a "richer"
+// IRCv3 LS reply. With just `echo-message znc.in/self-message`
+// advertised, HexChat 2.16 silently skipped the REQ; with the fuller
+// list below it negotiates properly.
 //
-//   - echo-message: standardized IRCv3 cap. HexChat 2.16+, recent
-//     irssi, weechat, KVIrc all support it natively. The bouncer
-//     uses the client-supplied prefix as-is.
-//   - znc.in/self-message: ZNC's pre-IRCv3 vendor cap. HexChat 2.12
-//     to 2.15 ship with built-in support for this but NOT for
-//     echo-message. When negotiated, the bouncer prefixes the fan-out
-//     line with `@znc.in/self-message` so the client knows it's a
-//     self-message echo.
+// What each cap means for the bouncer:
 //
-// Advertising both is conservative: any client that handles either
-// gets the right rendering with no user config.
+//   - echo-message: standardized IRCv3 self-message cap. The bouncer
+//     fans self-PRIVMSG / NOTICE to clients that negotiate it so they
+//     can render in the recipient's tab as outgoing.
+//   - znc.in/self-message: ZNC's pre-IRCv3 predecessor. When
+//     negotiated, the fan-out line is prefixed with the
+//     `@znc.in/self-message` tag so the legacy handler routes it.
+//   - message-tags: framework cap that enables server-side IRCv3
+//     `@...` tags on the wire. The bouncer passes through whatever
+//     tags upstream emitted (notably @time= and @account=).
+//   - server-time: lets upstream's `@time=ISO8601` tag round-trip to
+//     the bouncer client. Pure pass-through.
+//   - account-tag: lets upstream's `@account=<nick>` tag round-trip.
+//     Pure pass-through.
+//   - away-notify: when an upstream user goes away/back, the server
+//     sends AWAY notifications. Pure pass-through.
+//
+// All listed caps are honored by the existing dispatchLine →
+// Broadcast path; advertising them costs nothing extra.
 var supportedCaps = map[string]bool{
 	"echo-message":        true,
 	"znc.in/self-message": true,
+	"message-tags":        true,
+	"server-time":         true,
+	"account-tag":         true,
+	"away-notify":         true,
 }
 
 func supportedCapsList() string {
