@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 	"github.com/turborg/turborg/internal/config"
 	"github.com/turborg/turborg/internal/logging"
@@ -57,6 +58,12 @@ configuration from its prefixed env.`,
 }
 
 func runE(stderr interface{ Write(p []byte) (int, error) }) error {
+	// Best-effort .env load matching the Python pydantic-settings
+	// behavior. A missing file is fine — real env vars still apply.
+	// Real env vars take precedence over .env entries (godotenv.Load
+	// only sets vars that aren't already set in the process env).
+	_ = godotenv.Load()
+
 	settings, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("config: %w", err)

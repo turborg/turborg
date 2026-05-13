@@ -94,6 +94,12 @@ func (c *Connector) Send(env *agent.OutboundEnvelope) error {
 // returning only when RPL_ENDOFMOTD or ERR_NOMOTD has arrived (or the
 // handshake-timeout elapses).
 func (c *Connector) Start(ctx context.Context) error {
+	c.log.Info("irc connecting",
+		"host", c.settings.Hostname,
+		"port", c.settings.Port,
+		"tls", c.settings.UseTLS,
+		"nick", c.settings.Nick,
+	)
 	cli, err := Dial(ctx, c.settings.Hostname, c.settings.Port, c.settings.UseTLS)
 	if err != nil {
 		return err
@@ -108,13 +114,16 @@ func (c *Connector) Start(ctx context.Context) error {
 		_ = cli.Close()
 		return err
 	}
+	c.log.Info("irc handshake complete", "nick", c.settings.Nick)
 	for _, ch := range c.settings.NormalizedChannels() {
+		c.log.Info("irc joining channel", "channel", ch)
 		if err := c.client.WriteLine(CmdJoin + " " + ch); err != nil {
 			_ = cli.Close()
 			return fmt.Errorf("irc JOIN %s: %w", ch, err)
 		}
 	}
 	if c.settings.NickServPassword != "" {
+		c.log.Info("irc identifying with NickServ")
 		if err := c.client.WriteLine(
 			fmt.Sprintf("%s NickServ :IDENTIFY %s", CmdPrivmsg, c.settings.NickServPassword),
 		); err != nil {
@@ -351,10 +360,23 @@ func (c *Connector) awaitHandshake(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("irc handshake: %w", err)
 		}
+		c.log.Debug("irc <<", "line", line)
 		msg := Parse(line)
 		if msg.Command == CmdPing {
 			c.respondPong(msg)
 			continue
+		}
+		// Surface the common pre-MOTD errors loudly. Without this the
+		// connector silently sits waiting for 376 until the handshake
+		// timeout fires — looks identical to "bot is dead" from the
+		// outside.
+		switch msg.Command {
+		case ErrNickNameInUse:
+			return fmt.Errorf("irc handshake: nickname %q already in use (433); set TURBORG_IRC_NICK to a free nick", c.settings.Nick)
+		case ErrPasswdMismatch:
+			return fmt.Errorf("irc handshake: server password rejected (464)")
+		case ErrNotRegistered:
+			return fmt.Errorf("irc handshake: server rejected pre-registration command (451)")
 		}
 		if IsHandshakeComplete(msg.Command) {
 			return nil
@@ -440,6 +462,7 @@ func (c *Connector) dispatch(ctx context.Context, lines <-chan string) error {
 }
 
 func (c *Connector) dispatchLine(ctx context.Context, line string) {
+	c.log.Debug("irc <<", "line", line)
 	msg := Parse(line)
 
 	// Forward every observed upstream line to attached bouncer clients

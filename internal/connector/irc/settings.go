@@ -56,7 +56,34 @@ func LoadSettings() (*Settings, error) {
 	if err := env.ParseWithOptions(s, env.Options{Prefix: "TURBORG_IRC_"}); err != nil {
 		return nil, err
 	}
+	// Normalize Channels — accept both CSV (#a,#b) and the legacy
+	// Python pydantic-settings JSON-list (["#a","#b"]) format so an
+	// existing .env from the Python repo is a drop-in. Tolerates leading
+	// "[" / trailing "]" / surrounding quotes on individual entries.
+	s.Channels = parseChannelList(strings.Join(s.Channels, ","))
 	return s, nil
+}
+
+// parseChannelList accepts CSV or a single JSON-array-shaped string and
+// returns a clean slice of channel names. Trims whitespace and any
+// stray single/double quotes around individual entries.
+func parseChannelList(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimPrefix(raw, "[")
+	raw = strings.TrimSuffix(raw, "]")
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		p = strings.Trim(p, `"'`)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // NormalizedChannels returns Channels with a '#' prefix added where the
