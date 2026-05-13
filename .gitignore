@@ -1,0 +1,27 @@
+# Build artifacts
+bin/
+dist/
+
+# Test / coverage
+coverage.out
+coverage.html
+*.test
+*.prof
+
+# Local environment
+.env
+.envrc
+
+# IDE / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local-only plans + Claude notes
+PLAN-*.md
+CLAUDE.md
