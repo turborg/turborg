@@ -343,6 +343,77 @@ func TestBouncerEchoMessageOnlyNoSelfMessageTag(t *testing.T) {
 	t.Fatal("broadcast never reached the echo-message client")
 }
 
+func TestBouncerSuppressesSelfDMToClientWithoutCap(t *testing.T) {
+	// Self-prefixed PRIVMSG to a nickname (DM) addressed to clients
+	// without echo-message / znc.in/self-message must NOT be fanned —
+	// otherwise HexChat opens a new query window with the bot's own
+	// nick as the contact, which is the user-reported bug we're
+	// fixing.
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	b.AttachState(state, "bot", "user", "host")
+
+	conn, r := bouncerClient(t, addr)
+	_, _ = r.ReadString('\n')
+	// No CAP — purposely the worst-case client.
+	writeLine(t, conn, "PASS hunter2")
+	for {
+		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		line, err := r.ReadString('\n')
+		if err != nil || strings.Contains(line, "001") {
+			break
+		}
+	}
+
+	b.BroadcastAsSelf("PRIVMSG StephenS :from web", nil)
+
+	conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return // timeout = success: client did not receive the DM fan
+		}
+		if strings.Contains(line, "PRIVMSG StephenS :from web") {
+			t.Fatalf("cap-less client received self-DM fan: %s", line)
+		}
+	}
+}
+
+func TestBouncerFansSelfChannelMessageToClientWithoutCap(t *testing.T) {
+	// Channel-targeted self-PRIVMSG must still fan to every attached
+	// client, cap or no cap — without the fan, HexChat in the channel
+	// wouldn't see traffic the web client originated, and conversation
+	// context would be broken across surfaces.
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#test")
+	b.AttachState(state, "bot", "user", "host")
+
+	conn, r := bouncerClient(t, addr)
+	_, _ = r.ReadString('\n')
+	writeLine(t, conn, "PASS hunter2")
+	for {
+		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		line, err := r.ReadString('\n')
+		if err != nil || strings.Contains(line, "366") {
+			break
+		}
+	}
+
+	b.BroadcastAsSelf("PRIVMSG #test :greeting from web", nil)
+
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			t.Fatalf("expected channel fan to a cap-less client, got error: %v", err)
+		}
+		if strings.Contains(line, "PRIVMSG #test :greeting from web") {
+			return // pass
+		}
+	}
+}
+
 func TestBouncerWithoutEchoMessageExcludesOriginator(t *testing.T) {
 	b, addr := freshBouncer(t, "hunter2")
 	b.AttachUpstream(func(string) error { return nil })

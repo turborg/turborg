@@ -739,22 +739,35 @@ func (b *Bouncer) Broadcast(line string, exclude *BouncerClient) {
 }
 
 // BroadcastAsSelf prepends the bot's nick!ident@host prefix and fans
-// the resulting line to every authenticated bouncer client (except
-// `exclude`). Clients that negotiated `znc.in/self-message` additionally
-// get the line prefixed with the `@znc.in/self-message` IRCv3 tag so
-// their parser routes the line as outgoing instead of as a stranger
-// who shares the bouncer-identity nick.
+// the resulting line to authenticated bouncer clients.
 //
-// Channels are also recorded for replay. Note: clients that negotiated
-// `echo-message` (newer cap) need no extra tag — the spec says the
-// server's job is just to send the line and the client's job is to
-// recognize self-prefix.
+// Routing policy:
+//   - Channel-targeted PRIVMSG / NOTICE (target starts with #/&/+/!):
+//     fan to every authenticated client. Without echo-message the line
+//     still renders in the right channel tab on every client — it just
+//     isn't styled as own-outgoing. Acceptable.
+//   - Direct (nick-targeted) PRIVMSG / NOTICE: ONLY fan to clients that
+//     negotiated echo-message or znc.in/self-message. Without one of
+//     those caps the line opens a new query window with the bot's own
+//     nick as the contact (HexChat) or otherwise misroutes — worse
+//     than not showing the line at all. Operators who want web DMs
+//     visible in their IRC client must use one with working
+//     echo-message support.
+//   - Non-PRIVMSG/NOTICE self-prefixed fans (JOIN, PART, NICK echoes
+//     from a fellow bouncer client): fan to every client, as before.
+//
+// Clients with znc.in/self-message additionally receive the
+// @znc.in/self-message IRCv3 tag prefix so their pre-echo-message
+// handler routes the line correctly.
 func (b *Bouncer) BroadcastAsSelf(line string, exclude *BouncerClient) {
 	prefix := b.upstreamPrefix()
 	if prefix != "" {
 		line = prefix + " " + line
 	}
 	b.recordForReplay(line)
+
+	isDM := isDirectMessage(line)
+
 	b.mu.Lock()
 	clients := make([]*BouncerClient, 0, len(b.clients))
 	for c := range b.clients {
@@ -763,6 +776,13 @@ func (b *Bouncer) BroadcastAsSelf(line string, exclude *BouncerClient) {
 	b.mu.Unlock()
 	for _, c := range clients {
 		if c == exclude || !c.Authenticated() {
+			continue
+		}
+		hasCap := c.hasCap("echo-message") || c.hasCap("znc.in/self-message")
+		if isDM && !hasCap {
+			// Suppress: without a self-message cap the line renders
+			// as a stranger DMing the bouncer-identity nick. Cleaner
+			// to skip than to display wrongly.
 			continue
 		}
 		toSend := line
@@ -775,6 +795,23 @@ func (b *Bouncer) BroadcastAsSelf(line string, exclude *BouncerClient) {
 			b.mu.Unlock()
 		}
 	}
+}
+
+// isDirectMessage reports whether the given fully-prefixed line is a
+// PRIVMSG or NOTICE addressed to a nickname rather than a channel.
+func isDirectMessage(line string) bool {
+	msg := Parse(line)
+	if msg.Command != CmdPrivmsg && msg.Command != CmdNotice {
+		return false
+	}
+	if len(msg.Params) == 0 {
+		return false
+	}
+	target := msg.Params[0]
+	if target == "" {
+		return false
+	}
+	return !startsWithChannelSigil(target)
 }
 
 func (b *Bouncer) recordForReplay(line string) {
