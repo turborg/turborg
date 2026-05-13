@@ -1,0 +1,27 @@
+# turborg code owners
+#
+# Lines later in the file take precedence. The default rule covers everything.
+# Add per-area rules below as the team grows and people specialize.
+#
+# `@turborg/maintainers` is the GitHub team that owns review across the repo.
+# Create the team in the turborg GitHub organization before the first PR is
+# opened, otherwise GitHub will warn that the owner is unknown.
+
+*                                @turborg/maintainers
+
+# Connectors
+/internal/connector/             @turborg/maintainers
+
+# LLM providers
+/internal/llm/                   @turborg/maintainers
+
+# Hive (future)
+/internal/hive/                  @turborg/maintainers
+
+# CI / release / security tooling
+/.github/                        @turborg/maintainers
+/release-please-config.json      @turborg/maintainers
+/.release-please-manifest.json   @turborg/maintainers
+/.goreleaser.yml                 @turborg/maintainers
+/.testcoverage.yml               @turborg/maintainers
+/.golangci.yml                   @turborg/maintainers

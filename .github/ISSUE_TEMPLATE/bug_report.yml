@@ -1,0 +1,73 @@
+name: Bug report
+description: Something is broken or behaves unexpectedly.
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill in as much detail as you can.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear and concise description of the bug.
+      placeholder: When I run `turborg run`, it crashes with...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps that reliably reproduce the bug. A short code snippet beats prose.
+      placeholder: |
+        1. Install turborg 0.1.0 with `go install github.com/turborg/turborg/cmd/turborg@latest`
+        2. Set TURBORG_IRC_HOSTNAME=...
+        3. Run `turborg run`
+        4. ...
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: turborg-version
+    attributes:
+      label: turborg version
+      description: From `turborg --version`.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      description: From `go version` (only required if you built from source).
+      placeholder: "go1.26.0"
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Ubuntu 24.04 / macOS 14 / Windows 11"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / stack trace
+      render: shell
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?

@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Job `name:` values are the load-bearing strings here — branch
+# protection in turborg-manage Pulumi stack references them verbatim.
+# Renaming a job below means updating
+# infra/stacks/turborg_manage/turborg_manage.py in the same PR.
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.1.6
+
+  test:
+    name: Test (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.25.x", "1.26.x"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+      - name: go mod verify
+        run: go mod verify
+      - name: go vet
+        run: go vet ./...
+      - name: go test (race + coverage)
+        run: go test -race -count=1 -timeout 180s -coverprofile=coverage.out -covermode=atomic ./internal/...
+      - name: Upload coverage profile
+        if: matrix.go == '1.26.x'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-profile
+          path: coverage.out
+          retention-days: 7
+
+  coverage-gate:
+    name: Coverage gate (≥ thresholds)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Download coverage profile
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-profile
+      - name: Enforce coverage thresholds
+        run: |
+          go install github.com/vladopajic/go-test-coverage/v2@latest
+          go-test-coverage --config .testcoverage.yml
+
+  build:
+    name: Build (linux/amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go build
+        run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /tmp/turborg ./cmd/turborg
+      - name: turborg --version
+        run: /tmp/turborg --version

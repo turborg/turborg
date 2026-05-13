@@ -1,0 +1,47 @@
+name: Connector request
+description: Propose a new connector (Discord, Telegram, WhatsApp, web, ...).
+labels: ["connector", "enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing a new connector. Connectors are the bridge between turborg and a transport (IRC, Discord, etc.).
+        Read [docs/writing-a-connector.md](https://github.com/turborg/turborg/blob/main/docs/writing-a-connector.md) first — you may want to contribute the connector yourself.
+
+  - type: input
+    id: protocol
+    attributes:
+      label: Protocol / platform
+      placeholder: "Discord / Telegram / WhatsApp / Matrix / Slack / web / ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: What kind of bot would you build with this connector?
+    validations:
+      required: true
+
+  - type: textarea
+    id: library
+    attributes:
+      label: Recommended client library
+      description: Is there a Go library you'd build on top of? (e.g. discordgo, go-telegram-bot-api)
+
+  - type: dropdown
+    id: contributing
+    attributes:
+      label: Are you willing to contribute this connector?
+      options:
+        - "Yes, I'd like to write it"
+        - "Maybe, with guidance"
+        - "No, just requesting"
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
