@@ -129,7 +129,22 @@ func (c *Connector) Send(env *agent.OutboundEnvelope) error {
 // Start opens the TCP/TLS connection and completes the IRCv3 handshake,
 // returning only when RPL_ENDOFMOTD or ERR_NOMOTD has arrived (or the
 // handshake-timeout elapses).
+//
+// If the bouncer is enabled, its TCP listener is bound BEFORE the
+// upstream Dial — this way HexChat / irssi-style clients can connect
+// to the bouncer immediately on bot startup instead of seeing
+// connection-refused during the ~6s upstream-handshake window. Pre-
+// bound clients see an empty initial state on auth; once the upstream
+// handshake finishes and the bot starts observing JOIN echoes, those
+// JOIN lines fan to the connected client and the channel state
+// catches up live.
 func (c *Connector) Start(ctx context.Context) error {
+	if c.settings.BouncerEnabled() {
+		if err := c.startBouncer(ctx); err != nil {
+			return err
+		}
+	}
+
 	c.log.Info("irc connecting",
 		"host", c.settings.Hostname,
 		"port", c.settings.Port,
@@ -182,12 +197,9 @@ func (c *Connector) Start(ctx context.Context) error {
 		c.ctcp = tr
 	}
 
-	if c.settings.BouncerEnabled() {
-		if err := c.startBouncer(ctx); err != nil {
-			_ = cli.Close()
-			return err
-		}
-	}
+	// Bouncer was pre-bound at the top of Start; nothing to do here —
+	// its sendUpstream closure references c.client which is now set,
+	// so forwarded commands from clients work transparently.
 
 	c.publish(ctx, agent.Event{
 		Type: agent.EventReady,
@@ -224,9 +236,15 @@ func (c *Connector) startBouncer(ctx context.Context) error {
 		return err
 	}
 	b.AttachState(c.state, c.CurrentNick(), c.settings.EffectiveUsername(), "turborg")
+	// sendUpstream is set before c.client is, so guard the dereference.
+	// Pre-bound bouncer clients that try to send forwardable commands
+	// before the upstream Dial completes get an error back rather than
+	// a nil-deref panic. Once Connector.Start has set c.client, sends
+	// go through transparently.
 	b.AttachUpstream(func(line string) error {
-		// Client.WriteLine logs at DEBUG; no per-callsite duplication
-		// here — the bouncer-tunneled lines show up in the same trace.
+		if c.client == nil {
+			return errors.New("irc: upstream not yet connected; please retry")
+		}
 		return c.client.WriteLine(line)
 	})
 	if c.events != nil {
