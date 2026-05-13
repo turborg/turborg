@@ -60,6 +60,9 @@ type BouncerClient struct {
 	reader *bufio.Reader
 	wmu    sync.Mutex
 
+	logMu sync.RWMutex
+	log   *slog.Logger
+
 	authMu sync.Mutex
 	auth   bool
 
@@ -77,12 +80,19 @@ type BouncerClient struct {
 	welcomeDeferred bool
 }
 
-func newBouncerClient(conn net.Conn) *BouncerClient {
+func newBouncerClient(conn net.Conn, log *slog.Logger) *BouncerClient {
 	return &BouncerClient{
 		conn:   conn,
 		reader: bufio.NewReader(conn),
 		caps:   map[string]bool{},
+		log:    log,
 	}
+}
+
+func (b *BouncerClient) currentLog() *slog.Logger {
+	b.logMu.RLock()
+	defer b.logMu.RUnlock()
+	return b.log
 }
 
 func (b *BouncerClient) Authenticated() bool {
@@ -154,6 +164,9 @@ func (b *BouncerClient) Address() string {
 }
 
 func (b *BouncerClient) sendLine(line string) error {
+	if log := b.currentLog(); log != nil {
+		log.Debug("bouncer >>", "client", b.Address(), "line", line)
+	}
 	b.wmu.Lock()
 	defer b.wmu.Unlock()
 	_, err := b.conn.Write([]byte(strings.TrimRight(line, "\r\n") + "\r\n"))
@@ -371,7 +384,7 @@ func (b *Bouncer) acceptLoop(ctx context.Context, l net.Listener) {
 			b.log.Debug("bouncer accept", "err", err)
 			return
 		}
-		client := newBouncerClient(conn)
+		client := newBouncerClient(conn, b.log)
 		b.mu.Lock()
 		b.clients[client] = struct{}{}
 		b.mu.Unlock()
