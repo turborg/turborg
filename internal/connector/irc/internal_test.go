@@ -292,6 +292,64 @@ func TestNonSelfNickChangeDoesNotShiftBotNick(t *testing.T) {
 		"another user's NICK must not change the bot's own nick")
 }
 
+func TestSplitIdentHost(t *testing.T) {
+	cases := []struct {
+		in    string
+		ident string
+		host  string
+		ok    bool
+	}{
+		{"bot!~user@cloak.example", "~user", "cloak.example", true},
+		{"bot!u@h", "u", "h", true},
+		{"server.example.net", "", "", false},
+		{"bot", "", "", false},
+		{"bot!u-no-at", "", "", false},
+		{"", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			ident, host, ok := splitIdentHost(tc.in)
+			assert.Equal(t, tc.ok, ok)
+			assert.Equal(t, tc.ident, ident)
+			assert.Equal(t, tc.host, host)
+		})
+	}
+}
+
+func TestSelfPrefixedUpstreamLineUpdatesBouncerIdentity(t *testing.T) {
+	// Regression: BroadcastAsSelf used to fan messages with a synthetic
+	// "ident@turborg" prefix that didn't match HexChat's idea of its
+	// own identity (the real "~ident@cloak"). Echo-message-routed
+	// self-PRIVMSGs were rejected as not-mine. Now any self-prefixed
+	// upstream line teaches the bouncer the real ident/host.
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	c.bouncer = b
+	b.AttachState(c.state, "bot", "fakeuser", "turborg")
+
+	c.dispatchLine(context.Background(), ":bot!~realident@user/realcloak JOIN #test")
+
+	prefix := b.upstreamPrefix()
+	assert.Contains(t, prefix, "~realident@user/realcloak",
+		"observed self-prefix must replace the synthetic ident@turborg fallback")
+}
+
+func TestNonSelfPrefixedLineDoesNotMoveBouncerIdentity(t *testing.T) {
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	c.bouncer = b
+	b.AttachState(c.state, "bot", "originaluser", "originalhost")
+
+	c.dispatchLine(context.Background(), ":alice!~someoneelse@elsewhere.com PRIVMSG #test :hi")
+
+	prefix := b.upstreamPrefix()
+	assert.Contains(t, prefix, "originaluser@originalhost",
+		"foreign-prefixed lines must not shift bouncer's idea of OUR identity")
+	assert.NotContains(t, prefix, "someoneelse")
+}
+
 // --- Outbound logging + secret masking --------------------------------
 
 type recordHandler struct {

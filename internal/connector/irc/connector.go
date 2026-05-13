@@ -559,6 +559,24 @@ func (c *Connector) dispatchLine(ctx context.Context, line string) {
 		c.bouncer.Broadcast(line, nil)
 	}
 
+	// Every self-prefixed upstream line carries the real ident@host
+	// the network assigned to the bot — JOIN echo, MODE echo, NICK
+	// echo, etc. Feed those values to the bouncer so its synthetic
+	// JOIN replay + BroadcastAsSelf fan-out use the same prefix the
+	// attached client learned for its own self-identity. Without
+	// this, the bouncer prefix is "ident@turborg" (a synthetic
+	// hardcoded host) while HexChat's self-identity from upstream is
+	// "~ident@user/account-cloak", and echo-message-routed self
+	// PRIVMSGs don't match — HexChat treats them as messages from a
+	// stranger who happens to share the user's nick.
+	if msg.Prefix != "" && c.bouncer != nil {
+		if nick := Nick(msg.Prefix); nick != "" && nick == c.CurrentNick() {
+			if ident, host, ok := splitIdentHost(msg.Prefix); ok {
+				c.bouncer.UpdateUpstreamIdentity(ident, host)
+			}
+		}
+	}
+
 	switch msg.Command {
 	case CmdPing:
 		c.respondPong(msg)

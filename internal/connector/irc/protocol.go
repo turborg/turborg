@@ -146,3 +146,19 @@ func Nick(prefix string) string {
 	}
 	return prefix
 }
+
+// splitIdentHost parses "nick!ident@host" into (ident, host, true). For
+// server-origin or malformed prefixes ("server.example.net", "nick",
+// "nick!ident-no-host") it returns ("", "", false).
+func splitIdentHost(prefix string) (ident, host string, ok bool) {
+	bang := strings.IndexByte(prefix, '!')
+	if bang < 0 {
+		return "", "", false
+	}
+	rest := prefix[bang+1:]
+	at := strings.IndexByte(rest, '@')
+	if at < 0 {
+		return "", "", false
+	}
+	return rest[:at], rest[at+1:], true
+}
