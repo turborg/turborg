@@ -9,6 +9,7 @@ require (
 )
 
 require (
+	github.com/caarlos0/env/v11 v11.4.1 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/kr/text v0.2.0 // indirect
