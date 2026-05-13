@@ -388,6 +388,79 @@ func TestInboundSayCallsSender(t *testing.T) {
 	assert.Equal(t, "hello via ws", out.Text)
 }
 
+func TestInboundSayPublishesMessageSentBackToSender(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	g, _, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	_ = readJSON(t, conn) // state
+
+	body, _ := json.Marshal(map[string]any{
+		"op": "say", "channel": "#test", "text": "echo to self",
+	})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	got := readJSON(t, conn)
+	assert.Equal(t, "message", got["op"], "say must produce a message op back to the sender")
+	assert.Equal(t, "#test", got["channel"])
+	assert.Equal(t, "turborg", got["nick"], "sender must be the bot's current nick")
+	assert.Equal(t, "echo to self", got["text"])
+}
+
+func TestMessageSentFromAgentDispatchRendersCorrectly(t *testing.T) {
+	// Regression: Agent.handle publishes EventMessageSent with the
+	// envelope-only Fields shape. Earlier the gateway only looked at
+	// channel/sender/text, dropping the message on the floor when a
+	// command reply (!ping → pong) flowed through. This test pretends
+	// to be agent.handle and verifies the WS broadcast has the
+	// channel + nick + text the UI needs to render.
+	bridge := newFakeBridge("bot")
+	g, a, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	_ = readJSON(t, conn) // state
+
+	out := &agent.OutboundEnvelope{
+		Connector: "irc",
+		Channel:   "alice",
+		Text:      "pong",
+	}
+	a.Events.Publish(context.Background(), &agent.Event{
+		Type:   agent.EventMessageSent,
+		Fields: map[string]any{"envelope": out},
+	})
+
+	got := readJSON(t, conn)
+	assert.Equal(t, "message", got["op"])
+	assert.Equal(t, "alice", got["channel"], "channel must come from the envelope")
+	assert.Equal(t, "pong", got["text"], "text must come from the envelope")
+	assert.Equal(t, "bot", got["nick"], "sender falls back to bridge.CurrentNick when the publisher didn't pass one")
+}
+
+func TestInboundSayUsesCurrentNickAfterChange(t *testing.T) {
+	bridge := newFakeBridge("orig")
+	g, _, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	_ = readJSON(t, conn) // state shows "orig"
+
+	// Bot renames itself. In production, irc.Connector.setCurrentNick
+	// fires from the 001 welcome or an observed self-NICK; here we
+	// flip the fake bridge directly to isolate the test.
+	bridge.nick = "renamed"
+
+	body, _ := json.Marshal(map[string]any{"op": "say", "channel": "#x", "text": "after rename"})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	got := readJSON(t, conn)
+	assert.Equal(t, "renamed", got["nick"],
+		"say after nick change must echo with the new nick, not the stale one")
+}
+
 func TestInboundJoinPartNickKickWhois(t *testing.T) {
 	bridge := newFakeBridge("turborg")
 	g, _, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})

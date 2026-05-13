@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -114,7 +115,8 @@ func (c *Connector) Send(env *agent.OutboundEnvelope) error {
 		return errors.New("irc: not connected")
 	}
 	line := fmt.Sprintf("%s %s :%s", CmdPrivmsg, env.Channel, env.Text)
-	c.log.Debug("irc >>", "line", line, "via", "agent.Send")
+	// "irc >>" log line fires from Client.WriteLine for every outbound
+	// write — no per-callsite duplication.
 	if err := c.client.WriteLine(line); err != nil {
 		return err
 	}
@@ -138,6 +140,7 @@ func (c *Connector) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	cli.SetLog(c.log)
 	c.client = cli
 
 	if err := c.register(ctx); err != nil {
@@ -222,7 +225,8 @@ func (c *Connector) startBouncer(ctx context.Context) error {
 	}
 	b.AttachState(c.state, c.CurrentNick(), c.settings.EffectiveUsername(), "turborg")
 	b.AttachUpstream(func(line string) error {
-		c.log.Debug("irc >>", "line", line, "via", "bouncer")
+		// Client.WriteLine logs at DEBUG; no per-callsite duplication
+		// here — the bouncer-tunneled lines show up in the same trace.
 		return c.client.WriteLine(line)
 	})
 	if c.events != nil {
@@ -457,9 +461,19 @@ func (c *Connector) Run(ctx context.Context) error {
 		return nil
 	})
 
+	// Reader: enforces the silent-death idle timeout from settings.
+	// Each iteration resets the read deadline to now + idle; if no
+	// data arrives within the window, Go's net layer returns a
+	// timeout error and Run unwinds. Without this, a half-dead TLS
+	// socket (NAT idle, peer crashed) parks the bot indefinitely —
+	// the exact bug the Python silent-death fix addressed.
 	g.Go(func() error {
 		defer close(lines)
+		idle := c.settings.ReadIdleTimeout
 		for {
+			if idle > 0 {
+				_ = c.client.SetReadDeadline(time.Now().Add(idle))
+			}
 			line, err := c.client.ReadLine()
 			if err != nil {
 				if gctx.Err() != nil {
@@ -467,6 +481,13 @@ func (c *Connector) Run(ctx context.Context) error {
 				}
 				var ne net.Error
 				if errors.As(err, &ne) && ne.Timeout() {
+					// Distinguish operator-initiated shutdown (Unblock)
+					// from real silent-death idle. The former implies
+					// gctx is done (handled above); arriving here means
+					// the read genuinely timed out with no data.
+					if idle > 0 {
+						return fmt.Errorf("irc read idle: no data for %s", idle)
+					}
 					return nil
 				}
 				return fmt.Errorf("irc read: %w", err)
@@ -475,6 +496,34 @@ func (c *Connector) Run(ctx context.Context) error {
 			case lines <- line:
 			case <-gctx.Done():
 				return nil
+			}
+		}
+	})
+
+	// Client-initiated PING keep-alive. Forces the read side to receive
+	// SOMETHING (a PONG) at a predictable cadence so NAT mappings stay
+	// warm and a stalled socket trips the idle timeout above instead of
+	// hanging forever. Cadence must be lower than ReadIdleTimeout (the
+	// Settings.Validate cross-check enforces this).
+	g.Go(func() error {
+		interval := c.settings.ClientPingInterval
+		if interval <= 0 {
+			return nil
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-gctx.Done():
+				return nil
+			case <-ticker.C:
+				token := strconv.FormatInt(time.Now().Unix(), 10)
+				if err := c.client.WriteLine(CmdPing + " :" + token); err != nil {
+					if gctx.Err() != nil {
+						return nil
+					}
+					return fmt.Errorf("irc client ping: %w", err)
+				}
 			}
 		}
 	})

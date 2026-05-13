@@ -1,13 +1,16 @@
 package irc
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -252,6 +255,125 @@ func TestDialTLSPathRoundtrips(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, client)
 	require.NoError(t, client.Close())
+}
+
+// --- Live-nick sync ---------------------------------------------------
+
+func TestRplWelcomeSyncsCurrentNick(t *testing.T) {
+	c := New(&Settings{Nick: "requested"}, nil, nil)
+	require.Equal(t, "requested", c.CurrentNick())
+
+	c.dispatchLine(context.Background(), ":fake 001 reborn :Welcome to the Internet Relay Chat Network reborn")
+	assert.Equal(t, "reborn", c.CurrentNick(),
+		"001's first param is the server-assigned nick; live nick must follow")
+}
+
+func TestSelfNickChangeSyncsCurrentNickAndBouncer(t *testing.T) {
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	c.bouncer = b
+	b.AttachState(c.state, "bot", "user", "host")
+
+	c.dispatchLine(context.Background(), ":bot!u@h NICK :renamed")
+
+	assert.Equal(t, "renamed", c.CurrentNick(),
+		"self-NICK observed must update CurrentNick")
+	prefix := b.upstreamPrefix()
+	assert.Contains(t, prefix, "renamed!",
+		"setCurrentNick must propagate to the bouncer's upstream prefix")
+}
+
+func TestNonSelfNickChangeDoesNotShiftBotNick(t *testing.T) {
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+	c.dispatchLine(context.Background(), ":alice!u@h NICK :alice2")
+	assert.Equal(t, "bot", c.CurrentNick(),
+		"another user's NICK must not change the bot's own nick")
+}
+
+// --- Outbound logging + secret masking --------------------------------
+
+type recordHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *recordHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
+func (h *recordHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r)
+	return nil
+}
+func (h *recordHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h *recordHandler) WithGroup(_ string) slog.Handler      { return h }
+
+func (h *recordHandler) lines() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]string, 0, len(h.records))
+	for _, r := range h.records {
+		if r.Message == "irc >>" {
+			r.Attrs(func(a slog.Attr) bool {
+				if a.Key == "line" {
+					out = append(out, a.Value.String())
+				}
+				return true
+			})
+		}
+	}
+	return out
+}
+
+func TestClientWriteLineLogsAtDebug(t *testing.T) {
+	// Pair of net.Pipes — we only care that the write hits Logger,
+	// not what's on the wire.
+	server, client := net.Pipe()
+	defer server.Close()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := server.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	c := &Client{conn: client, reader: bufio.NewReader(client)}
+	h := &recordHandler{}
+	c.SetLog(slog.New(h))
+
+	require.NoError(t, c.WriteLine("PONG :token"))
+	require.NoError(t, c.WriteLine("PRIVMSG #ch :hello"))
+
+	lines := h.lines()
+	require.Len(t, lines, 2, "every WriteLine must produce one irc >> log line")
+	assert.Equal(t, "PONG :token", lines[0])
+	assert.Equal(t, "PRIVMSG #ch :hello", lines[1])
+}
+
+func TestMaskSecrets(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"PONG :token", "PONG :token"},
+		{"PRIVMSG #ch :hello", "PRIVMSG #ch :hello"},
+		{"JOIN #ch", "JOIN #ch"},
+		{"PASS hunter2", "PASS <redacted>"},
+		{"pass hunter2", "PASS <redacted>"},
+		{"AUTHENTICATE PLAIN", "AUTHENTICATE PLAIN"},
+		{"AUTHENTICATE AGFsaWNlAGh1bnRlcjI=", "AUTHENTICATE <redacted>"},
+		{"PRIVMSG NickServ :IDENTIFY hunter2", "PRIVMSG NickServ :IDENTIFY <redacted>"},
+		{"PRIVMSG NickServ :REGISTER hunter2 alice@example.com", "PRIVMSG NickServ :REGISTER <redacted>"},
+		{"PRIVMSG nickserv :ghost mybot hunter2", "PRIVMSG nickserv :GHOST <redacted>"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			assert.Equal(t, tc.want, maskSecrets(tc.in))
+		})
+	}
 }
 
 func TestRecordForReplayBoundsRing(t *testing.T) {

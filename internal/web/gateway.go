@@ -169,12 +169,11 @@ func (g *Gateway) Serve(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("web listen %s: %w", addr, err)
 	}
+	srvCtx, cancel := context.WithCancel(ctx)
 	g.mu.Lock()
 	g.listener = l
-	g.mu.Unlock()
-
-	srvCtx, cancel := context.WithCancel(ctx)
 	g.cancel = cancel
+	g.mu.Unlock()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", g.handleWS)
@@ -546,6 +545,25 @@ func (g *Gateway) onMessageSent(_ context.Context, ev *agent.Event) {
 	channel, _ := ev.Fields["channel"].(string)
 	sender, _ := ev.Fields["sender"].(string)
 	text, _ := ev.Fields["text"].(string)
+	// Agent.handle publishes MESSAGE_SENT with envelope-only (the
+	// command-dispatch path). The bouncer's ForwardedObserver and the
+	// gateway's own "say"-op publish with explicit channel/sender/text.
+	// Handle both shapes so command replies (e.g. !ping → pong) and
+	// bouncer-tunneled messages render uniformly in the WS frame.
+	if env, ok := ev.Fields["envelope"].(*agent.OutboundEnvelope); ok && env != nil {
+		if channel == "" {
+			channel = env.Channel
+		}
+		if text == "" {
+			text = env.Text
+		}
+	}
+	// OutboundEnvelope carries no sender (the bot is implicit). Fall
+	// back to the live current nick so command replies attribute
+	// correctly in the UI.
+	if sender == "" {
+		sender = g.bridge.CurrentNick()
+	}
 	payload := map[string]any{
 		"op":      "message",
 		"channel": channel,
