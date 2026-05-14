@@ -187,11 +187,12 @@ func (g *Gateway) Serve(ctx context.Context) error {
 	g.server = srv
 	g.mu.Unlock()
 
-	go func() {
+	// Shutdown gets its own bounded context — using srvCtx (already
+	// cancelled by the time this fires) would short-circuit the
+	// graceful close, so gosec G118 is intentional here.
+	go func() { //nolint:gosec // G118
 		<-srvCtx.Done()
-		// Shutdown gets its own bounded context — using the cancelled
-		// srvCtx would short-circuit the graceful close.
-		shutdownCtx, c := context.WithTimeout(context.Background(), 2*time.Second) //nolint:gosec // G118 — see comment
+		shutdownCtx, c := context.WithTimeout(context.Background(), 2*time.Second)
 		defer c()
 		_ = srv.Shutdown(shutdownCtx)
 		_ = g.closeAllClients()
