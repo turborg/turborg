@@ -50,7 +50,7 @@ jobs:
         run: go test -race -count=1 -timeout 180s -coverprofile=coverage.out -covermode=atomic ./internal/...
       - name: Upload coverage profile
         if: matrix.go == '1.26.x'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-profile
           path: coverage.out
