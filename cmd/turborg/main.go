@@ -1,4 +1,4 @@
-// Command turborg runs a turborg-go agent from environment-derived
+// Command turborg runs a turborg agent from environment-derived
 // settings. See README.md for the env-var contract.
 package main
 
