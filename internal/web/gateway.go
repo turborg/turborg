@@ -26,12 +26,6 @@ const (
 	channelLogCap = 200
 )
 
-// WS close codes. The reserved range for app codes is 4000–4999.
-const (
-	closeAuthFailed  = 4401
-	closeRateLimited = 4429
-)
-
 // IRCBridge is the narrow slice of the IRC connector the gateway
 // depends on. Keeps the package boundary clean — the gateway never
 // reaches into IRC-specific internals beyond these four methods.
@@ -195,7 +189,9 @@ func (g *Gateway) Serve(ctx context.Context) error {
 
 	go func() {
 		<-srvCtx.Done()
-		shutdownCtx, c := context.WithTimeout(context.Background(), 2*time.Second)
+		// Shutdown gets its own bounded context — using the cancelled
+		// srvCtx would short-circuit the graceful close.
+		shutdownCtx, c := context.WithTimeout(context.Background(), 2*time.Second) //nolint:gosec // G118 — see comment
 		defer c()
 		_ = srv.Shutdown(shutdownCtx)
 		_ = g.closeAllClients()
@@ -346,8 +342,9 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 // --- state replay ---------------------------------------------------------
 
 func (g *Gateway) sendState(ctx context.Context, c *client) {
-	channels := []map[string]any{}
-	for _, info := range g.bridge.State().JoinedChannels() {
+	joined := g.bridge.State().JoinedChannels()
+	channels := make([]map[string]any, 0, len(joined))
+	for _, info := range joined {
 		members := make([]map[string]any, 0, len(info.Members))
 		for nick, mode := range info.Members {
 			members = append(members, map[string]any{"nick": nick, "mode": mode})
@@ -406,6 +403,9 @@ func (g *Gateway) readLoop(ctx context.Context, c *client) {
 	}
 }
 
+// dispatchInbound is a per-op switch; complexity grows with the WS protocol.
+//
+//nolint:gocyclo
 func (g *Gateway) dispatchInbound(p map[string]any) {
 	op, _ := p["op"].(string)
 	switch op {
@@ -513,9 +513,7 @@ func (g *Gateway) dispatchInbound(p map[string]any) {
 		if line == "" || strings.ContainsAny(line, "\r\n") {
 			return
 		}
-		if strings.HasPrefix(line, "/") {
-			line = line[1:]
-		}
+		line = strings.TrimPrefix(line, "/")
 		_ = g.bridge.SendRaw(line)
 	}
 }

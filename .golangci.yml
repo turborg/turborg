@@ -48,6 +48,9 @@ linters:
           - gocyclo
           - gosec
           - errcheck
+          # WebSocket upgrade transfers response.Body ownership to the conn;
+          # closing it after a successful Dial breaks the connection.
+          - bodyclose
       # Generated SDK code (none today, but reserve the pattern).
       - path: ^vendor/
         linters:

@@ -66,7 +66,6 @@ func (a *Agent) Run(ctx context.Context) error {
 	g, gctx := errgroup.WithContext(ctx)
 
 	for _, c := range a.connectors {
-		c := c
 		if c.ClaimSupervision() {
 			g.Go(func() error { return c.Run(gctx) })
 		}

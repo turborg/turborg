@@ -76,9 +76,6 @@ func (s *fakeSender) Outbound() []*agent.OutboundEnvelope {
 func startGateway(t *testing.T, opts web.Options, bridge *fakeBridge, sender *fakeSender) (*web.Gateway, *agent.Agent, func()) {
 	t.Helper()
 	a := agent.New(nil)
-	if opts.Port == 0 {
-		// random
-	}
 	g, err := web.New(bridge, sender, opts)
 	require.NoError(t, err)
 	g.Subscribe(a.Events)

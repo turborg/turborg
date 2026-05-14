@@ -42,32 +42,6 @@ func writeLine(t *testing.T, conn net.Conn, line string) {
 	require.NoError(t, err)
 }
 
-func readUntil(t *testing.T, r *bufio.Reader, pred func(string) bool, timeout time.Duration) string {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	_ = r.Buffered() // touch
-	for time.Now().Before(deadline) {
-		_ = r // keep ref
-		line, err := readLineWithDeadline(r, time.Until(deadline))
-		if err != nil {
-			t.Fatalf("read failed waiting for predicate: %v", err)
-		}
-		if pred(line) {
-			return line
-		}
-	}
-	t.Fatalf("timed out waiting for predicate")
-	return ""
-}
-
-func readLineWithDeadline(r *bufio.Reader, _ time.Duration) (string, error) {
-	line, err := r.ReadString('\n')
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimRight(line, "\r\n"), nil
-}
-
 // --- Construction ----------------------------------------------------------
 
 func TestBouncerRejectsEmptyPassword(t *testing.T) {
@@ -676,7 +650,6 @@ func TestBouncerBroadcastFansOutToOtherClients(t *testing.T) {
 	b.Broadcast(":server 372 turborg :hello fellow clients", nil)
 
 	for _, r := range []*bufio.Reader{rA, rB} {
-		r := r
 		done := make(chan string, 1)
 		go func() {
 			for {

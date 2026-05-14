@@ -86,7 +86,6 @@ func (b *EventBus) Publish(ctx context.Context, ev *Event) {
 
 	var wg sync.WaitGroup
 	for _, h := range handlers {
-		h := h
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

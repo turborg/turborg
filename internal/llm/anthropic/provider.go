@@ -138,7 +138,7 @@ func (p *Provider) buildParams(prompt string, opts []llm.CallOption) sdk.Message
 	}
 
 	params := sdk.MessageNewParams{
-		Model:     sdk.Model(model),
+		Model:     model,
 		MaxTokens: int64(maxTokens),
 		Messages: []sdk.MessageParam{
 			sdk.NewUserMessage(sdk.NewTextBlock(prompt)),

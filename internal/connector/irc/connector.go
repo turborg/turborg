@@ -565,6 +565,9 @@ func (c *Connector) dispatch(ctx context.Context, lines <-chan string) error {
 	}
 }
 
+// dispatchLine is a per-command switch; complexity grows with the IRC spec.
+//
+//nolint:gocyclo
 func (c *Connector) dispatchLine(ctx context.Context, line string) {
 	c.log.Debug("irc <<", "line", line)
 	msg := Parse(line)
