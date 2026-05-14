@@ -53,7 +53,7 @@ In `#turborg-test`, type `!ping` — the bot replies `pong`. That's it.
 | Attach HexChat through the bouncer       | `TURBORG_IRC_BOUNCER_PASSWORD=…`                  |
 | Open the web UI at `http://127.0.0.1:8765/` | `TURBORG_IRC_WEB_PASSWORD=…`                   |
 
-See `docs/configuration.md` for the full env-var reference — SASL, NickServ identify, rate limits, idle-shutdown, logging.
+See [`docs/connectors/irc.md`](docs/connectors/irc.md) for the full env-var reference for the IRC connector — SASL, NickServ identify, bouncer, WS gateway, rate limits, idle-shutdown, timing.
 
 ## Quickstart: a minimal bot in Go
 
@@ -146,12 +146,12 @@ docker run --rm \
 
 ## Connectors
 
-| Connector  | Status     | Notes                                  |
-|------------|------------|----------------------------------------|
-| IRC        | Stable     | with bouncer + WS gateway              |
-| Discord    | Roadmap    | hopper                                 |
-| Telegram   | Roadmap    | hopper                                 |
-| WhatsApp   | Roadmap    | hopper                                 |
+| Connector  | Status     | Notes                                                                  |
+|------------|------------|------------------------------------------------------------------------|
+| [IRC](docs/connectors/irc.md) | Stable | with bouncer + WS gateway — see [the IRC connector docs](docs/connectors/irc.md) for every env var |
+| Discord    | Roadmap    | hopper                                                                 |
+| Telegram   | Roadmap    | hopper                                                                 |
+| WhatsApp   | Roadmap    | hopper                                                                 |
 
 LLM providers are **optional**. turborg runs perfectly fine as a pure command-driven bot without any LLM. When you want one, Anthropic (default, with prompt caching) ships in-tree.
 
