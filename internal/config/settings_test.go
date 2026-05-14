@@ -73,3 +73,26 @@ func TestLoadHandlesEmptyCSVAsNoConnectors(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, s.Connectors)
 }
+
+func TestLoadRejectsMalformedTypedEnv(t *testing.T) {
+	// WebPort is int — a non-numeric value surfaces a parse error from
+	// caarlos0/env, exercising the err != nil branch in Load().
+	t.Setenv("TURBORG_WEB_PORT", "not-a-number")
+	_, err := config.Load()
+	require.Error(t, err)
+}
+
+func TestLoadRejectsCSVWithStrayWhitespaceUnknownEntries(t *testing.T) {
+	t.Setenv("TURBORG_CONNECTORS", " irc , ,  discord ")
+	_, err := config.Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "discord")
+}
+
+func TestLoadAllowsDuplicateEntriesInCSV(t *testing.T) {
+	t.Setenv("TURBORG_CONNECTORS", "irc,IRC, irc")
+	s, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"irc"}, s.Connectors,
+		"duplicate entries differ only by case + whitespace; must collapse")
+}
