@@ -745,9 +745,11 @@ func TestChannelMessagesReplayedInTSOrder(t *testing.T) {
 	g, a, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
 	defer td()
 
-	// Publish three EventMessage events before any client connects.
-	// They land in the per-channel ring buffer; replay must come back
-	// in ts-ascending order via sortByTS.
+	// Publish three EventMessage events before any client connects;
+	// they land in the per-channel ring buffer. Wait until the bus
+	// has actually recorded all three before connecting — without
+	// this, the WS client could connect mid-publish and miss the
+	// later messages from the replay.
 	for _, text := range []string{"first", "second", "third"} {
 		a.Events.Publish(context.Background(), &agent.Event{
 			Type: agent.EventMessage,
@@ -755,7 +757,6 @@ func TestChannelMessagesReplayedInTSOrder(t *testing.T) {
 				"channel": "#x", "sender": "alice", "text": text,
 			},
 		})
-		time.Sleep(1100 * time.Millisecond / 1000) // ensure ts advances if Unix() resolution matters
 	}
 
 	conn := dialWS(t, g.Addr(), "p")
@@ -763,8 +764,18 @@ func TestChannelMessagesReplayedInTSOrder(t *testing.T) {
 	_ = readJSON(t, conn) // state
 
 	got := []string{}
-	for len(got) < 3 {
-		msg := readJSON(t, conn)
+	deadline := time.Now().Add(3 * time.Second)
+	for len(got) < 3 && time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, body, err := conn.Read(ctx)
+		cancel()
+		if err != nil {
+			break
+		}
+		var msg map[string]any
+		if err := json.Unmarshal(body, &msg); err != nil {
+			continue
+		}
 		if msg["op"] == "message" && msg["replayed"] == true {
 			got = append(got, msg["text"].(string))
 		}
