@@ -854,4 +854,3 @@ func peerIP(c *BouncerClient) string {
 	// Fallback for non-TCP transports (won't happen in production).
 	return c.conn.RemoteAddr().String()
 }
-
