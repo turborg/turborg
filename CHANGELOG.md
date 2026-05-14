@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.1.1](https://github.com/turborg/turborg/compare/v0.1.0...v0.1.1) (2026-05-14)
+
+
+### Bug Fixes
+
+* **irc:** match Python's CTCP VERSION reply, drop turborg-go leftovers ([#6](https://github.com/turborg/turborg/issues/6)) ([5fb480c](https://github.com/turborg/turborg/commit/5fb480c033eb4171477665bbef6fedf219ae4259))
+* **test:** determinize agent drain test, restore reliable 98% coverage ([#11](https://github.com/turborg/turborg/issues/11)) ([4d0002b](https://github.com/turborg/turborg/commit/4d0002b6a8df6ef2f80641cb2354765e18b7f8f4))
+* **test:** stabilize two flakes exposed by PR [#8](https://github.com/turborg/turborg/issues/8) ([#10](https://github.com/turborg/turborg/issues/10)) ([e429ac2](https://github.com/turborg/turborg/commit/e429ac2bcf5a8708e6aaddfd7abbda1bb15f538f))
+
+
+### Documentation
+
+* simplify README, add runnable example + coverage badge + docker quickstart ([#9](https://github.com/turborg/turborg/issues/9)) ([24a1476](https://github.com/turborg/turborg/commit/24a147656870f627d20d6a4a629d26f9f8ae8163))
+
 ## 0.1.0 (2026-05-14)
 
 
