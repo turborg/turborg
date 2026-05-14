@@ -5,6 +5,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Go ≥1.25](https://img.shields.io/badge/go-%E2%89%A51.25-00ADD8.svg)](https://go.dev/dl/)
 [![CI](https://github.com/turborg/turborg/actions/workflows/ci.yml/badge.svg)](https://github.com/turborg/turborg/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/badge/coverage-95%25-brightgreen.svg)](.testcoverage.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/turborg/turborg)](https://goreportcard.com/report/github.com/turborg/turborg)
 
 ## What it does
@@ -105,15 +106,42 @@ go run ./examples/turborg_irc
 
 ## Run with Docker
 
+The published image is `ghcr.io/turborg/turborg:latest` (multi-arch `linux/amd64` + `linux/arm64`, ~10 MB, distroless/static).
+
+**Inline env vars — fastest path:**
+
 ```bash
-cp .env.example .env       # fill in TURBORG_IRC_* (and optionally LLM / web / bouncer)
-docker compose up
+docker run --rm \
+  -e TURBORG_IRC_HOSTNAME=irc.libera.chat \
+  -e TURBORG_IRC_NICK=myturborg \
+  -e TURBORG_IRC_CHANNELS=#turborg-test \
+  ghcr.io/turborg/turborg:latest
 ```
 
-Or without compose:
+**With an .env file:**
 
 ```bash
-docker run --env-file .env ghcr.io/turborg/turborg:latest
+cp .env.example .env       # fill in TURBORG_IRC_* (+ optional LLM / web / bouncer)
+docker run --rm --env-file .env ghcr.io/turborg/turborg:latest
+```
+
+**docker compose:**
+
+```bash
+docker compose up          # same .env file, plus port mappings if you enabled the web UI
+```
+
+Pin a specific version in production — `ghcr.io/turborg/turborg:v0.1.0` rather than `:latest`. Tags follow the GitHub releases.
+
+To expose the web UI to the host, also publish the port:
+
+```bash
+docker run --rm \
+  -e TURBORG_WEB_PASSWORD=changeme \
+  -e TURBORG_WEB_HOST=0.0.0.0 \
+  -p 8765:8765 \
+  --env-file .env \
+  ghcr.io/turborg/turborg:latest
 ```
 
 ## Connectors
