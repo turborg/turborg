@@ -31,10 +31,9 @@ func driveConnector(t *testing.T, settings *irc.Settings, fsOpts ...fakeirc.Opti
 	if len(settings.Channels) == 0 {
 		settings.Channels = []string{"#test"}
 	}
-	// CTCP defaults match what the Python implementation ships with: auto
-	// reply enabled, 3 replies per 30s window. Individual tests override
-	// by setting CTCPMaxPerWindow / CTCPWindowSeconds / CTCPAutoReply
-	// before calling driveConnector.
+	// CTCP defaults: auto reply enabled, 3 replies per 30s window.
+	// Individual tests override by setting CTCPMaxPerWindow /
+	// CTCPWindowSeconds / CTCPAutoReply before calling driveConnector.
 	if settings.CTCPMaxPerWindow == 0 && settings.CTCPWindowSeconds == 0 {
 		settings.CTCPAutoReply = true
 		settings.CTCPMaxPerWindow = 3

@@ -18,9 +18,9 @@ import (
 	"github.com/turborg/turborg/internal/connector/irc"
 )
 
-// Ring-buffer caps mirror the Python implementation. Bumping these
-// requires coordinating with docs/ui/PLAN.md — the Angular client team
-// sizes its IndexedDB backfill against the same numbers.
+// Ring-buffer caps for replay on new client attach. Bumping these is a
+// coordinated change with downstream UIs that size their local backfill
+// against the same numbers — see docs/ui/PLAN.md.
 const (
 	serverLogCap  = 100
 	channelLogCap = 200

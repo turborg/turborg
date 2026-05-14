@@ -11,9 +11,8 @@ import (
 const memberPrefixes = "@+%&~"
 
 // ChannelInfo is per-channel state cached from observed server messages.
-// Mirrors Python core/connectors/irc/state.py:ChannelInfo. The bouncer
-// replays this to new clients on auth so they pick up the bot's view of
-// the network instead of starting blank.
+// The bouncer replays this to new clients on auth so they pick up the
+// bot's view of the network instead of starting blank.
 type ChannelInfo struct {
 	// Name is the original-cased channel ("#XSHELLZ-Test2"). Lookups are
 	// case-insensitive but display preserves the form the server used.
@@ -118,9 +117,8 @@ func (s *ChannelState) ClearTopic(channel string) {
 	info.TopicSet = true
 }
 
-// SetTopicMeta records who set the topic and when. Maps to Python's
-// on_topic(channel, set_by=..., set_at=...) when no topic= kwarg is
-// supplied (RPL_TOPICWHOTIME / 333).
+// SetTopicMeta records who set the topic and when, from
+// RPL_TOPICWHOTIME (333). Leaves the topic body untouched.
 func (s *ChannelState) SetTopicMeta(channel, setBy string, setAt int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

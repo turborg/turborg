@@ -2,11 +2,11 @@
 // from environment-derived settings. The CLI calls Build, but the same
 // functions are exposed for embedders (tests, alternate front-ends).
 //
-// Behavior matches Python core/runtime.py:
+// Wiring rules:
 //   - Single-IRC quickstart path: when TURBORG_CONNECTORS is unset,
-//     BuildAgent wires one IRC connector + builtins.
+//     Build wires one IRC connector + builtins.
 //   - Multi-connector path: when TURBORG_CONNECTORS=irc[,…] is set,
-//     BuildMultiConnectorAgent wires every listed connector.
+//     Build wires every listed connector.
 //   - Anthropic provider only attaches when TURBORG_ANTHROPIC_API_KEY
 //     is present — the agent never fails for lack of one.
 //   - Web gateway only attaches when TURBORG_IRC_WEB_PASSWORD is set.
@@ -185,8 +185,9 @@ func collapseWhitespace(s string) string {
 //
 // Owner checks fail closed when an account tag is required but missing
 // (e.g. a services-less network or a client without the account-tag
-// capability). This is the security stance the Python implementation
-// converged on after the deferred-tag bug.
+// capability). Failing open would let any nick spoof the owner the
+// moment the account-tag pipeline went unavailable, which is exactly
+// when defensive gating matters most.
 func BuildCommandGuard(s *config.Settings) agent.CommandGuard {
 	ownerNick := strings.ToLower(strings.TrimSpace(s.OwnerNick))
 	ownerAccount := strings.TrimSpace(s.OwnerAccount)

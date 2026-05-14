@@ -40,14 +40,15 @@ optional.
 | `TURBORG_IRC_NICK` | string | **required** | Bot nick. Must be unique on the network — if your nick is in use, registration fails and the bot exits. |
 | `TURBORG_IRC_USERNAME` | string | = `NICK` | The IRC ident (the `USER` command's first arg). Most networks display this in WHOIS. Defaults to the nick when unset. |
 | `TURBORG_IRC_REAL_NAME` | string | `"turborg agent"` | The USER command's trailing arg — shown on WHOIS as the "real name". Operators sometimes use this to flag the bot as a bot. |
-| `TURBORG_IRC_CHANNELS` | CSV | `""` | Comma-separated list of channels to join after registration. Bare names without a `#` are auto-prefixed (`mychannel` → `#mychannel`); `&`, `+`, `!` prefixes are preserved. Accepts the legacy JSON-array shape (`["#a","#b"]`) too — a Python-era `.env` is a drop-in. |
+| `TURBORG_IRC_CHANNELS` | CSV | `""` | Comma-separated list of channels to join after registration. Bare names without a `#` are auto-prefixed (`mychannel` → `#mychannel`); `&`, `+`, `!` prefixes are preserved. Also accepts a JSON-array shape (`["#a","#b"]`) for compatibility with config systems that emit lists. |
 
 ### Operational notes
 
 - **Channel keys (passwords) aren't a separate var.** If you need to
   join a `+k` channel, send the JOIN manually from a built-in command
-  or the bouncer. The connector doesn't model per-channel keys in the
-  spawn config; this matches how the Python version shipped.
+  or the bouncer. The connector intentionally doesn't model per-channel
+  keys in the spawn config — keep keys out of env that may end up in
+  process listings or container introspection.
 - **NICK collisions are fatal.** The connector does not append `_` or
   cycle alt-nicks; if your registered nick is in use, registration
   fails with `433 Nickname is already in use` and the agent exits.

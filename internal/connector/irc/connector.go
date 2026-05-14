@@ -20,7 +20,7 @@ import (
 // Connector is the IRC adapter: TLS dial + IRCv3 CAP / SASL handshake,
 // supervised read+ping loop, channel-state cache, optional bouncer.
 //
-// Lifecycle (mirrors Python connectors/irc/connector.py):
+// Lifecycle:
 //   - Start: open the connection, run CAP/SASL/USER/NICK, await
 //     RPL_ENDOFMOTD or ERR_NOMOTD, JOIN configured channels, send
 //     NickServ IDENTIFY if configured, start the bouncer if configured.
@@ -484,8 +484,7 @@ func (c *Connector) Run(ctx context.Context) error {
 	// Each iteration resets the read deadline to now + idle; if no
 	// data arrives within the window, Go's net layer returns a
 	// timeout error and Run unwinds. Without this, a half-dead TLS
-	// socket (NAT idle, peer crashed) parks the bot indefinitely —
-	// the exact bug the Python silent-death fix addressed.
+	// socket (NAT idle, peer crashed) would park the bot indefinitely.
 	g.Go(func() error {
 		defer close(lines)
 		idle := c.settings.ReadIdleTimeout

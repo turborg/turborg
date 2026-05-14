@@ -2,10 +2,9 @@
 # CI runs `go test -coverprofile=coverage.out ./internal/...` then
 # `go-test-coverage --config .testcoverage.yml` to enforce these gates.
 #
-# Thresholds match the Python repo's `fail_under = 95` total bar. The
-# IRC connector exemption mirrors Python's per-module reality at the
-# same version: real-network error paths (TLS Dial, mid-handshake
-# server drops) are unreachable from in-process tests without far more
+# The IRC connector carries a slightly lower bar than the rest of the
+# tree: real-network error paths (TLS Dial, mid-handshake server
+# drops) are unreachable from in-process tests without far more
 # infrastructure than the value justifies.
 
 profile: coverage.out

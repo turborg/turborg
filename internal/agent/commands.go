@@ -9,8 +9,8 @@ import (
 type CommandHandler func(ctx context.Context, env *InboundEnvelope, args []string) (*OutboundEnvelope, error)
 
 // CommandGuard is a synchronous predicate run before dispatch. Returning
-// false silently drops the command (no reply, no error). Mirrors Python's
-// owner-only + throttle guard composition.
+// false silently drops the command (no reply, no error). The runtime
+// composes owner-only + per-sender throttle into a single guard.
 type CommandGuard func(env *InboundEnvelope) bool
 
 type commandEntry struct {
@@ -20,7 +20,7 @@ type commandEntry struct {
 }
 
 // CommandRegistry parses text that starts with Prefix and dispatches to a
-// registered handler. Names are case-insensitive (Python convention).
+// registered handler. Names are case-insensitive.
 type CommandRegistry struct {
 	prefix   string
 	mu       sync.RWMutex

@@ -7,10 +7,10 @@ import (
 	"time"
 )
 
-// EventType mirrors the Python core/events.py StrEnum. Values match
-// byte-for-byte so external consumers (xshellz orchestrator, observability
-// stack) see the same event names regardless of which implementation is
-// running.
+// EventType is a stable string identifier for events published on the
+// EventBus. The string values are part of the public contract — external
+// consumers (orchestrators, observability stacks) key off them, so
+// renaming a constant value is a breaking change.
 type EventType string
 
 const (
@@ -47,10 +47,8 @@ type Event struct {
 type EventHandler func(ctx context.Context, ev *Event)
 
 // EventBus is an in-process pub/sub. Publish blocks until every subscribed
-// handler returns, matching the Python EventBus contract built on
-// asyncio.gather(..., return_exceptions=True): handlers run concurrently,
-// a panic in one is logged but never propagates to siblings or the
-// publisher.
+// handler returns; handlers run concurrently, and a panic in one is
+// logged but never propagates to siblings or the publisher.
 type EventBus struct {
 	mu       sync.RWMutex
 	handlers map[EventType][]EventHandler

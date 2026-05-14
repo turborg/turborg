@@ -188,9 +188,8 @@ func TestParsePrefixOnlyLineAfterTags(t *testing.T) {
 func TestParseDegenerateColonAfterPrefix(t *testing.T) {
 	// Per RFC, trailing must be introduced by " :" (space-colon). A bare
 	// ":trailing" right after the prefix is therefore parsed as a command
-	// with one param, not as trailing. This mirrors the Python parser
-	// exactly — the test is here so any future "cleanup" that diverges
-	// from Python gets flagged.
+	// with one param, not as trailing. The test pins this behavior so a
+	// future "cleanup" that rescues the degenerate form gets flagged.
 	m := irc.Parse(":prefix :weird args")
 	assert.Equal(t, "prefix", m.Prefix)
 	assert.Equal(t, ":WEIRD", m.Command, "degenerate input is forgiven, not rescued")

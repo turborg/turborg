@@ -58,10 +58,10 @@ configuration from its prefixed env.`,
 }
 
 func runE(stderr interface{ Write(p []byte) (int, error) }) error {
-	// Best-effort .env load matching the Python pydantic-settings
-	// behavior. A missing file is fine — real env vars still apply.
-	// Real env vars take precedence over .env entries (godotenv.Load
-	// only sets vars that aren't already set in the process env).
+	// Best-effort .env load. A missing file is fine — real env vars
+	// still apply. Real env vars take precedence over .env entries
+	// (godotenv.Load only sets vars that aren't already set in the
+	// process env).
 	_ = godotenv.Load()
 
 	settings, err := config.Load()

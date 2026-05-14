@@ -19,7 +19,7 @@ edits will survive but the bot will keep adding new entries above.
 
 ### Bug Fixes
 
-* **irc:** match Python's CTCP VERSION reply, drop turborg-go leftovers ([#6](https://github.com/turborg/turborg/issues/6)) ([5fb480c](https://github.com/turborg/turborg/commit/5fb480c033eb4171477665bbef6fedf219ae4259))
+* **irc:** standardize the CTCP VERSION reply ([#6](https://github.com/turborg/turborg/issues/6)) ([5fb480c](https://github.com/turborg/turborg/commit/5fb480c033eb4171477665bbef6fedf219ae4259))
 * **test:** determinize agent drain test, restore reliable 98% coverage ([#11](https://github.com/turborg/turborg/issues/11)) ([4d0002b](https://github.com/turborg/turborg/commit/4d0002b6a8df6ef2f80641cb2354765e18b7f8f4))
 * **test:** stabilize two flakes exposed by PR [#8](https://github.com/turborg/turborg/issues/8) ([#10](https://github.com/turborg/turborg/issues/10)) ([e429ac2](https://github.com/turborg/turborg/commit/e429ac2bcf5a8708e6aaddfd7abbda1bb15f538f))
 
@@ -70,12 +70,11 @@ edits will survive but the bot will keep adding new entries above.
 
 ## [Unreleased]
 
-## [0.1.0] — first Go release
+## [0.1.0] — initial release
 
-Feature parity with the final Python release ([turborg/turborg-python](https://github.com/turborg/turborg-python) v0.8.0).
-Every `TURBORG_*` env var, every WebSocket protocol op, and the reference
-UI's HTML/CSS/JS are preserved byte-for-byte so the xshellz sidecar +
-accounts-api + appui stack needs no changes.
+First public release of turborg. Ships the full framework: agent core,
+IRC connector with bouncer + WebSocket gateway, Anthropic LLM backend,
+and a bundled reference UI.
 
 ### Features
 

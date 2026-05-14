@@ -1,8 +1,8 @@
 package irc
 
 // IRC numeric replies turborg recognizes during the handshake or runtime.
-// String values match Python core/connectors/irc/codes.py byte-for-byte so
-// dashboards and logs stay stable across the port.
+// Identifiers follow the conventional Rpl*/Err* naming; the string
+// values are the wire-level numerics defined by RFC 1459/2812.
 const (
 	RplWelcome       = "001"
 	RplYourHost      = "002"
@@ -73,7 +73,8 @@ const (
 
 // IsHandshakeComplete reports whether the given numeric reply signals the
 // server has finished sending its MOTD and the connection is ready for
-// normal traffic. Matches Python's HANDSHAKE_COMPLETE frozenset.
+// normal traffic. Either RPL_ENDOFMOTD (376) or ERR_NOMOTD (422)
+// completes the handshake; servers without a MOTD send the latter.
 func IsHandshakeComplete(numeric string) bool {
 	return numeric == RplEndOfMOTD || numeric == ErrNoMOTD
 }
