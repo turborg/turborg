@@ -131,7 +131,7 @@ docker run --rm --env-file .env ghcr.io/turborg/turborg:latest
 docker compose up          # same .env file, plus port mappings if you enabled the web UI
 ```
 
-Pin a specific version in production — `ghcr.io/turborg/turborg:v0.1.0` rather than `:latest`. Tags follow the GitHub releases.
+Pin a specific version in production — `ghcr.io/turborg/turborg:0.1.1` rather than `:latest`. Image tags drop the `v` prefix from the git tag (`v0.1.1` → `:0.1.1`); see the [releases page](https://github.com/turborg/turborg/releases) for available versions.
 
 To expose the web UI to the host, also publish the port:
 
