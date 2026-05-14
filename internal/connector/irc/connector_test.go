@@ -361,9 +361,14 @@ func TestConnectorReadIdleTimeoutSurfaces(t *testing.T) {
 }
 
 func TestConnectorIgnoresUnknownNickInUse433DuringHandshake(t *testing.T) {
-	// Manually drive a fakeirc that responds to USER with a 433 instead
-	// of the normal 001 + 376. The connector's awaitHandshake must
-	// recognize ErrNickNameInUse and return an explicit error.
+	// Manually drive a fake server that responds to USER with a 433
+	// (NickNameInUse) and then keeps the connection open. The connector
+	// sends USER → NICK → CAP END one after the other; if the fake
+	// closes its side immediately after writing 433 the connector's
+	// next write loses the race and surfaces a "connection reset by
+	// peer" error instead of the parsed 433. Keep reading until the
+	// connector closes its side so awaitHandshake reliably reads the
+	// 433 and returns the expected error.
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer l.Close()
@@ -375,15 +380,19 @@ func TestConnectorIgnoresUnknownNickInUse433DuringHandshake(t *testing.T) {
 		}
 		defer conn.Close()
 		reader := bufio.NewReader(conn)
+		sentReject := false
 		for {
 			line, err := reader.ReadString('\n')
 			if err != nil {
 				return
 			}
-			if strings.HasPrefix(line, "USER ") {
+			if !sentReject && strings.HasPrefix(line, "USER ") {
 				_, _ = conn.Write([]byte(":fake 433 * turborg :Nickname is already in use\r\n"))
-				return
+				sentReject = true
 			}
+			// Keep draining client writes (NICK, CAP END, QUIT) until
+			// the connector closes — the read loop above will exit on
+			// EOF naturally.
 		}
 	}()
 
