@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/turborg/turborg/internal/agent"
+	"github.com/turborg/turborg/internal/version"
 )
 
 func TestIsWellFormed(t *testing.T) {
@@ -87,14 +88,14 @@ func TestCTCPHelpers(t *testing.T) {
 
 func TestCTCPReplyCovers(t *testing.T) {
 	cases := map[string]string{
-		"\x01VERSION\x01":        "VERSION turborg-go",
+		"\x01VERSION\x01":        "VERSION turborg " + version.Version + " (https://github.com/turborg/turborg)",
 		"\x01PING 12345\x01":     "PING 12345",
 		"\x01CLIENTINFO\x01":     "CLIENTINFO VERSION PING TIME CLIENTINFO SOURCE USERINFO",
 		"\x01SOURCE\x01":         "SOURCE https://github.com/turborg/turborg",
 		"\x01USERINFO\x01":       "USERINFO turborg agent",
 		"\x01\x01":               "",  // empty inner
 		"\x01UNKNOWN\x01":        "",  // unrecognized
-		"\x01version lowercase\x01": "VERSION turborg-go",
+		"\x01version lowercase\x01": "VERSION turborg " + version.Version + " (https://github.com/turborg/turborg)",
 	}
 	for in, want := range cases {
 		t.Run(in, func(t *testing.T) {

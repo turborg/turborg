@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/turborg/turborg/internal/agent"
+	"github.com/turborg/turborg/internal/version"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -903,7 +904,7 @@ func ctcpReply(text string) string {
 	}
 	switch cmd {
 	case "VERSION":
-		return "VERSION turborg-go"
+		return "VERSION turborg " + version.Version + " (https://github.com/turborg/turborg)"
 	case "PING":
 		return "PING " + arg
 	case "TIME":
