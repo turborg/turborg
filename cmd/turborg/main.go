@@ -93,7 +93,7 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 	}
 	webState := "off"
 	if built.Gateway != nil {
-		webState = fmt.Sprintf("on@%s:%d", settings.WebHost, settings.WebPort)
+		webState = fmt.Sprintf("on@%s:%d", ircSettings.WebHost, ircSettings.WebPort)
 	}
 	log.Info("turborg starting",
 		"version", version.Version,

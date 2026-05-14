@@ -9,7 +9,7 @@
 //     BuildMultiConnectorAgent wires every listed connector.
 //   - Anthropic provider only attaches when TURBORG_ANTHROPIC_API_KEY
 //     is present — the agent never fails for lack of one.
-//   - Web gateway only attaches when TURBORG_WEB_PASSWORD is set.
+//   - Web gateway only attaches when TURBORG_IRC_WEB_PASSWORD is set.
 package runtime
 
 import (
@@ -80,8 +80,8 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 
 	built := &Built{Agent: a, IRC: ircConn, LLM: provider}
 
-	if s.WebEnabled() {
-		gw, err := buildGateway(s, ircConn, a, log)
+	if ircCfg.WebEnabled() {
+		gw, err := buildGateway(ircCfg, ircConn, log)
 		if err != nil {
 			return nil, err
 		}
@@ -107,29 +107,29 @@ func buildLLM(s *config.Settings) (llm.Provider, error) {
 	return p, nil
 }
 
-func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, log *slog.Logger) (*web.Gateway, error) {
-	verifier, err := web.NewStaticPasswordVerifier(s.WebPassword)
+func buildGateway(ircCfg *irc.Settings, ircConn *irc.Connector, log *slog.Logger) (*web.Gateway, error) {
+	verifier, err := web.NewStaticPasswordVerifier(ircCfg.WebPassword)
 	if err != nil {
 		return nil, fmt.Errorf("runtime: web verifier: %w", err)
 	}
 	rl, err := irc.NewRateLimiter(
-		s.WebMaxFailedAttempts,
-		time.Duration(s.WebFailureWindowSeconds)*time.Second,
-		time.Duration(s.WebLockoutSeconds)*time.Second,
+		ircCfg.WebMaxFailedAttempts,
+		time.Duration(ircCfg.WebFailureWindowSeconds)*time.Second,
+		time.Duration(ircCfg.WebLockoutSeconds)*time.Second,
 		nil,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("runtime: web ratelimit: %w", err)
 	}
 	opts := web.Options{
-		Host:        s.WebHost,
-		Port:        s.WebPort,
+		Host:        ircCfg.WebHost,
+		Port:        ircCfg.WebPort,
 		Verifier:    verifier,
 		RateLimiter: rl,
 		Log:         log,
 	}
-	if s.IdleShutdownEnabled() {
-		opts.IdleShutdownSeconds = s.WebIdleShutdownSeconds
+	if ircCfg.IdleShutdownEnabled() {
+		opts.IdleShutdownSeconds = ircCfg.WebIdleShutdownSeconds
 		// Idle callback wired by the CLI — it needs the cancel func that
 		// stops both halves. Runtime can't supply it without knowing the
 		// CLI's ctx. Leaving OnIdleShutdown nil here means the gateway

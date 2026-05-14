@@ -2,7 +2,7 @@
 // bridges IRC events to browser clients, plus the bundled vanilla-JS
 // reference UI served from the same HTTP server. SaaS deployments replace
 // the TokenVerifier with their own auth backend; self-host uses a single
-// shared password from TURBORG_WEB_PASSWORD.
+// shared password from TURBORG_IRC_WEB_PASSWORD.
 package web
 
 import (

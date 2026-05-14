@@ -1,6 +1,7 @@
 // Package config holds turborg's top-level Settings — the cross-cutting
-// env-var contract that lives next to TURBORG_ (not TURBORG_IRC_,
-// TURBORG_WEB_, etc., which live with their respective connectors).
+// env-var contract that lives under TURBORG_*. Per-connector knobs
+// (TURBORG_IRC_*, etc., including the IRC-coupled WS gateway under
+// TURBORG_IRC_WEB_*) live with their respective connectors.
 //
 // Connector-specific settings stay in their own packages so installing
 // turborg without a particular connector does not require setting that
@@ -23,9 +24,9 @@ var ValidConnectors = map[string]bool{
 }
 
 // Settings is the top-level turborg config. Connector-specific knobs
-// (TURBORG_IRC_*, TURBORG_WEB_PASSWORD lives here for the gateway
-// toggle, but everything WS-protocol-shaped is on web.Options) are
-// loaded by their own packages — Settings stays narrow.
+// (TURBORG_IRC_*, including the IRC-coupled WS gateway under
+// TURBORG_IRC_WEB_*) are loaded by their own packages — Settings stays
+// narrow.
 type Settings struct {
 	LogLevel  string `env:"LOG_LEVEL"  envDefault:"INFO"`
 	LogFormat string `env:"LOG_FORMAT" envDefault:"text"`
@@ -41,14 +42,6 @@ type Settings struct {
 	// Connectors is a CSV in env (TURBORG_CONNECTORS=irc,discord). When
 	// empty, the single-connector quickstart path enables IRC only.
 	Connectors []string `env:"CONNECTORS" envSeparator:","`
-
-	WebPassword              string `env:"WEB_PASSWORD"`
-	WebHost                  string `env:"WEB_HOST"   envDefault:"127.0.0.1"`
-	WebPort                  int    `env:"WEB_PORT"   envDefault:"8765"`
-	WebMaxFailedAttempts     int    `env:"WEB_MAX_FAILED_ATTEMPTS" envDefault:"5"`
-	WebFailureWindowSeconds  int    `env:"WEB_FAILURE_WINDOW_SECONDS" envDefault:"60"`
-	WebLockoutSeconds        int    `env:"WEB_LOCKOUT_SECONDS" envDefault:"300"`
-	WebIdleShutdownSeconds   int    `env:"WEB_IDLE_SHUTDOWN_SECONDS"`
 
 	OwnerNick    string `env:"OWNER_NICK"`
 	OwnerAccount string `env:"OWNER_ACCOUNT"`
@@ -96,10 +89,3 @@ func (s *Settings) normalize() error {
 // wired. False means standalone mode — the !ask command is not
 // registered.
 func (s *Settings) AnthropicEnabled() bool { return s.AnthropicAPIKey != "" }
-
-// WebEnabled reports whether the WS gateway should be started.
-func (s *Settings) WebEnabled() bool { return s.WebPassword != "" }
-
-// IdleShutdownEnabled reports whether the gateway's idle-shutdown timer
-// is configured.
-func (s *Settings) IdleShutdownEnabled() bool { return s.WebIdleShutdownSeconds > 0 }
