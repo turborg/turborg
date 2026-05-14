@@ -171,21 +171,41 @@ func TestAgentLogReturnsConfiguredLogger(t *testing.T) {
 }
 
 func TestAgentDrainReturnsOnInboundChannelClose(t *testing.T) {
+	// drain's select races between two ready branches when CloseInbound
+	// AND cancel() fire back-to-back: closed-channel-recv and ctx.Done
+	// are both selectable, and Go picks pseudo-randomly. Earlier this
+	// test cancelled before drain could observe the close, so coverage
+	// of the `if !ok { return nil }` branch was non-deterministic — it
+	// passed locally and on most CI runs, then failed on main after a
+	// merge with unlucky scheduling.
+	//
+	// Sequence here forces drain through the !ok branch: close the
+	// inbox while ctx is still live, give drain a tick to observe the
+	// close and return, then cancel to unwind the connector's Run loop.
 	a := agent.New(nil)
 	c := fakeconn.New("closer")
 	a.AddConnector(c)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- a.Run(ctx) }()
 
-	// Close the inbound channel — drain must return cleanly without
-	// blocking ctx cancellation.
 	require.Eventually(t, func() bool { return c.Started() },
 		time.Second, 10*time.Millisecond)
+
+	// Step 1: close the inbox. ctx is still live, so drain's select
+	// has exactly one ready case — the closed channel — and reads !ok
+	// deterministically.
 	c.CloseInbound()
 
+	// Step 2: give drain a beat to observe the close. A closed-channel
+	// select wakes up in microseconds; 50ms is overkill on any runner.
+	time.Sleep(50 * time.Millisecond)
+
+	// Step 3: unwind the connector's Run (which blocks on ctx.Done).
 	cancel()
+
 	select {
 	case err := <-done:
 		if err != nil && !errors.Is(err, context.Canceled) {
