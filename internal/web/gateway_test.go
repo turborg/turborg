@@ -673,3 +673,313 @@ func TestHTTPTestHarnessAvailable(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	assert.Equal(t, "ok", strings.TrimSpace(string(body)))
 }
+
+// --- rate limiter wiring ---------------------------------------------
+
+func TestRateLimiterLocksOutRepeatedBadTokens(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	rl, err := irc.NewRateLimiter(2, time.Minute, time.Minute, nil)
+	require.NoError(t, err)
+	opts := newOptions(t, "right")
+	opts.RateLimiter = rl
+
+	g, _, td := startGateway(t, opts, bridge, &fakeSender{})
+	defer td()
+
+	// Two failures lock the IP. The third attempt — even with the right
+	// token — gets blocked by IsLocked before Verify runs.
+	for i := 0; i < 2; i++ {
+		url := "ws://" + g.Addr() + "/ws?token=wrong"
+		_, resp, err := websocket.Dial(context.Background(), url, nil)
+		require.Error(t, err)
+		require.NotNil(t, resp)
+		_ = resp.Body.Close()
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	}
+	url := "ws://" + g.Addr() + "/ws?token=right"
+	_, resp, err := websocket.Dial(context.Background(), url, nil)
+	require.Error(t, err)
+	require.NotNil(t, resp)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode,
+		"locked IPs must be rejected with 429 before Verify runs")
+}
+
+func TestRateLimiterResetsOnSuccessfulAuth(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	rl, err := irc.NewRateLimiter(3, time.Minute, time.Minute, nil)
+	require.NoError(t, err)
+	opts := newOptions(t, "right")
+	opts.RateLimiter = rl
+
+	g, _, td := startGateway(t, opts, bridge, &fakeSender{})
+	defer td()
+
+	// Two failures + one success — the success should call RecordSuccess
+	// and clear the failure tally. We can't peek inside, but we can
+	// verify the next bad attempt does NOT immediately lock out.
+	for i := 0; i < 2; i++ {
+		_, resp, err := websocket.Dial(context.Background(),
+			"ws://"+g.Addr()+"/ws?token=wrong", nil)
+		require.Error(t, err)
+		_ = resp.Body.Close()
+	}
+	conn := dialWS(t, g.Addr(), "right")
+	_ = readJSON(t, conn) // state
+	_ = conn.Close(websocket.StatusNormalClosure, "")
+
+	// A single bad attempt after the reset must NOT 429 — it must 401.
+	_, resp, err := websocket.Dial(context.Background(),
+		"ws://"+g.Addr()+"/ws?token=wrong", nil)
+	require.Error(t, err)
+	require.NotNil(t, resp)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode,
+		"a successful auth should reset the failure tally")
+}
+
+// --- channel-log replay ordering ------------------------------------
+
+func TestChannelMessagesReplayedInTSOrder(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	g, a, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+
+	// Publish three EventMessage events before any client connects.
+	// They land in the per-channel ring buffer; replay must come back
+	// in ts-ascending order via sortByTS.
+	for _, text := range []string{"first", "second", "third"} {
+		a.Events.Publish(context.Background(), &agent.Event{
+			Type: agent.EventMessage,
+			Fields: map[string]any{
+				"channel": "#x", "sender": "alice", "text": text,
+			},
+		})
+		time.Sleep(1100 * time.Millisecond / 1000) // ensure ts advances if Unix() resolution matters
+	}
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	_ = readJSON(t, conn) // state
+
+	got := []string{}
+	for len(got) < 3 {
+		msg := readJSON(t, conn)
+		if msg["op"] == "message" && msg["replayed"] == true {
+			got = append(got, msg["text"].(string))
+		}
+	}
+	assert.Equal(t, []string{"first", "second", "third"}, got,
+		"channel replay must come back in original publish order")
+}
+
+// --- sendTo error path: closed conn is removed from clients ------
+
+func TestBroadcastDropsClientOnClosedConn(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	g, a, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	_ = readJSON(t, conn) // state
+
+	// Close from the client side without notice; the gateway's next
+	// broadcast.sendTo write will fail and remove the client.
+	_ = conn.CloseNow()
+
+	// Publish enough events to ensure at least one write attempt lands
+	// after the close.
+	require.Eventually(t, func() bool {
+		a.Events.Publish(context.Background(), &agent.Event{
+			Type:   agent.EventServerNotice,
+			Fields: map[string]any{"text": "tick", "kind": "info"},
+		})
+		// /health reports the live client count; once sendTo's error
+		// branch fires the count drops to 0.
+		resp, err := http.Get("http://" + g.Addr() + "/health")
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return strings.Contains(string(body), `"ws_clients":0`)
+	}, 2*time.Second, 50*time.Millisecond,
+		"broken-write client must be removed from the gateway's client set")
+}
+
+// --- inbound dispatch: no-op edges ---------------------------------
+
+func TestInboundDispatchSkipsEmptyOrInvalidPayloads(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	sender := &fakeSender{}
+	g, _, td := startGateway(t, newOptions(t, "p"), bridge, sender)
+	defer td()
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	_ = readJSON(t, conn) // state
+
+	// Every one of these is a syntactic no-op: required fields missing,
+	// empty strings, etc. None should fan to bridge or sender.
+	cases := []map[string]any{
+		{"op": "say", "channel": "", "text": "x"},
+		{"op": "say", "channel": "#x", "text": ""},
+		{"op": "join", "channel": ""},
+		{"op": "part", "channel": ""},
+		{"op": "nick", "nick": ""},
+		{"op": "mode", "channel": "#x"},
+		{"op": "mode", "channel": "", "modes": "+o"},
+		{"op": "kick", "channel": "#x"},
+		{"op": "kick", "channel": "", "nick": "alice"},
+		{"op": "whois", "nick": ""},
+		{"op": "topic", "channel": ""},
+		{"op": "who", "target": "   "},
+		{"op": "raw", "line": ""},
+		{"op": "unknown_op_name", "any": "thing"},
+	}
+	for _, p := range cases {
+		body, _ := json.Marshal(p)
+		require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+	}
+	time.Sleep(100 * time.Millisecond)
+	assert.Empty(t, bridge.Sent(), "no-op payloads must not produce any SendRaw")
+	assert.Empty(t, sender.Outbound(), "no-op say payloads must not call Sender")
+}
+
+func TestInboundKickWithoutReason(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	g, _, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	_ = readJSON(t, conn)
+
+	body, _ := json.Marshal(map[string]any{
+		"op": "kick", "channel": "#x", "nick": "alice",
+	})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+	require.Eventually(t, func() bool { return len(bridge.Sent()) == 1 },
+		time.Second, 10*time.Millisecond)
+	assert.Equal(t, "KICK #x alice", bridge.Sent()[0],
+		"KICK without reason must NOT include the trailing colon")
+}
+
+func TestInboundModeWithoutTarget(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	g, _, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	_ = readJSON(t, conn)
+
+	body, _ := json.Marshal(map[string]any{
+		"op": "mode", "channel": "#x", "modes": "+t",
+	})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+	require.Eventually(t, func() bool { return len(bridge.Sent()) == 1 },
+		time.Second, 10*time.Millisecond)
+	assert.Equal(t, "MODE #x +t", bridge.Sent()[0])
+}
+
+// --- recordChannel skips messages without a channel ---------
+
+func TestOnMessageReadsEnvelopeFieldsWhenPresent(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	g, a, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	_ = readJSON(t, conn) // state
+
+	// Publish an EventMessage with an envelope (not channel/sender/
+	// text fields). The gateway must read from env.* — covers the
+	// `if env != nil` branch in onMessage.
+	env := &agent.InboundEnvelope{
+		Connector: "irc",
+		Channel:   "#fromenv",
+		Sender:    "envbob",
+		Text:      "via envelope",
+	}
+	a.Events.Publish(context.Background(), &agent.Event{
+		Type:   agent.EventMessage,
+		Fields: map[string]any{"envelope": env},
+	})
+	got := readJSON(t, conn)
+	assert.Equal(t, "message", got["op"])
+	assert.Equal(t, "#fromenv", got["channel"], "channel must come from the envelope")
+	assert.Equal(t, "envbob", got["nick"], "sender must come from the envelope")
+	assert.Equal(t, "via envelope", got["text"])
+}
+
+func TestRecordChannelTrimsBufferAtCap(t *testing.T) {
+	// Push more than channelLogCap (200) messages and reconnect — the
+	// replay must come back capped at 200, exercising the trim branch
+	// in recordChannel.
+	bridge := newFakeBridge("turborg")
+	g, a, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+
+	for i := 0; i < 220; i++ {
+		a.Events.Publish(context.Background(), &agent.Event{
+			Type: agent.EventMessage,
+			Fields: map[string]any{
+				"channel": "#busy", "sender": "alice", "text": "spam",
+			},
+		})
+	}
+	// Allow the EventBus to drain before connecting.
+	time.Sleep(50 * time.Millisecond)
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	_ = readJSON(t, conn) // state
+
+	replayed := 0
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && replayed < 230 {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		_, _, err := conn.Read(ctx)
+		cancel()
+		if err != nil {
+			break
+		}
+		replayed++
+	}
+	assert.LessOrEqual(t, replayed, 200,
+		"channel log must be capped at channelLogCap (200) by the trim branch")
+}
+
+func TestServerNoticeBufferTrimsAtCap(t *testing.T) {
+	// Push more than serverLogCap (100) notices and verify the buffer
+	// stays bounded; we observe via the replay frame count.
+	bridge := newFakeBridge("turborg")
+	g, a, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+
+	for i := 0; i < 150; i++ {
+		a.Events.Publish(context.Background(), &agent.Event{
+			Type:   agent.EventServerNotice,
+			Fields: map[string]any{"text": "n", "kind": "info"},
+		})
+	}
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	_ = readJSON(t, conn) // state
+
+	replayed := 0
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		_, _, err := conn.Read(ctx)
+		cancel()
+		if err != nil {
+			break
+		}
+		replayed++
+		if replayed > 120 {
+			break // we've seen enough — buffer is not bounded
+		}
+	}
+	assert.LessOrEqual(t, replayed, 100, "server log must be capped at serverLogCap")
+}

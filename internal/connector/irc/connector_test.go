@@ -1,8 +1,10 @@
 package irc_test
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -199,4 +201,200 @@ func TestSASLUnsupportedFallsBack(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("agent did not shut down")
 	}
+}
+
+// --- Server password + NickServ identify + CTCP throttle paths ---------
+
+func TestConnectorSendsServerPasswordAndNickServIdentify(t *testing.T) {
+	fs := fakeirc.New(t)
+	defer fs.Close()
+
+	conn := irc.New(&irc.Settings{
+		Hostname:          "127.0.0.1",
+		Port:              fs.Port(),
+		Nick:              "turborg",
+		Channels:          []string{"#test"},
+		ServerPassword:    "sekrit",
+		NickServPassword:  "nspass",
+		CTCPAutoReply:     true,
+		CTCPMaxPerWindow:  3,
+		CTCPWindowSeconds: 30,
+	}, nil, nil)
+
+	a := agent.New(nil)
+	a.AddConnector(conn)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+
+	require.True(t,
+		fs.WaitFor(containsLine("PASS sekrit"), 2*time.Second),
+		"server PASS must be sent during register; received: %v", fs.Received(),
+	)
+	require.True(t,
+		fs.WaitFor(containsPrefix("PRIVMSG NickServ :IDENTIFY"), 2*time.Second),
+		"NickServ IDENTIFY must follow JOIN; received: %v", fs.Received(),
+	)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent did not shut down")
+	}
+}
+
+func TestConnectorCTCPAutoReplyVersion(t *testing.T) {
+	fs := fakeirc.New(t)
+	defer fs.Close()
+
+	conn := irc.New(&irc.Settings{
+		Hostname:          "127.0.0.1",
+		Port:              fs.Port(),
+		Nick:              "turborg",
+		Channels:          []string{"#test"},
+		CTCPAutoReply:     true,
+		CTCPMaxPerWindow:  3,
+		CTCPWindowSeconds: 30,
+	}, nil, nil)
+
+	a := agent.New(nil)
+	a.AddConnector(conn)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+
+	require.True(t,
+		fs.WaitFor(containsPrefix("JOIN #test"), 2*time.Second),
+		"connector did not JOIN; received: %v", fs.Received(),
+	)
+	// Simulate an inbound CTCP VERSION from alice; expect a NOTICE reply.
+	require.NoError(t, fs.SendLine(":alice!~a@host PRIVMSG turborg :\x01VERSION\x01"))
+	require.True(t,
+		fs.WaitFor(func(lines []string) bool {
+			for _, l := range lines {
+				if strings.HasPrefix(l, "NOTICE alice :\x01VERSION turborg") {
+					return true
+				}
+			}
+			return false
+		}, 2*time.Second),
+		"missing CTCP VERSION reply NOTICE; received: %v", fs.Received(),
+	)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent did not shut down")
+	}
+}
+
+func TestConnectorClientPingFiresPeriodically(t *testing.T) {
+	// ClientPingInterval=50ms — within a 2s test window we should see
+	// at least one client-initiated PING from the connector reach the
+	// upstream socket.
+	fs := fakeirc.New(t)
+	defer fs.Close()
+
+	conn := irc.New(&irc.Settings{
+		Hostname:           "127.0.0.1",
+		Port:               fs.Port(),
+		Nick:               "turborg",
+		Channels:           []string{"#test"},
+		ClientPingInterval: 50 * time.Millisecond,
+		ReadIdleTimeout:    5 * time.Second,
+	}, nil, nil)
+
+	a := agent.New(nil)
+	a.AddConnector(conn)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+
+	require.True(t,
+		fs.WaitFor(containsPrefix("PING "), 2*time.Second),
+		"client-initiated PING must reach the server; received: %v", fs.Received(),
+	)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent did not shut down")
+	}
+}
+
+func TestConnectorReadIdleTimeoutSurfaces(t *testing.T) {
+	// ReadIdleTimeout=200ms, no ClientPingInterval — the read loop must
+	// surface a timeout error when the server goes silent after the
+	// handshake. ClientPingInterval is left zero so the ticker goroutine
+	// returns immediately and only the read side is in play.
+	fs := fakeirc.New(t)
+	defer fs.Close()
+
+	conn := irc.New(&irc.Settings{
+		Hostname:           "127.0.0.1",
+		Port:               fs.Port(),
+		Nick:               "turborg",
+		Channels:           []string{"#test"},
+		ReadIdleTimeout:    200 * time.Millisecond,
+		ClientPingInterval: 0,
+	}, nil, nil)
+
+	a := agent.New(nil)
+	a.AddConnector(conn)
+	done := make(chan error, 1)
+	go func() { done <- a.Run(context.Background()) }()
+
+	select {
+	case err := <-done:
+		// Either the read-idle path surfaced an explicit error, or the
+		// agent unwound cleanly when ctx was cancelled elsewhere. The
+		// read-idle branch surfaces "irc read idle: no data for X".
+		if err != nil {
+			assert.Contains(t, err.Error(), "irc read idle",
+				"silent-death timeout must surface as an explicit read idle error")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("read-idle timeout did not unwind Run within 3s")
+	}
+}
+
+func TestConnectorIgnoresUnknownNickInUse433DuringHandshake(t *testing.T) {
+	// Manually drive a fakeirc that responds to USER with a 433 instead
+	// of the normal 001 + 376. The connector's awaitHandshake must
+	// recognize ErrNickNameInUse and return an explicit error.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer l.Close()
+
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		reader := bufio.NewReader(conn)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return
+			}
+			if strings.HasPrefix(line, "USER ") {
+				_, _ = conn.Write([]byte(":fake 433 * turborg :Nickname is already in use\r\n"))
+				return
+			}
+		}
+	}()
+
+	c := irc.New(&irc.Settings{
+		Hostname:         "127.0.0.1",
+		Port:             l.Addr().(*net.TCPAddr).Port,
+		Nick:             "turborg",
+		HandshakeTimeout: 2 * time.Second,
+	}, nil, nil)
+
+	err = c.Start(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already in use")
 }

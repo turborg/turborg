@@ -14,31 +14,28 @@ local-prefix: "github.com/turborg/turborg"
 
 threshold:
   file: 70
-  package: 80
-  # Temporarily lowered from 90 → 89 during the v0.1.0 cutover. Recent
-  # bouncer/IRC debug commits dropped total coverage to 89.4%. Follow-up
-  # to restore to 90% is tracked as a GitHub issue.
-  total: 89
+  package: 90
+  total: 95
 
 override:
   - path: ^internal/agent$
-    threshold: 95
+    threshold: 98
   - path: ^internal/config$
-    threshold: 90
+    threshold: 95
   - path: ^internal/llm$
-    threshold: 95
+    threshold: 100
   - path: ^internal/llm/anthropic$
-    threshold: 95
+    threshold: 98
   - path: ^internal/logging$
     threshold: 100
   - path: ^internal/hive$
     threshold: 100
   - path: ^internal/connector/irc$
-    threshold: 85
+    threshold: 94
   - path: ^internal/web$
-    threshold: 80
+    threshold: 95
   - path: ^internal/runtime$
-    threshold: 65
+    threshold: 92
 
 # cmd/turborg + internal/version + tests/fixtures contain only thin
 # wiring or test infrastructure. CI excludes them from the package

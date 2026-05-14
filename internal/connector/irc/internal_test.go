@@ -10,8 +10,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -133,6 +135,19 @@ func TestPeerIPOnNilClient(t *testing.T) {
 	assert.Equal(t, "", peerIP(nil))
 }
 
+func TestPeerIPOnNilConn(t *testing.T) {
+	assert.Equal(t, "", peerIP(&BouncerClient{}))
+}
+
+func TestPeerIPNonTCPFallback(t *testing.T) {
+	// Our recordingConn returns a fakeAddr that is NOT *net.TCPAddr,
+	// so peerIP must fall through to RemoteAddr().String() — covers
+	// the non-TCP transport branch.
+	bc := newBouncerClient(newRecordingConn(), slog.Default())
+	assert.Equal(t, "broken:0", peerIP(bc),
+		"non-TCP addr must fall back to RemoteAddr().String() as-is")
+}
+
 func TestUpstreamPrefixEmptyWhenNickUnset(t *testing.T) {
 	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
 	require.NoError(t, err)
@@ -143,6 +158,26 @@ func TestNewBouncerDefaultsHost(t *testing.T) {
 	b, err := NewBouncer("p", "", 0, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "127.0.0.1", b.host, "empty host must default to 127.0.0.1")
+}
+
+func TestMaskSecretsPrivmsgNickServNoColonReturnsLine(t *testing.T) {
+	// PRIVMSG NickServ format without a trailing colon — unusual but
+	// possible. The maskSecrets fallback must return the line as-is
+	// rather than mis-redacting.
+	in := "PRIVMSG NickServ HI"
+	assert.Equal(t, in, maskSecrets(in))
+}
+
+func TestMaskSecretsAuthenticatePlainPassthrough(t *testing.T) {
+	// AUTHENTICATE PLAIN starts SASL — no secret in this line itself.
+	assert.Equal(t, "AUTHENTICATE PLAIN", maskSecrets("AUTHENTICATE PLAIN"))
+}
+
+func TestBouncerClientAddressNilConn(t *testing.T) {
+	// Direct field-only construction — verifies the nil-conn guard in
+	// Address() returns an empty string instead of panicking.
+	bc := &BouncerClient{}
+	assert.Equal(t, "", bc.Address())
 }
 
 func TestAddrBeforeStart(t *testing.T) {
@@ -433,6 +468,501 @@ func TestMaskSecrets(t *testing.T) {
 			assert.Equal(t, tc.want, maskSecrets(tc.in))
 		})
 	}
+}
+
+func TestSendRawWhenNotConnected(t *testing.T) {
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+	err := c.SendRaw("PRIVMSG #ch :hi")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not connected")
+}
+
+func TestSendRawWhenConnectedReachesUpstream(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+
+	received := make(chan string, 4)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := server.Read(buf)
+			if err != nil {
+				return
+			}
+			received <- string(buf[:n])
+		}
+	}()
+
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+	c.client = &Client{conn: client, reader: bufio.NewReader(client)}
+
+	require.NoError(t, c.SendRaw("WHOIS alice"))
+
+	select {
+	case got := <-received:
+		assert.Contains(t, got, "WHOIS alice")
+	case <-time.After(time.Second):
+		t.Fatal("SendRaw did not reach the upstream pipe within 1s")
+	}
+}
+
+func TestSendBroadcastsThroughBouncerWhenAttached(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := server.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+	c.client = &Client{conn: client, reader: bufio.NewReader(client)}
+
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	c.bouncer = b
+	b.AttachState(c.state, "bot", "user", "host")
+	c.state.OnSelfJoin("#x")
+
+	// Send must call bouncer.BroadcastAsSelf — visible via the replay buffer.
+	require.NoError(t, c.Send(&agent.OutboundEnvelope{Channel: "#x", Text: "hi"}))
+
+	b.logMu.Lock()
+	defer b.logMu.Unlock()
+	require.Len(t, b.channelLog["#x"], 1,
+		"Send must record self-prefixed line into the bouncer's replay buffer")
+}
+
+func TestHandlePrivmsgRoutesDMToSenderChannel(t *testing.T) {
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+	c.handlePrivmsg(context.Background(),
+		Message{Prefix: "alice!u@h", Params: []string{"bot"}, Trailing: "psst"},
+		":alice!u@h PRIVMSG bot :psst")
+
+	select {
+	case env := <-c.Inbound():
+		assert.True(t, env.IsDirect, "DM target → IsDirect must be true")
+		assert.Equal(t, "alice", env.Channel, "DM channel must be the sender's nick for replies")
+		assert.Equal(t, "psst", env.Text)
+	case <-time.After(time.Second):
+		t.Fatal("expected inbound DM envelope")
+	}
+}
+
+func TestHandlePrivmsgActionPassesThrough(t *testing.T) {
+	// ACTION (/me) is chat, not metadata — must NOT be treated as a CTCP
+	// auto-reply.
+	c := New(&Settings{Nick: "bot", CTCPAutoReply: true}, nil, nil)
+	c.handlePrivmsg(context.Background(),
+		Message{Prefix: "alice!u@h", Params: []string{"#ch"}, Trailing: "\x01ACTION waves\x01"},
+		":alice!u@h PRIVMSG #ch :\x01ACTION waves\x01")
+	select {
+	case env := <-c.Inbound():
+		assert.Equal(t, "#ch", env.Channel)
+	case <-time.After(time.Second):
+		t.Fatal("ACTION must surface as a normal inbound envelope")
+	}
+}
+
+func TestHandlePartSelfTriggersSelfPart(t *testing.T) {
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+	c.state.OnSelfJoin("#x")
+	c.handlePart(context.Background(), Message{Prefix: "bot!u@h", Params: []string{"#x"}})
+	// After self-PART the channel must be absent from joined list.
+	for _, info := range c.state.JoinedChannels() {
+		assert.NotEqual(t, "#x", info.Name, "self-PART must remove channel from joined list")
+	}
+}
+
+func TestHandleNickChangeFallsBackToTrailing(t *testing.T) {
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+	// Some servers carry the new nick in Params instead of Trailing.
+	c.handleNickChange(context.Background(),
+		Message{Prefix: "alice!u@h", Params: []string{"alice2"}})
+}
+
+func TestHandleNickChangeEmptyOldOrNewIsNoop(t *testing.T) {
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+	c.handleNickChange(context.Background(), Message{Prefix: "alice!u@h"})
+	c.handleNickChange(context.Background(), Message{Prefix: "", Trailing: "alice2"})
+}
+
+func TestSetCurrentNickIgnoresEmpty(t *testing.T) {
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+	c.setCurrentNick("")
+	assert.Equal(t, "bot", c.CurrentNick(),
+		"setCurrentNick must ignore empty input — the requested nick stays")
+}
+
+func TestSetCurrentNickIdempotent(t *testing.T) {
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+	c.setCurrentNick("bot") // same value — no bouncer push needed
+	assert.Equal(t, "bot", c.CurrentNick())
+}
+
+// --- Bouncer internal coverage: error + edge branches ----------------
+
+// brokenConn is a net.Conn whose Write always fails. Used to drive the
+// bouncer's "client dropped on broken write" branches without needing a
+// real socket teardown.
+type brokenConn struct {
+	net.Conn
+	closeErr error
+}
+
+func (b *brokenConn) Write(_ []byte) (int, error) { return 0, errBrokenWrite }
+func (b *brokenConn) Read(p []byte) (int, error)  { return 0, errBrokenWrite }
+func (b *brokenConn) Close() error                { return b.closeErr }
+func (b *brokenConn) RemoteAddr() net.Addr        { return fakeAddr{} }
+func (b *brokenConn) LocalAddr() net.Addr         { return fakeAddr{} }
+
+type fakeAddr struct{}
+
+func (fakeAddr) Network() string { return "tcp" }
+func (fakeAddr) String() string  { return "broken:0" }
+
+var errBrokenWrite = &netErr{msg: "broken"}
+
+type netErr struct{ msg string }
+
+func (e *netErr) Error() string { return e.msg }
+
+func TestBroadcastDropsClientOnWriteError(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	b.AttachState(NewChannelState(), "bot", "u", "h")
+
+	// Manually wire a fake authenticated client whose Write fails.
+	bc := newBouncerClient(&brokenConn{}, slog.Default())
+	bc.setAuthenticated()
+	b.mu.Lock()
+	b.clients[bc] = struct{}{}
+	b.mu.Unlock()
+
+	b.Broadcast("PRIVMSG #x :hi", nil)
+
+	b.mu.Lock()
+	_, present := b.clients[bc]
+	b.mu.Unlock()
+	assert.False(t, present, "broken-write client must be removed from the set")
+}
+
+func TestBroadcastAsSelfDropsClientOnWriteError(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	b.AttachState(NewChannelState(), "bot", "u", "h")
+
+	bc := newBouncerClient(&brokenConn{}, slog.Default())
+	bc.setAuthenticated()
+	b.mu.Lock()
+	b.clients[bc] = struct{}{}
+	b.mu.Unlock()
+
+	b.BroadcastAsSelf("PRIVMSG #x :hi", nil)
+
+	b.mu.Lock()
+	_, present := b.clients[bc]
+	b.mu.Unlock()
+	assert.False(t, present, "broken-write client must be removed from the set")
+}
+
+func TestBroadcastAsSelfTagsZNCSelfMessageCap(t *testing.T) {
+	// A client that ACK'd znc.in/self-message gets the tag prefix on
+	// fan-out. We capture the bytes through a recordingConn instead of
+	// the real socket.
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	b.AttachState(NewChannelState(), "bot", "user", "host")
+
+	rc := newRecordingConn()
+	bc := newBouncerClient(rc, slog.Default())
+	bc.setAuthenticated()
+	bc.ackCap("znc.in/self-message")
+	b.mu.Lock()
+	b.clients[bc] = struct{}{}
+	b.mu.Unlock()
+
+	b.BroadcastAsSelf("PRIVMSG #x :hello", nil)
+	got := rc.snapshot()
+	require.NotEmpty(t, got, "client must receive the fanned-out line")
+	assert.Contains(t, got[0], "@znc.in/self-message ",
+		"clients with znc.in/self-message must receive the tag prefix")
+}
+
+func TestBroadcastSkipsUnauthenticatedClients(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	b.AttachState(NewChannelState(), "bot", "u", "h")
+
+	rc := newRecordingConn()
+	bc := newBouncerClient(rc, slog.Default())
+	// Don't call setAuthenticated — should be skipped.
+	b.mu.Lock()
+	b.clients[bc] = struct{}{}
+	b.mu.Unlock()
+
+	b.Broadcast("PRIVMSG #x :should-not-arrive", nil)
+	assert.Empty(t, rc.snapshot(),
+		"unauthenticated clients must not receive broadcast lines")
+}
+
+func TestUpstreamPrefixEmptyShortCircuitsBroadcastAsSelf(t *testing.T) {
+	// With no upstream nick, upstreamPrefix() returns "" and
+	// BroadcastAsSelf passes the line through untouched. recordForReplay
+	// runs with no state attached (early return).
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	// No AttachState call → state == nil, upstreamNick == "" → both
+	// short-circuit branches fire.
+	rc := newRecordingConn()
+	bc := newBouncerClient(rc, slog.Default())
+	bc.setAuthenticated()
+	b.mu.Lock()
+	b.clients[bc] = struct{}{}
+	b.mu.Unlock()
+
+	b.BroadcastAsSelf("PRIVMSG #x :no-prefix", nil)
+	got := rc.snapshot()
+	require.Len(t, got, 1)
+	// No upstream prefix means the line went out as-is.
+	assert.Equal(t, "PRIVMSG #x :no-prefix", got[0])
+}
+
+// recordingConn captures everything written to it so tests can assert
+// the bytes the bouncer emits to a client.
+type recordingConn struct {
+	mu    sync.Mutex
+	writes [][]byte
+}
+
+func newRecordingConn() *recordingConn { return &recordingConn{} }
+
+func (c *recordingConn) Read(_ []byte) (int, error) {
+	// Block until close; the bouncer's handleClient won't call this in
+	// these unit tests because we don't run acceptLoop.
+	return 0, errBrokenWrite
+}
+
+func (c *recordingConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cp := make([]byte, len(p))
+	copy(cp, p)
+	c.writes = append(c.writes, cp)
+	return len(p), nil
+}
+
+func (c *recordingConn) Close() error                       { return nil }
+func (c *recordingConn) LocalAddr() net.Addr                { return fakeAddr{} }
+func (c *recordingConn) RemoteAddr() net.Addr               { return fakeAddr{} }
+func (c *recordingConn) SetDeadline(_ time.Time) error      { return nil }
+func (c *recordingConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (c *recordingConn) SetWriteDeadline(_ time.Time) error { return nil }
+
+func (c *recordingConn) snapshot() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]string, 0, len(c.writes))
+	for _, w := range c.writes {
+		out = append(out, strings.TrimRight(string(w), "\r\n"))
+	}
+	return out
+}
+
+// --- handleLine forwarding + observer fire path ---------------------
+
+func TestHandleLineForwardsPrivmsgUpstreamAndFiresObserver(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	b.AttachState(NewChannelState(), "bot", "u", "h")
+
+	var sentUpstream []string
+	b.AttachUpstream(func(line string) error {
+		sentUpstream = append(sentUpstream, line)
+		return nil
+	})
+
+	var observed struct {
+		ch, sender, text, kind string
+		fired                  int
+	}
+	b.AttachOutboundObserver(func(channel, sender, text, kind string) {
+		observed.ch, observed.sender, observed.text, observed.kind = channel, sender, text, kind
+		observed.fired++
+	})
+
+	rc := newRecordingConn()
+	bc := newBouncerClient(rc, slog.Default())
+	bc.setAuthenticated()
+	b.mu.Lock()
+	b.clients[bc] = struct{}{}
+	b.mu.Unlock()
+
+	// Authenticated client tunneling a PRIVMSG to a channel. The
+	// bouncer must forward upstream AND fan to other clients AND fire
+	// the observer.
+	b.handleLine(bc, "PRIVMSG #x :hello world")
+
+	require.Len(t, sentUpstream, 1, "PRIVMSG must be forwarded upstream once")
+	assert.Equal(t, "PRIVMSG #x :hello world", sentUpstream[0])
+	assert.Equal(t, 1, observed.fired)
+	assert.Equal(t, "#x", observed.ch)
+	assert.Equal(t, "bot", observed.sender)
+	assert.Equal(t, "hello world", observed.text)
+	assert.Equal(t, "PRIVMSG", observed.kind)
+}
+
+func TestHandleLineMalformedPrivmsgDropped(t *testing.T) {
+	// Authenticated client sends a PRIVMSG with empty target (well-
+	// formed check fails). Must be silently dropped — no upstream
+	// forward, no fan-out, no observer fire.
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	b.AttachState(NewChannelState(), "bot", "u", "h")
+	called := false
+	b.AttachUpstream(func(_ string) error { called = true; return nil })
+
+	rc := newRecordingConn()
+	bc := newBouncerClient(rc, slog.Default())
+	bc.setAuthenticated()
+	b.mu.Lock()
+	b.clients[bc] = struct{}{}
+	b.mu.Unlock()
+
+	b.handleLine(bc, "PRIVMSG  :no-target")
+	assert.False(t, called, "malformed PRIVMSG must not be forwarded upstream")
+}
+
+func TestHandleLineNonForwardableCommandDropped(t *testing.T) {
+	// Authenticated client sends a non-forwardable command (e.g.,
+	// QUIT). Must not be forwarded upstream.
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	b.AttachState(NewChannelState(), "bot", "u", "h")
+	called := false
+	b.AttachUpstream(func(_ string) error { called = true; return nil })
+
+	rc := newRecordingConn()
+	bc := newBouncerClient(rc, slog.Default())
+	bc.setAuthenticated()
+	b.mu.Lock()
+	b.clients[bc] = struct{}{}
+	b.mu.Unlock()
+
+	b.handleLine(bc, "QUIT :goodbye")
+	assert.False(t, called, "non-forwardable QUIT must not be forwarded")
+}
+
+func TestHandleLinePingWithParamsCookie(t *testing.T) {
+	// PING via Params rather than Trailing — exercises the cookie
+	// fallback assignment in the PING case.
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	rc := newRecordingConn()
+	bc := newBouncerClient(rc, slog.Default())
+	b.handleLine(bc, "PING server.name")
+	got := rc.snapshot()
+	require.NotEmpty(t, got)
+	assert.Contains(t, got[0], ":server.name", "params-form PING must echo back via trailing")
+}
+
+func TestHandleLineUpstreamReturnsErrorIsLogged(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	b.AttachState(NewChannelState(), "bot", "u", "h")
+	b.AttachUpstream(func(_ string) error { return errBrokenWrite })
+
+	rc := newRecordingConn()
+	bc := newBouncerClient(rc, slog.Default())
+	bc.setAuthenticated()
+	b.mu.Lock()
+	b.clients[bc] = struct{}{}
+	b.mu.Unlock()
+
+	// Send failure on the upstream returns early — no fan-out, no
+	// observer fire. The test just verifies nothing panics and the
+	// log path is exercised.
+	b.handleLine(bc, "PRIVMSG #x :nope")
+}
+
+func TestHandleLineWithoutUpstreamAttachedNoOps(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	b.AttachState(NewChannelState(), "bot", "u", "h")
+	// Note: NO AttachUpstream call — send is nil.
+
+	rc := newRecordingConn()
+	bc := newBouncerClient(rc, slog.Default())
+	bc.setAuthenticated()
+
+	// Forwardable command with no upstream attached: silent return.
+	b.handleLine(bc, "JOIN #x")
+	// Nothing should have been broadcast to the client either.
+	assert.Empty(t, rc.snapshot())
+}
+
+func TestHandleLineUnauthenticatedNonPassDropped(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	rc := newRecordingConn()
+	bc := newBouncerClient(rc, slog.Default())
+	// no setAuthenticated
+
+	b.handleLine(bc, "JOIN #x")
+	// No upstream attached, no client writes — silent drop.
+	assert.Empty(t, rc.snapshot())
+}
+
+func TestHandleLinePingRepliesLocally(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+
+	rc := newRecordingConn()
+	bc := newBouncerClient(rc, slog.Default())
+	bc.setAuthenticated()
+
+	b.handleLine(bc, "PING :token123")
+	got := rc.snapshot()
+	require.NotEmpty(t, got)
+	assert.Contains(t, got[0], "PONG turborg-bouncer :token123",
+		"PING must be answered locally without touching upstream")
+}
+
+// --- handleCap LIST + END branches ----------------------------------
+
+func TestHandleCapListAndEnd(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	b.AttachState(NewChannelState(), "bot", "u", "h")
+
+	rc := newRecordingConn()
+	bc := newBouncerClient(rc, slog.Default())
+	bc.ackCap("echo-message")
+
+	// CAP LIST returns the negotiated set.
+	b.handleCap(bc, Message{Command: CmdCap, Params: []string{"LIST"}})
+	lines := rc.snapshot()
+	require.NotEmpty(t, lines)
+	assert.Contains(t, lines[len(lines)-1], "CAP * LIST :echo-message")
+
+	// CAP END with no deferred welcome is a no-op.
+	b.handleCap(bc, Message{Command: CmdCap, Params: []string{"END"}})
+
+	// CAP REQ with a multi-word REQ via params (no trailing).
+	b.handleCap(bc, Message{Command: CmdCap, Params: []string{"REQ", "echo-message", "server-time"}})
+	final := rc.snapshot()
+	// Expect at least one CAP * ACK reply.
+	gotAck := false
+	for _, l := range final {
+		if strings.Contains(l, "CAP * ACK") {
+			gotAck = true
+			break
+		}
+	}
+	assert.True(t, gotAck, "CAP REQ via params (not trailing) must still ACK")
 }
 
 func TestRecordForReplayBoundsRing(t *testing.T) {

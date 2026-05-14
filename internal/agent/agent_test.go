@@ -165,6 +165,37 @@ func TestAgentLogsSendError(t *testing.T) {
 		"MESSAGE_SENT must not fire when the connector rejects the outbound")
 }
 
+func TestAgentLogReturnsConfiguredLogger(t *testing.T) {
+	a := agent.New(nil)
+	require.NotNil(t, a.Log(), "Log() must return a non-nil logger even when New(nil) was called")
+}
+
+func TestAgentDrainReturnsOnInboundChannelClose(t *testing.T) {
+	a := agent.New(nil)
+	c := fakeconn.New("closer")
+	a.AddConnector(c)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+
+	// Close the inbound channel — drain must return cleanly without
+	// blocking ctx cancellation.
+	require.Eventually(t, func() bool { return c.Started() },
+		time.Second, 10*time.Millisecond)
+	c.CloseInbound()
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Agent did not return after inbound close + ctx cancel")
+	}
+}
+
 type failingStart struct{ fakeconn.Conn }
 
 func (f *failingStart) Name() string                                { return "failing" }

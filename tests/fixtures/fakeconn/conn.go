@@ -18,10 +18,11 @@ type Conn struct {
 
 	inbox chan *agent.InboundEnvelope
 
-	mu      sync.Mutex
-	sent    []*agent.OutboundEnvelope
-	started bool
-	stopped bool
+	mu       sync.Mutex
+	sent     []*agent.OutboundEnvelope
+	started  bool
+	stopped  bool
+	inboxClosed bool
 }
 
 func New(name string) *Conn {
@@ -55,7 +56,10 @@ func (c *Conn) Stop(_ context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.stopped = true
-	close(c.inbox)
+	if !c.inboxClosed {
+		close(c.inbox)
+		c.inboxClosed = true
+	}
 	return nil
 }
 
@@ -68,6 +72,18 @@ func (c *Conn) Send(env *agent.OutboundEnvelope) error {
 
 func (c *Conn) Feed(env *agent.InboundEnvelope) {
 	c.inbox <- env
+}
+
+// CloseInbound closes the inbox channel. Tests use this to exercise the
+// drain-loop branch that returns when its inbound channel is closed
+// (Agent.drain), without going through the full Stop() lifecycle.
+func (c *Conn) CloseInbound() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.inboxClosed {
+		close(c.inbox)
+		c.inboxClosed = true
+	}
 }
 
 func (c *Conn) Sent() []*agent.OutboundEnvelope {
