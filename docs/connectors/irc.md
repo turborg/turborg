@@ -191,43 +191,14 @@ scrollback; see below.)
 
 ---
 
-## WebSocket gateway + reference UI
+## Gateway (cross-reference)
 
-A real-time JSON-over-WebSocket protocol with a bundled vanilla-JS
-single-page reference UI. Same listener serves `/`, `/health`,
-`/metrics`, and `/ws`.
-
-The gateway is **IRC-coupled** — it knows how to render channel state,
-fan PRIVMSGs to subscribed clients, and accept `say` operations that
-flow back through the agent's EventBus to the IRC connector. That's
-why it lives under `TURBORG_IRC_WEB_*`: it pairs with the IRC bouncer
-the same way an attached client pairs with it.
-
-`TURBORG_WEB_*` (without the `IRC_`) is **reserved** for a future
-general-purpose bot-core web connector. It is currently unused; do not
-set it.
-
-| Variable | Type | Default | Notes |
-|---|---|---|---|
-| `TURBORG_IRC_WEB_PASSWORD` | string | `""` | **Set this to enable the gateway.** Unset = gateway disabled, no listener. SaaS deployments swap `StaticPasswordVerifier` for a JWT- or session-aware `TokenVerifier`; the wire protocol is unchanged. |
-| `TURBORG_IRC_WEB_HOST` | string | `127.0.0.1` | Listen interface. **Keep on loopback** unless you put a TLS-terminating reverse proxy in front. WebSocket auth tokens travel in cleartext over plain HTTP. |
-| `TURBORG_IRC_WEB_PORT` | int | `8765` | HTTP listen port. |
-| `TURBORG_IRC_WEB_MAX_FAILED_ATTEMPTS` | int | `5` | Per-IP brute-force cap on `/ws` auth. |
-| `TURBORG_IRC_WEB_FAILURE_WINDOW_SECONDS` | int | `60` | Failure-counter window. |
-| `TURBORG_IRC_WEB_LOCKOUT_SECONDS` | int | `300` | Lockout duration after the threshold trips. |
-| `TURBORG_IRC_WEB_IDLE_SHUTDOWN_SECONDS` | int | `0` (disabled) | When > 0, the gateway calls its `OnIdleShutdown` callback N seconds after the **last WebSocket client** disconnects. The xshellz SaaS sidecar wires this to a `docker stop` for free-tier auto-pause. Bouncer connections do **not** extend the timer — only WS clients do, since the bouncer is intentionally a different SLA tier. |
-
-### Operational notes
-
-- The reference UI at `/` is intentionally **vanilla JS / single file /
-  no build step**. Polished, production-grade frontend work belongs in
-  a separate Angular client (xshellz operates one downstream).
-- The wire protocol is documented in `docs/ui/PLAN.md` (a local-only
-  reference for the xshellz Angular team). It is byte-stable across
-  patch releases.
-- **Port 0 is legal** in code (it tells `net.Listen` to pick an
-  OS-assigned port). The env default is `8765`, so production
-  deployments always get a stable port; port-0 is reserved for tests.
+The bot also exposes a control-plane gateway (WS protocol + reference
+UI) that today streams IRC events and accepts `say`/`join`/`kick` ops
+flowing back through the agent. The gateway is **not** an IRC
+sub-feature — it's a top-level surface that just happens to surface
+IRC events while IRC is the only connector. See
+[`docs/gateway.md`](../gateway.md) for the full reference.
 
 ---
 

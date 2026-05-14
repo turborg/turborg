@@ -51,9 +51,9 @@ In `#turborg-test`, type `!ping` — the bot replies `pong`. That's it.
 |------------------------------------------|---------------------------------------------------|
 | Enable the `!ask` AI command             | `TURBORG_ANTHROPIC_API_KEY=sk-...`                |
 | Attach HexChat through the bouncer       | `TURBORG_IRC_BOUNCER_PASSWORD=…`                  |
-| Open the web UI at `http://127.0.0.1:8765/` | `TURBORG_IRC_WEB_PASSWORD=…`                   |
+| Open the web UI at `http://127.0.0.1:8765/` | `TURBORG_GATEWAY_PASSWORD=…`                   |
 
-See [`docs/connectors/irc.md`](docs/connectors/irc.md) for the full env-var reference for the IRC connector — SASL, NickServ identify, bouncer, WS gateway, rate limits, idle-shutdown, timing.
+See [`docs/connectors/irc.md`](docs/connectors/irc.md) for the IRC connector reference (SASL, NickServ identify, bouncer, rate limits, timing) and [`docs/gateway.md`](docs/gateway.md) for the gateway (WS protocol, auth, idle-shutdown).
 
 ## Quickstart: a minimal bot in Go
 
@@ -137,8 +137,8 @@ To expose the web UI to the host, also publish the port:
 
 ```bash
 docker run --rm \
-  -e TURBORG_IRC_WEB_PASSWORD=changeme \
-  -e TURBORG_IRC_WEB_HOST=0.0.0.0 \
+  -e TURBORG_GATEWAY_PASSWORD=changeme \
+  -e TURBORG_GATEWAY_HOST=0.0.0.0 \
   -p 8765:8765 \
   --env-file .env \
   ghcr.io/turborg/turborg:latest

@@ -15,8 +15,24 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Equal(t, "text", s.LogFormat)
 	assert.Equal(t, "!", s.CommandPrefix)
 	assert.Equal(t, "claude-sonnet-4-6", s.AnthropicModel)
+	assert.Equal(t, "127.0.0.1", s.GatewayHost)
+	assert.Equal(t, 8765, s.GatewayPort)
 	assert.False(t, s.AnthropicEnabled())
+	assert.False(t, s.GatewayEnabled())
+	assert.False(t, s.IdleShutdownEnabled())
 	assert.False(t, s.HiveEnabled)
+}
+
+func TestLoadRespectsGatewayToggle(t *testing.T) {
+	t.Setenv("TURBORG_GATEWAY_PASSWORD", "hunter2")
+	t.Setenv("TURBORG_GATEWAY_PORT", "9000")
+	t.Setenv("TURBORG_GATEWAY_IDLE_SHUTDOWN_SECONDS", "30")
+	s, err := config.Load()
+	require.NoError(t, err)
+	assert.True(t, s.GatewayEnabled())
+	assert.True(t, s.IdleShutdownEnabled())
+	assert.Equal(t, 9000, s.GatewayPort)
+	assert.Equal(t, 30, s.GatewayIdleShutdownSeconds)
 }
 
 func TestLoadConnectorsCSV(t *testing.T) {
@@ -60,9 +76,9 @@ func TestLoadHandlesEmptyCSVAsNoConnectors(t *testing.T) {
 }
 
 func TestLoadRejectsMalformedTypedEnv(t *testing.T) {
-	// CommandMaxPerWindow is int — a non-numeric value surfaces a parse
-	// error from caarlos0/env, exercising the err != nil branch in Load().
-	t.Setenv("TURBORG_COMMAND_MAX_PER_WINDOW", "not-a-number")
+	// GatewayPort is int — a non-numeric value surfaces a parse error
+	// from caarlos0/env, exercising the err != nil branch in Load().
+	t.Setenv("TURBORG_GATEWAY_PORT", "not-a-number")
 	_, err := config.Load()
 	require.Error(t, err)
 }

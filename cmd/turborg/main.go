@@ -91,16 +91,16 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 	if ircSettings.BouncerEnabled() {
 		bouncerState = fmt.Sprintf("on@%s:%d", ircSettings.BouncerHost, ircSettings.BouncerPort)
 	}
-	webState := "off"
+	gatewayState := "off"
 	if built.Gateway != nil {
-		webState = fmt.Sprintf("on@%s:%d", ircSettings.WebHost, ircSettings.WebPort)
+		gatewayState = fmt.Sprintf("on@%s:%d", settings.GatewayHost, settings.GatewayPort)
 	}
 	log.Info("turborg starting",
 		"version", version.Version,
 		"mode", mode,
 		"connectors", connectorNames(settings),
 		"bouncer", bouncerState,
-		"web", webState,
+		"gateway", gatewayState,
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

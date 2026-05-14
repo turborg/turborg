@@ -92,38 +92,3 @@ func TestValidateAcceptsHealthyConfig(t *testing.T) {
 	s := &irc.Settings{ClientPingInterval: 120 * time.Second, ReadIdleTimeout: 300 * time.Second}
 	assert.NoError(t, s.Validate())
 }
-
-func TestLoadSettingsWebDefaults(t *testing.T) {
-	t.Setenv("TURBORG_IRC_HOSTNAME", "irc.libera.chat")
-	t.Setenv("TURBORG_IRC_NICK", "turborg")
-
-	s, err := irc.LoadSettings()
-	require.NoError(t, err)
-	assert.Equal(t, "127.0.0.1", s.WebHost)
-	assert.Equal(t, 8765, s.WebPort)
-	assert.False(t, s.WebEnabled())
-	assert.False(t, s.IdleShutdownEnabled())
-}
-
-func TestLoadSettingsRespectsWebToggle(t *testing.T) {
-	t.Setenv("TURBORG_IRC_HOSTNAME", "irc.libera.chat")
-	t.Setenv("TURBORG_IRC_NICK", "turborg")
-	t.Setenv("TURBORG_IRC_WEB_PASSWORD", "hunter2")
-	t.Setenv("TURBORG_IRC_WEB_PORT", "9000")
-	t.Setenv("TURBORG_IRC_WEB_IDLE_SHUTDOWN_SECONDS", "30")
-
-	s, err := irc.LoadSettings()
-	require.NoError(t, err)
-	assert.True(t, s.WebEnabled())
-	assert.True(t, s.IdleShutdownEnabled())
-	assert.Equal(t, 9000, s.WebPort)
-	assert.Equal(t, 30, s.WebIdleShutdownSeconds)
-}
-
-func TestLoadSettingsRejectsMalformedWebPort(t *testing.T) {
-	t.Setenv("TURBORG_IRC_HOSTNAME", "irc.libera.chat")
-	t.Setenv("TURBORG_IRC_NICK", "turborg")
-	t.Setenv("TURBORG_IRC_WEB_PORT", "not-a-number")
-	_, err := irc.LoadSettings()
-	require.Error(t, err)
-}

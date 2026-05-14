@@ -43,19 +43,6 @@ type Settings struct {
 	BouncerFailureWindowSeconds  int           `env:"BOUNCER_FAILURE_WINDOW_SECONDS" envDefault:"60"`
 	BouncerLockoutSeconds        int           `env:"BOUNCER_LOCKOUT_SECONDS" envDefault:"300"`
 
-	// WebSocket gateway + bundled reference UI for the IRC connector.
-	// The gateway is IRC-coupled (it speaks IRCBridge / shows channel
-	// state), so its env lives under TURBORG_IRC_WEB_* alongside the
-	// bouncer. A future general-purpose bot-core web connector will
-	// claim TURBORG_WEB_*.
-	WebPassword             string `env:"WEB_PASSWORD"`
-	WebHost                 string `env:"WEB_HOST" envDefault:"127.0.0.1"`
-	WebPort                 int    `env:"WEB_PORT" envDefault:"8765"`
-	WebMaxFailedAttempts    int    `env:"WEB_MAX_FAILED_ATTEMPTS" envDefault:"5"`
-	WebFailureWindowSeconds int    `env:"WEB_FAILURE_WINDOW_SECONDS" envDefault:"60"`
-	WebLockoutSeconds       int    `env:"WEB_LOCKOUT_SECONDS" envDefault:"300"`
-	WebIdleShutdownSeconds  int    `env:"WEB_IDLE_SHUTDOWN_SECONDS"`
-
 	CTCPAutoReply     bool `env:"CTCP_AUTO_REPLY" envDefault:"true"`
 	CTCPMaxPerWindow  int  `env:"CTCP_MAX_PER_WINDOW" envDefault:"3"`
 	CTCPWindowSeconds int  `env:"CTCP_WINDOW_SECONDS" envDefault:"30"`
@@ -138,17 +125,6 @@ func (s *Settings) SASLEnabled() bool {
 // BouncerEnabled is true when the bouncer password is set.
 func (s *Settings) BouncerEnabled() bool {
 	return s.BouncerPassword != ""
-}
-
-// WebEnabled is true when the WS gateway password is set.
-func (s *Settings) WebEnabled() bool {
-	return s.WebPassword != ""
-}
-
-// IdleShutdownEnabled reports whether the gateway's idle-shutdown timer
-// is configured. Wired by the SaaS sidecar for free-tier containers.
-func (s *Settings) IdleShutdownEnabled() bool {
-	return s.WebIdleShutdownSeconds > 0
 }
 
 // Validate runs cross-field checks that the env-tag layer can't express

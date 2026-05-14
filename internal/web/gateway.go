@@ -120,7 +120,7 @@ func New(bridge IRCBridge, sender Sender, opts Options) (*Gateway, error) {
 	// Port 0 deliberately stays 0 so net.Listen picks an OS-assigned
 	// port — required for parallel tests, harmless in production where
 	// the runtime composer always passes an explicit port from
-	// TURBORG_IRC_WEB_PORT (default 8765 in irc.Settings).
+	// TURBORG_GATEWAY_PORT (default 8765 in config.Settings).
 	g := &Gateway{
 		opts:       opts,
 		bridge:     bridge,
