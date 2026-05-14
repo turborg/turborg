@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.1.2](https://github.com/turborg/turborg/compare/v0.1.1...v0.1.2) (2026-05-14)
+
+
+### Bug Fixes
+
+* **version:** make Version a var so -X injection actually works ([#12](https://github.com/turborg/turborg/issues/12)) ([dd0b055](https://github.com/turborg/turborg/commit/dd0b055285d32e7db4b91850114c11aa859a473c))
+
 ## [0.1.1](https://github.com/turborg/turborg/compare/v0.1.0...v0.1.1) (2026-05-14)
 
 
