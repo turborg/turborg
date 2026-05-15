@@ -415,6 +415,99 @@ func TestRunWithGatewayUnwindsOnCtxCancel(t *testing.T) {
 	cancel()
 }
 
+func TestBuildRejectsHostnameOutsideAllowedNetworks(t *testing.T) {
+	// Self-host operator with an empty whitelist is unrestricted — no
+	// rejection. Set the whitelist to a value that doesn't include
+	// ircCfg.Hostname and Build must refuse to come up.
+	s := &config.Settings{
+		CommandPrefix:   "!",
+		AllowedNetworks: []string{"irc.libera.chat"},
+	}
+	ircCfg := &irc.Settings{Hostname: "irc.efnet.org", Nick: "turborg"}
+
+	_, err := runtime.Build(s, ircCfg, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ALLOWED_NETWORKS")
+	assert.Contains(t, err.Error(), "irc.efnet.org")
+}
+
+func TestBuildAcceptsHostnameInWhitelist(t *testing.T) {
+	s := &config.Settings{
+		CommandPrefix:   "!",
+		AllowedNetworks: []string{"irc.libera.chat", "irc.oftc.net"},
+	}
+	ircCfg := &irc.Settings{Hostname: "irc.oftc.net", Nick: "turborg"}
+
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	require.NotNil(t, b.IRC)
+}
+
+func TestBuildAcceptsAnyHostnameWhenWhitelistEmpty(t *testing.T) {
+	// Empty AllowedNetworks = unrestricted (the self-host default). Bot
+	// must come up regardless of the hostname value.
+	s := &config.Settings{CommandPrefix: "!"}
+	ircCfg := &irc.Settings{Hostname: "irc.some-private.example", Nick: "turborg"}
+
+	_, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+}
+
+func TestBuildLocksRealnameToTemplate(t *testing.T) {
+	// RealnameLocked + RealnameTemplate set → realname overrides whatever
+	// arrived via TURBORG_IRC_REAL_NAME. Operators use this to force a
+	// fixed identity string regardless of per-deploy env wiring.
+	s := &config.Settings{
+		CommandPrefix:    "!",
+		RealnameLocked:   true,
+		RealnameTemplate: "fixed realname for this deployment",
+	}
+	ircCfg := &irc.Settings{
+		Hostname: "irc.libera.chat",
+		Nick:     "turborg",
+		RealName: "user-supplied custom name",
+	}
+
+	_, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "fixed realname for this deployment", ircCfg.RealName,
+		"locked realname must overwrite ircCfg.RealName at Build time")
+}
+
+func TestBuildLeavesRealnameAloneWhenLockUnset(t *testing.T) {
+	// No RealnameLocked flag → user-supplied realname survives unchanged.
+	s := &config.Settings{CommandPrefix: "!"}
+	ircCfg := &irc.Settings{
+		Hostname: "irc.libera.chat",
+		Nick:     "turborg",
+		RealName: "user-supplied custom name",
+	}
+
+	_, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "user-supplied custom name", ircCfg.RealName)
+}
+
+func TestBuildIgnoresRealnameTemplateWithoutLock(t *testing.T) {
+	// RealnameTemplate set but Locked=false: the template is purely
+	// advisory and must not overwrite the user's choice. Catches the
+	// foot-gun of someone wiring the template env without the lock flag.
+	s := &config.Settings{
+		CommandPrefix:    "!",
+		RealnameLocked:   false,
+		RealnameTemplate: "some advisory string",
+	}
+	ircCfg := &irc.Settings{
+		Hostname: "irc.libera.chat",
+		Nick:     "turborg",
+		RealName: "user-supplied",
+	}
+
+	_, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "user-supplied", ircCfg.RealName)
+}
+
 // --- fakeLLM stub --------------------------------------------------------
 
 type fakeLLM struct {

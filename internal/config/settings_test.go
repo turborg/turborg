@@ -97,3 +97,114 @@ func TestLoadAllowsDuplicateEntriesInCSV(t *testing.T) {
 	assert.Equal(t, []string{"irc"}, s.Connectors,
 		"duplicate entries differ only by case + whitespace; must collapse")
 }
+
+// --- operator policy env tests --------------------------------------------
+
+func TestLoadPolicyDefaultsAreUnrestricted(t *testing.T) {
+	// No policy envs set → every knob lands at its zero value, which
+	// uniformly means "unrestricted".
+	s, err := config.Load()
+	require.NoError(t, err)
+	assert.Empty(t, s.Plan)
+	assert.Empty(t, s.AllowedNetworks)
+	assert.Zero(t, s.MaxChannels)
+	assert.False(t, s.NickLocked)
+	assert.False(t, s.RealnameLocked)
+	assert.Empty(t, s.RealnameTemplate)
+	assert.Zero(t, s.OutboundMaxPerWindow)
+	assert.Zero(t, s.MaxConnectorsPerAgent)
+	assert.True(t, s.HostnameAllowed("any.example"), "empty allowlist = unrestricted")
+}
+
+func TestLoadPolicyFullStack(t *testing.T) {
+	t.Setenv("TURBORG_PLAN", "my-deployment")
+	t.Setenv("TURBORG_ALLOWED_NETWORKS", "irc.libera.chat,irc.oftc.net,irc.rizon.net")
+	t.Setenv("TURBORG_MAX_CHANNELS", "5")
+	t.Setenv("TURBORG_NICK_LOCKED", "true")
+	t.Setenv("TURBORG_REALNAME_LOCKED", "true")
+	t.Setenv("TURBORG_REALNAME_TEMPLATE", "fixed realname")
+	t.Setenv("TURBORG_OUTBOUND_MAX_PER_WINDOW", "5")
+	t.Setenv("TURBORG_OUTBOUND_WINDOW_SECONDS", "30")
+	t.Setenv("TURBORG_MAX_CONNECTORS_PER_AGENT", "1")
+	t.Setenv("TURBORG_OWNER_DM_NUDGE_EVERY", "100")
+
+	s, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "my-deployment", s.Plan)
+	assert.Equal(t, []string{"irc.libera.chat", "irc.oftc.net", "irc.rizon.net"}, s.AllowedNetworks)
+	assert.Equal(t, 5, s.MaxChannels)
+	assert.True(t, s.NickLocked)
+	assert.True(t, s.RealnameLocked)
+	assert.Equal(t, "fixed realname", s.RealnameTemplate)
+	assert.Equal(t, 5, s.OutboundMaxPerWindow)
+	assert.Equal(t, 1, s.MaxConnectorsPerAgent)
+	assert.Equal(t, 100, s.OwnerDMNudgeEvery)
+}
+
+func TestHostnameAllowed(t *testing.T) {
+	t.Setenv("TURBORG_ALLOWED_NETWORKS", "irc.libera.chat,irc.oftc.net")
+	s, err := config.Load()
+	require.NoError(t, err)
+
+	assert.True(t, s.HostnameAllowed("irc.libera.chat"))
+	assert.True(t, s.HostnameAllowed("irc.oftc.net"))
+	assert.False(t, s.HostnameAllowed("irc.efnet.org"))
+	assert.False(t, s.HostnameAllowed(""))
+}
+
+func TestNormalizeRejectsOutboundWindowZeroWithMaxSet(t *testing.T) {
+	t.Setenv("TURBORG_OUTBOUND_MAX_PER_WINDOW", "10")
+	t.Setenv("TURBORG_OUTBOUND_WINDOW_SECONDS", "0")
+	_, err := config.Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "OUTBOUND_WINDOW_SECONDS")
+}
+
+func TestNormalizeRejectsNegativeLLMCap(t *testing.T) {
+	t.Setenv("TURBORG_LLM_INPUT_TOKENS_PER_DAY", "-1")
+	_, err := config.Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "LLM_INPUT_TOKENS_PER_DAY")
+}
+
+func TestNormalizeAcceptsMaxConnectorsPerAgentUnrestricted(t *testing.T) {
+	t.Setenv("TURBORG_CONNECTORS", "irc")
+	t.Setenv("TURBORG_MAX_CONNECTORS_PER_AGENT", "0") // 0 = unrestricted
+	_, err := config.Load()
+	require.NoError(t, err)
+}
+
+func TestNormalizeRejectsNegativeMaxConnectorsPerAgent(t *testing.T) {
+	t.Setenv("TURBORG_MAX_CONNECTORS_PER_AGENT", "-1")
+	_, err := config.Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MAX_CONNECTORS_PER_AGENT")
+}
+
+func TestNormalizeRejectsNegativeMaxChannels(t *testing.T) {
+	t.Setenv("TURBORG_MAX_CHANNELS", "-1")
+	_, err := config.Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MAX_CHANNELS")
+}
+
+func TestNormalizeRejectsNegativeLLMOutput(t *testing.T) {
+	t.Setenv("TURBORG_LLM_OUTPUT_TOKENS_PER_DAY", "-1")
+	_, err := config.Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "LLM_OUTPUT_TOKENS_PER_DAY")
+}
+
+func TestNormalizeTrimsAllowedLLMModelsWhitespace(t *testing.T) {
+	t.Setenv("TURBORG_ALLOWED_LLM_MODELS", " claude-sonnet-4-6 , , claude-opus-4-7 ")
+	s, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"claude-sonnet-4-6", "claude-opus-4-7"}, s.AllowedLLMModels)
+}
+
+func TestNormalizeTrimsAllowedNetworksWhitespace(t *testing.T) {
+	t.Setenv("TURBORG_ALLOWED_NETWORKS", " irc.libera.chat , , irc.oftc.net ")
+	s, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"irc.libera.chat", "irc.oftc.net"}, s.AllowedNetworks)
+}

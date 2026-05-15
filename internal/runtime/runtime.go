@@ -54,6 +54,10 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		log = slog.Default()
 	}
 
+	if err := applyOperatorPolicy(s, ircCfg); err != nil {
+		return nil, err
+	}
+
 	provider, err := buildLLM(s)
 	if err != nil {
 		return nil, err
@@ -90,6 +94,29 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	}
 
 	return built, nil
+}
+
+// applyOperatorPolicy runs cross-cutting policy checks at boot. Catches
+// misconfigurations the env layer alone can't see — e.g. ALLOWED_NETWORKS
+// set but IRC_HOSTNAME points outside the allowlist. Mutates ircCfg in
+// place when the policy forces a value (realname lock).
+//
+// All checks are no-ops when the corresponding policy env is unset, so
+// operators who don't configure anything see no behavior change.
+func applyOperatorPolicy(s *config.Settings, ircCfg *irc.Settings) error {
+	if ircCfg != nil && !s.HostnameAllowed(ircCfg.Hostname) {
+		return fmt.Errorf("runtime: IRC hostname %q is not in TURBORG_ALLOWED_NETWORKS=%s",
+			ircCfg.Hostname, strings.Join(s.AllowedNetworks, ","))
+	}
+
+	// Realname lock: template overrides whatever value arrived via
+	// TURBORG_IRC_REAL_NAME. Done before the connector is constructed so
+	// the constructor sees the locked value as its initial state.
+	if ircCfg != nil && s.RealnameLocked && s.RealnameTemplate != "" {
+		ircCfg.RealName = s.RealnameTemplate
+	}
+
+	return nil
 }
 
 func buildLLM(s *config.Settings) (llm.Provider, error) {
