@@ -151,3 +151,65 @@ func TestCommandRegistryEmptyPrefixDefaultsToBang(t *testing.T) {
 	r := agent.NewCommandRegistry("")
 	assert.Equal(t, "!", r.Prefix())
 }
+
+// --- Dynamic registration cap ---------------------------------------------
+
+func noopHandler(context.Context, *agent.InboundEnvelope, []string) (*agent.OutboundEnvelope, error) {
+	return nil, nil
+}
+
+func TestRegisterDynamicDefaultIsZeroAllowed(t *testing.T) {
+	// Default registry rejects any dynamic registration — operators have
+	// to opt in via SetMaxDynamic.
+	r := agent.NewCommandRegistry("!")
+	err := r.RegisterDynamic("anything", noopHandler, nil)
+	assert.ErrorIs(t, err, agent.ErrDynamicCommandLimit)
+	assert.NotContains(t, r.Names(), "anything", "rejected registration must not appear")
+}
+
+func TestRegisterDynamicAllowsUpToCap(t *testing.T) {
+	r := agent.NewCommandRegistry("!")
+	r.SetMaxDynamic(2)
+
+	require.NoError(t, r.RegisterDynamic("a", noopHandler, nil))
+	require.NoError(t, r.RegisterDynamic("b", noopHandler, nil))
+	err := r.RegisterDynamic("c", noopHandler, nil)
+	assert.ErrorIs(t, err, agent.ErrDynamicCommandLimit)
+
+	assert.ElementsMatch(t, []string{"a", "b"}, r.Names())
+}
+
+func TestRegisterDynamicReRegisterDoesNotConsumeSlot(t *testing.T) {
+	// Overwriting an existing dynamic command must not count as a new
+	// slot — otherwise an idempotent re-sync would falsely trip the cap.
+	r := agent.NewCommandRegistry("!")
+	r.SetMaxDynamic(1)
+
+	require.NoError(t, r.RegisterDynamic("once", noopHandler, nil))
+	require.NoError(t, r.RegisterDynamic("once", noopHandler, nil),
+		"re-registering an existing name must not consume a fresh slot")
+
+	err := r.RegisterDynamic("twice", noopHandler, nil)
+	assert.ErrorIs(t, err, agent.ErrDynamicCommandLimit,
+		"a different name must still hit the cap")
+}
+
+func TestRegisterDynamicUnrestrictedWithNegativeOne(t *testing.T) {
+	r := agent.NewCommandRegistry("!")
+	r.SetMaxDynamic(-1)
+
+	for i := 0; i < 50; i++ {
+		require.NoErrorf(t, r.RegisterDynamic(string(rune('a'+i)), noopHandler, nil),
+			"-1 must mean unrestricted; iteration %d", i)
+	}
+}
+
+func TestRegisterBuiltinsAreNotCapped(t *testing.T) {
+	// Builtins use the unconditional Register path. They must work even
+	// when MaxDynamic is 0.
+	r := agent.NewCommandRegistry("!")
+	r.SetMaxDynamic(0)
+	r.Register("builtin-1", noopHandler, nil)
+	r.Register("builtin-2", noopHandler, nil)
+	assert.ElementsMatch(t, []string{"builtin-1", "builtin-2"}, r.Names())
+}

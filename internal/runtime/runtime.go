@@ -64,6 +64,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	}
 
 	a := agent.NewWithPrefix(log, s.CommandPrefix)
+	a.Commands.SetMaxDynamic(s.CustomCommandsMax)
 
 	ircConn := irc.New(ircCfg, log, a.Events)
 	ircConn.SetClientLimits(irc.ClientLimits{
@@ -86,6 +87,14 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 			return nil, fmt.Errorf("runtime: outbound throttle: %w", err)
 		}
 		ircConn.SetOutboundThrottle(t)
+	}
+
+	// Owner-DM nudge: when the operator has set both a target owner nick
+	// and a positive interval, the connector DMs the owner every N
+	// outbound PRIVMSGs with a usage summary. Daily counter resets at
+	// UTC midnight inside the nudge itself.
+	if nudge := irc.NewOwnerNudge(s.OwnerNick, s.OwnerDMNudgeEvery); nudge != nil {
+		ircConn.SetOwnerNudge(nudge)
 	}
 
 	a.AddConnector(ircConn)

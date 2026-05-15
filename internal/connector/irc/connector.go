@@ -50,6 +50,10 @@ type Connector struct {
 	// HexChat and the web UI shares one bucket per target.
 	outboundThrottle *Throttle
 
+	// ownerNudge, when non-nil, emits a periodic usage-summary DM to
+	// the configured owner nick. nil = disabled.
+	ownerNudge *OwnerNudge
+
 	// currentNick is the live nick the server confirmed for us. It
 	// starts as settings.Nick (the requested value), gets updated by
 	// the 001 RPL_WELCOME (where the server tells us the nick it
@@ -109,6 +113,12 @@ func (c *Connector) SetOutboundThrottle(t *Throttle) { c.outboundThrottle = t }
 // can consult the same instance for web-originated PRIVMSG.
 func (c *Connector) OutboundThrottle() *Throttle { return c.outboundThrottle }
 
+// SetOwnerNudge installs the periodic owner-DM usage summary. Pass nil
+// to disable. When set, Connector.Send increments the nudge counter
+// after each successful PRIVMSG write and the nudge emits a DM when
+// the count crosses a multiple of EveryN.
+func (c *Connector) SetOwnerNudge(n *OwnerNudge) { c.ownerNudge = n }
+
 // CurrentNick returns the live nick the server confirmed for the bot.
 // Initially the requested TURBORG_IRC_NICK, then overwritten by the
 // 001 welcome's target field (the nick the server actually assigned)
@@ -159,6 +169,10 @@ func (c *Connector) Send(env *agent.OutboundEnvelope) error {
 	if c.bouncer != nil {
 		c.bouncer.BroadcastAsSelf(line, nil)
 	}
+	// Owner-nudge counter. Passing c.client.WriteLine directly (not
+	// c.Send) so the nudge DM doesn't recurse back through this method
+	// and double-count.
+	c.ownerNudge.Note(c.client.WriteLine)
 	return nil
 }
 

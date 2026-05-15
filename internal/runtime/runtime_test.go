@@ -516,6 +516,22 @@ func TestBuildLeavesOutboundThrottleNilWhenUnconfigured(t *testing.T) {
 		"unconfigured throttle stays nil (unrestricted)")
 }
 
+func TestBuildWiresOwnerNudgeWhenConfigured(t *testing.T) {
+	// Both OwnerNick and OwnerDMNudgeEvery set → runtime constructs the
+	// nudge and attaches it. We can't observe the nudge directly (no
+	// getter on the connector), so this just exercises the wiring path
+	// for coverage.
+	s := &config.Settings{
+		CommandPrefix:     "!",
+		OwnerNick:         "alice",
+		OwnerDMNudgeEvery: 100,
+	}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+
+	_, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+}
+
 func TestBuildIgnoresRealnameTemplateWithoutLock(t *testing.T) {
 	// RealnameTemplate set but Locked=false: the template is purely
 	// advisory and must not overwrite the user's choice. Catches the
