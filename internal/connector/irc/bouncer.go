@@ -221,6 +221,11 @@ type Bouncer struct {
 	onForwarded  ForwardedObserver
 	state        *ChannelState
 
+	// limits gates client-initiated commands by operator policy. Zero
+	// value (unrestricted) is the default — see AttachClientLimits to
+	// override.
+	limits ClientLimits
+
 	logMu      sync.Mutex
 	channelLog map[string][]string
 }
@@ -251,6 +256,16 @@ func (b *Bouncer) AttachUpstream(send SendUpstreamFunc) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.sendUpstream = send
+}
+
+// AttachClientLimits installs the operator-policy limits the bouncer
+// consults before forwarding client-originated commands upstream. Called
+// at most once from runtime.Build; left zero (unrestricted) when no
+// policy applies. Safe to call before Start.
+func (b *Bouncer) AttachClientLimits(l ClientLimits) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.limits = l
 }
 
 func (b *Bouncer) AttachOutboundObserver(cb ForwardedObserver) {
@@ -465,6 +480,10 @@ func (b *Bouncer) handleLine(client *BouncerClient, line string) {
 	send := b.sendUpstream
 	observer := b.onForwarded
 	b.mu.Unlock()
+
+	if !b.allowByPolicy(client, msg) {
+		return
+	}
 
 	if send == nil {
 		return
@@ -732,6 +751,40 @@ func (b *Bouncer) replayChannelLogs(client *BouncerClient) {
 
 // Broadcast writes line to every authenticated client except exclude.
 // Also captures channel-targeted PRIVMSG / NOTICE into the per-channel
+// allowByPolicy consults ClientLimits for a client-initiated command and
+// returns true when it may flow upstream. A false return implies the
+// caller already notified the client and should drop the line. JOIN
+// folds in the current channel count from b.state; other commands ignore
+// the count argument.
+func (b *Bouncer) allowByPolicy(client *BouncerClient, msg Message) bool {
+	b.mu.Lock()
+	limits := b.limits
+	b.mu.Unlock()
+
+	currentChannels := 0
+	if msg.Command == CmdJoin && b.state != nil {
+		currentChannels = b.state.Count()
+	}
+	allow, reason := limits.AllowCommand(msg.Command, currentChannels)
+	if !allow {
+		b.notifyPolicyDenial(client, reason)
+	}
+	return allow
+}
+
+// notifyPolicyDenial sends a NOTICE back to the originating client when
+// an operator-policy gate refuses one of its commands. Uses the same
+// synthetic prefix the bouncer already uses for PONG so existing IRC
+// clients render it in the network/status tab rather than treating it
+// as a channel message. Errors are logged at debug level — a failed
+// NOTICE shouldn't fail the surrounding handler.
+func (b *Bouncer) notifyPolicyDenial(client *BouncerClient, reason string) {
+	line := ":turborg-bouncer NOTICE * :" + reason
+	if err := client.sendLine(line); err != nil {
+		b.log.Debug("bouncer policy notice", "err", err)
+	}
+}
+
 // replay ring so a bouncer client that reconnects later sees the
 // traffic it missed.
 func (b *Bouncer) Broadcast(line string, exclude *BouncerClient) {

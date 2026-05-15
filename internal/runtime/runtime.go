@@ -66,6 +66,11 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	a := agent.NewWithPrefix(log, s.CommandPrefix)
 
 	ircConn := irc.New(ircCfg, log, a.Events)
+	ircConn.SetClientLimits(irc.ClientLimits{
+		NickLocked:     s.NickLocked,
+		RealnameLocked: s.RealnameLocked,
+		MaxChannels:    s.MaxChannels,
+	})
 	a.AddConnector(ircConn)
 
 	if len(s.Connectors) > 1 {

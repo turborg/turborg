@@ -38,6 +38,13 @@ type Connector struct {
 	bouncer  *Bouncer
 	ctcp     *Throttle
 
+	// clientLimits is the operator-policy struct the bouncer consults
+	// before forwarding client-originated commands upstream. Held here
+	// so runtime.Build can hand it to the connector before Start; it
+	// gets attached to the bouncer when (and if) the bouncer is created
+	// during Start.
+	clientLimits ClientLimits
+
 	// currentNick is the live nick the server confirmed for us. It
 	// starts as settings.Nick (the requested value), gets updated by
 	// the 001 RPL_WELCOME (where the server tells us the nick it
@@ -73,6 +80,18 @@ func (c *Connector) Name() string                          { return "irc" }
 func (c *Connector) Inbound() <-chan *agent.InboundEnvelope { return c.inbox }
 func (c *Connector) ClaimSupervision() bool                { return true }
 func (c *Connector) State() *ChannelState                  { return c.state }
+
+// SetClientLimits installs the operator-policy struct that gates
+// client-initiated commands (NICK, USER realname, JOIN-vs-channel-cap).
+// Must be called before Start so the limits are in place when the
+// bouncer is constructed. Calling later is a no-op.
+func (c *Connector) SetClientLimits(l ClientLimits) { c.clientLimits = l }
+
+// ClientLimits returns the operator-policy struct currently installed
+// on the connector. Used by adjacent surfaces (e.g. the WS gateway) to
+// enforce the same rules against client-originated actions that don't
+// flow through the bouncer.
+func (c *Connector) ClientLimits() ClientLimits { return c.clientLimits }
 
 // CurrentNick returns the live nick the server confirmed for the bot.
 // Initially the requested TURBORG_IRC_NICK, then overwritten by the
@@ -237,6 +256,7 @@ func (c *Connector) startBouncer(ctx context.Context) error {
 		return err
 	}
 	b.AttachState(c.state, c.CurrentNick(), c.settings.EffectiveUsername(), "turborg")
+	b.AttachClientLimits(c.clientLimits)
 	// sendUpstream is set before c.client is, so guard the dereference.
 	// Pre-bound bouncer clients that try to send forwardable commands
 	// before the upstream Dial completes get an error back rather than

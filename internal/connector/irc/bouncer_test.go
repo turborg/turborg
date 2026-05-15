@@ -925,3 +925,180 @@ func TestBouncerDropsEmptyJoin(t *testing.T) {
 		assert.NotContains(t, l, "JOIN :", "malformed JOIN must be dropped")
 	}
 }
+
+// --- Operator-policy gating ------------------------------------------------
+
+// trackForwarded wires AttachUpstream so the test can assert which lines
+// (if any) the bouncer forwarded to the upstream IRC connection. Returns
+// the slice + its mutex; the caller locks while reading.
+func trackForwarded(b *irc.Bouncer) (*[]string, *sync.Mutex) {
+	var lines []string
+	var mu sync.Mutex
+	b.AttachUpstream(func(line string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, line)
+		return nil
+	})
+	return &lines, &mu
+}
+
+// authBouncerClient connects, sends PASS, drains the welcome burst and
+// returns the live conn + reader at the post-001 prompt.
+func authBouncerClient(t *testing.T, addr string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	conn, r := bouncerClient(t, addr)
+	_, _ = r.ReadString('\n') // pre-auth notice
+	writeLine(t, conn, "PASS hunter2")
+	for {
+		conn.SetReadDeadline(time.Now().Add(time.Second))
+		line, err := r.ReadString('\n')
+		if err != nil || strings.Contains(line, " 001 ") {
+			break
+		}
+	}
+	return conn, r
+}
+
+// readUntilContains keeps reading until the deadline hits, looking for a
+// substring the test expects. Returns the matching line or empty string
+// on timeout.
+func readUntilContains(r *bufio.Reader, conn net.Conn, substr string, deadline time.Duration) string {
+	conn.SetReadDeadline(time.Now().Add(deadline))
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return ""
+		}
+		if strings.Contains(line, substr) {
+			return line
+		}
+	}
+}
+
+func TestBouncerNickLockedDropsNickUpstream(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	forwarded, mu := trackForwarded(b)
+	b.AttachState(irc.NewChannelState(), "turborg", "ident", "host")
+	b.AttachClientLimits(irc.ClientLimits{NickLocked: true})
+
+	conn, r := authBouncerClient(t, addr)
+	writeLine(t, conn, "NICK newnick")
+
+	notice := readUntilContains(r, conn, "NOTICE", 500*time.Millisecond)
+	assert.NotEmpty(t, notice, "client must receive a NOTICE explaining the rejection")
+	assert.Contains(t, notice, "nick")
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, l := range *forwarded {
+		assert.NotContains(t, l, "NICK newnick",
+			"NICK must not flow upstream when ClientLimits.NickLocked is set")
+	}
+}
+
+func TestBouncerNickLockedAllowsOtherCommands(t *testing.T) {
+	// Make sure NickLocked doesn't accidentally cordon off PRIVMSG / JOIN.
+	b, addr := freshBouncer(t, "hunter2")
+	forwarded, mu := trackForwarded(b)
+	b.AttachState(irc.NewChannelState(), "turborg", "ident", "host")
+	b.AttachClientLimits(irc.ClientLimits{NickLocked: true})
+
+	conn, _ := authBouncerClient(t, addr)
+	writeLine(t, conn, "PRIVMSG #room :hello")
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	var found bool
+	for _, l := range *forwarded {
+		if strings.Contains(l, "PRIVMSG #room :hello") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "PRIVMSG must still flow upstream under NickLocked")
+}
+
+func TestBouncerMaxChannelsRejectsJoinAtCap(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	forwarded, mu := trackForwarded(b)
+
+	// State has 5 channels already joined; cap is 5 → next JOIN is rejected.
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#a")
+	state.OnSelfJoin("#b")
+	state.OnSelfJoin("#c")
+	state.OnSelfJoin("#d")
+	state.OnSelfJoin("#e")
+	b.AttachState(state, "turborg", "ident", "host")
+	b.AttachClientLimits(irc.ClientLimits{MaxChannels: 5})
+
+	conn, r := authBouncerClient(t, addr)
+	writeLine(t, conn, "JOIN #f")
+
+	notice := readUntilContains(r, conn, "NOTICE", 500*time.Millisecond)
+	assert.NotEmpty(t, notice, "client must receive a NOTICE when JOIN exceeds the channel cap")
+	assert.Contains(t, notice, "5")
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, l := range *forwarded {
+		assert.NotContains(t, l, "JOIN #f",
+			"JOIN must not flow upstream when MaxChannels is reached")
+	}
+}
+
+func TestBouncerMaxChannelsAllowsJoinBelowCap(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	forwarded, mu := trackForwarded(b)
+
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#a")
+	state.OnSelfJoin("#b")
+	b.AttachState(state, "turborg", "ident", "host")
+	b.AttachClientLimits(irc.ClientLimits{MaxChannels: 5})
+
+	conn, _ := authBouncerClient(t, addr)
+	writeLine(t, conn, "JOIN #c")
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	var found bool
+	for _, l := range *forwarded {
+		if strings.Contains(l, "JOIN #c") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "JOIN below the cap must flow upstream")
+}
+
+func TestBouncerZeroClientLimitsIsUnrestricted(t *testing.T) {
+	// Default (zero) ClientLimits should pass everything through — guards
+	// the operator who doesn't configure any policy.
+	b, addr := freshBouncer(t, "hunter2")
+	forwarded, mu := trackForwarded(b)
+	b.AttachState(irc.NewChannelState(), "turborg", "ident", "host")
+	// No AttachClientLimits call — limits stay at the zero value.
+
+	conn, _ := authBouncerClient(t, addr)
+	writeLine(t, conn, "NICK whatever")
+	writeLine(t, conn, "JOIN #x")
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	var sawNick, sawJoin bool
+	for _, l := range *forwarded {
+		if strings.Contains(l, "NICK whatever") {
+			sawNick = true
+		}
+		if strings.Contains(l, "JOIN #x") {
+			sawJoin = true
+		}
+	}
+	assert.True(t, sawNick, "unrestricted limits must let NICK through")
+	assert.True(t, sawJoin, "unrestricted limits must let JOIN through")
+}

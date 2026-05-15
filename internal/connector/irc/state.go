@@ -51,6 +51,15 @@ func (s *ChannelState) Get(channel string) *ChannelInfo {
 	return cloneChannelInfo(info)
 }
 
+// Count returns how many channels are currently joined. Cheap (no
+// allocation) — preferred over len(JoinedChannels()) for the
+// hot-path policy check.
+func (s *ChannelState) Count() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.order)
+}
+
 // JoinedChannels returns snapshot copies of every channel currently
 // joined, in insertion order.
 func (s *ChannelState) JoinedChannels() []*ChannelInfo {
