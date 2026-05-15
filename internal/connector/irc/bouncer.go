@@ -10,6 +10,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 )
 
 // channelLogCap is the per-channel ring of recent PRIVMSG / NOTICE lines
@@ -226,6 +227,12 @@ type Bouncer struct {
 	// override.
 	limits ClientLimits
 
+	// outboundThrottle gates per-target PRIVMSG flow from attached
+	// clients. nil = unrestricted. Shared with the WS gateway so a
+	// single user with both HexChat and the web UI open shares one
+	// bucket per target.
+	outboundThrottle *Throttle
+
 	logMu      sync.Mutex
 	channelLog map[string][]string
 }
@@ -266,6 +273,16 @@ func (b *Bouncer) AttachClientLimits(l ClientLimits) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.limits = l
+}
+
+// AttachOutboundThrottle installs the per-target outbound throttle the
+// bouncer consults for client-originated PRIVMSG. Pass nil to disable.
+// Shared instance with the WS gateway: both surfaces consult the same
+// bucket per target so two clients of the same user share one budget.
+func (b *Bouncer) AttachOutboundThrottle(t *Throttle) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.outboundThrottle = t
 }
 
 func (b *Bouncer) AttachOutboundObserver(cb ForwardedObserver) {
@@ -755,22 +772,52 @@ func (b *Bouncer) replayChannelLogs(client *BouncerClient) {
 // returns true when it may flow upstream. A false return implies the
 // caller already notified the client and should drop the line. JOIN
 // folds in the current channel count from b.state; other commands ignore
-// the count argument.
+// the count argument. PRIVMSG additionally consults the per-target
+// outbound throttle when one is attached.
 func (b *Bouncer) allowByPolicy(client *BouncerClient, msg Message) bool {
 	b.mu.Lock()
 	limits := b.limits
+	throttle := b.outboundThrottle
 	b.mu.Unlock()
 
 	currentChannels := 0
 	if msg.Command == CmdJoin && b.state != nil {
 		currentChannels = b.state.Count()
 	}
-	allow, reason := limits.AllowCommand(msg.Command, currentChannels)
-	if !allow {
+	if allow, reason := limits.AllowCommand(msg.Command, currentChannels); !allow {
 		b.notifyPolicyDenial(client, reason)
+		b.log.Info("cap_hit",
+			"surface", "bouncer",
+			"kind", CapHitKind(msg.Command),
+			"source_cmd", msg.Command,
+		)
+		return false
 	}
-	return allow
+
+	// Per-target outbound throttle. Only PRIVMSG is gated here; bot-
+	// originated command replies (which take a different path) keep
+	// their existing per-sender command throttle.
+	if msg.Command == CmdPrivmsg && throttle != nil && len(msg.Params) > 0 {
+		target := msg.Params[0]
+		if res := throttle.AllowWithReason(target); !res.Allow {
+			seconds := int(res.RetryAfter.Round(time.Second) / time.Second)
+			if seconds < 1 {
+				seconds = 1
+			}
+			b.notifyPolicyDenial(client, fmt.Sprintf("rate limited — wait %ds before sending to %s again", seconds, target))
+			b.log.Info("cap_hit",
+				"surface", "bouncer",
+				"kind", "outbound_rate",
+				"target", target,
+				"retry_after_s", seconds,
+			)
+			return false
+		}
+	}
+
+	return true
 }
+
 
 // notifyPolicyDenial sends a NOTICE back to the originating client when
 // an operator-policy gate refuses one of its commands. Uses the same

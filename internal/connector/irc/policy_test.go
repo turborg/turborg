@@ -76,3 +76,37 @@ func TestClientLimitsUnknownCommandAlwaysAllowed(t *testing.T) {
 	allow, _ := l.AllowCommand("MADE_UP_CMD", 0)
 	assert.True(t, allow)
 }
+
+func TestClientLimitsRealnameLockedDoesNotGateNick(t *testing.T) {
+	// Cross-check: each lock is independent. RealnameLocked must not
+	// also lock NICK, and NickLocked must not also lock USER.
+	l := irc.ClientLimits{RealnameLocked: true}
+	allow, _ := l.AllowCommand(irc.CmdNick, 0)
+	assert.True(t, allow, "RealnameLocked must not gate NICK")
+}
+
+func TestCapHitKindMapping(t *testing.T) {
+	cases := []struct {
+		cmd      string
+		wantKind string
+	}{
+		{irc.CmdNick, "nick_locked"},
+		{irc.CmdUser, "realname_locked"},
+		{irc.CmdJoin, "channels"},
+		{irc.CmdPrivmsg, irc.CmdPrivmsg}, // fall-through: kind == cmd
+		{"UNKNOWN", "UNKNOWN"},
+	}
+	for _, tc := range cases {
+		assert.Equalf(t, tc.wantKind, irc.CapHitKind(tc.cmd),
+			"CapHitKind(%q)", tc.cmd)
+	}
+}
+
+func TestClientLimitsMaxChannelsDoesNotGateNonJoin(t *testing.T) {
+	// Reaching the channel cap must not silently lock other commands.
+	l := irc.ClientLimits{MaxChannels: 1}
+	for _, cmd := range []string{irc.CmdPrivmsg, irc.CmdNotice, irc.CmdPart, irc.CmdMode} {
+		allow, _ := l.AllowCommand(cmd, 99)
+		assert.Truef(t, allow, "MaxChannels must not gate %s even when count > cap", cmd)
+	}
+}

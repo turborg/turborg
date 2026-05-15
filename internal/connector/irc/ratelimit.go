@@ -148,6 +148,23 @@ func NewThrottle(maxPerWindow int, window time.Duration, clock Clock) (*Throttle
 }
 
 func (t *Throttle) Allow(key string) bool {
+	return t.AllowWithReason(key).Allow
+}
+
+// ThrottleResult is the rich form of an Allow check. RetryAfter is the
+// remaining time until the oldest event in the bucket ages out and a
+// new event would be permitted; it's zero when Allow is true. Callers
+// surface RetryAfter to the originator so the client knows when to retry
+// rather than guess.
+type ThrottleResult struct {
+	Allow      bool
+	RetryAfter time.Duration
+}
+
+// AllowWithReason is Allow plus retry-after diagnostics. Used by surfaces
+// that show "wait Ns" feedback (bouncer NOTICE, WS rate_limited event)
+// rather than just silently dropping the call.
+func (t *Throttle) AllowWithReason(key string) ThrottleResult {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -162,9 +179,13 @@ func (t *Throttle) Allow(key string) bool {
 	}
 	if len(pruned) >= t.MaxPerWindow {
 		t.events[key] = pruned
-		return false
+		// RetryAfter = when the oldest event in the bucket ages out
+		// (pruned[0] + Window) minus now. Always positive here because
+		// pruned[0] >= cutoff = now - Window, so pruned[0] + Window >= now.
+		retryAfter := pruned[0].Add(t.Window).Sub(now)
+		return ThrottleResult{Allow: false, RetryAfter: retryAfter}
 	}
 	pruned = append(pruned, now)
 	t.events[key] = pruned
-	return true
+	return ThrottleResult{Allow: true}
 }

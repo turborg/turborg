@@ -168,3 +168,52 @@ func TestThrottleConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestThrottleAllowWithReasonReturnsRetryAfter(t *testing.T) {
+	clock := newClock()
+	tr, err := irc.NewThrottle(3, 30*time.Second, clock.Now)
+	require.NoError(t, err)
+
+	// First 3 calls fill the bucket.
+	for i := 0; i < 3; i++ {
+		res := tr.AllowWithReason("#x")
+		require.True(t, res.Allow, "call %d should be allowed", i+1)
+		assert.Zero(t, res.RetryAfter, "allowed calls return zero RetryAfter")
+		clock.Advance(time.Second)
+	}
+
+	// 4th call hits the cap. Oldest event is now 3s ago, so retry-after
+	// is window (30s) - 3s = 27s.
+	res := tr.AllowWithReason("#x")
+	assert.False(t, res.Allow)
+	assert.Equal(t, 27*time.Second, res.RetryAfter)
+}
+
+func TestThrottleAllowWithReasonRespectsPerKeyScope(t *testing.T) {
+	// Per-target throttle: hammering one channel must not lock out
+	// another. v3 plan: "free user sending 5 to #a + 5 to #b is fine".
+	clock := newClock()
+	tr, err := irc.NewThrottle(2, 30*time.Second, clock.Now)
+	require.NoError(t, err)
+
+	for i := 0; i < 2; i++ {
+		assert.True(t, tr.AllowWithReason("#a").Allow)
+	}
+	assert.False(t, tr.AllowWithReason("#a").Allow, "#a should be at cap")
+
+	// #b is its own bucket — fresh quota.
+	assert.True(t, tr.AllowWithReason("#b").Allow)
+	assert.True(t, tr.AllowWithReason("#b").Allow)
+	assert.False(t, tr.AllowWithReason("#b").Allow, "#b reached its own cap independently")
+}
+
+func TestThrottleAllowWithReasonRecoversAfterWindow(t *testing.T) {
+	clock := newClock()
+	tr, _ := irc.NewThrottle(1, 30*time.Second, clock.Now)
+
+	assert.True(t, tr.AllowWithReason("#x").Allow)
+	assert.False(t, tr.AllowWithReason("#x").Allow)
+
+	clock.Advance(31 * time.Second)
+	assert.True(t, tr.AllowWithReason("#x").Allow, "bucket should free after window")
+}

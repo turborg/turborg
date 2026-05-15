@@ -28,11 +28,19 @@ const (
 
 // IRCBridge is the narrow slice of the IRC connector the gateway
 // depends on. Keeps the package boundary clean — the gateway never
-// reaches into IRC-specific internals beyond these four methods.
+// reaches into IRC-specific internals beyond these methods.
 type IRCBridge interface {
 	CurrentNick() string
 	State() *irc.ChannelState
 	SendRaw(line string) error
+	// ClientLimits returns the operator-policy struct the gateway
+	// consults before forwarding web-originated actions. Mirror of the
+	// bouncer's policy gate — same struct, two surfaces.
+	ClientLimits() irc.ClientLimits
+	// OutboundThrottle returns the per-target PRIVMSG throttle (may
+	// be nil = unrestricted). Shared with the bouncer so a user with
+	// both surfaces open shares one bucket per target.
+	OutboundThrottle() *irc.Throttle
 }
 
 // Sender is the agent surface for outbound envelopes — the gateway
@@ -401,14 +409,72 @@ func (g *Gateway) readLoop(ctx context.Context, c *client) {
 		if err := json.Unmarshal(raw, &payload); err != nil {
 			continue
 		}
-		g.dispatchInbound(payload)
+		g.dispatchInbound(ctx, c, payload)
 	}
+}
+
+// allowByPolicy consults the bridge's ClientLimits for the IRC command
+// the WS op maps to. Returns (true, "") when permitted, (false, reason)
+// when the gateway should drop the op and surface the rejection back to
+// the client via a policy_denied event.
+//
+// Mirrors irc.Bouncer's policy gate so the two client-action surfaces
+// (bouncer + WS) enforce the same rules.
+func (g *Gateway) allowByPolicy(ircCmd string) (allow bool, reason string, kind string) {
+	limits := g.bridge.ClientLimits()
+	currentChannels := 0
+	if ircCmd == irc.CmdJoin {
+		if st := g.bridge.State(); st != nil {
+			currentChannels = st.Count()
+		}
+	}
+	allow, reason = limits.AllowCommand(ircCmd, currentChannels)
+	kind = irc.CapHitKind(ircCmd)
+	return allow, reason, kind
+}
+
+// denyAction sends a policy_denied event to the originating client and
+// emits a cap_hit structured log line for telemetry pipelines. The log
+// line is the canonical signal a sidecar log-watcher (or any future
+// metrics scraper) consumes — never log the user-facing reason from any
+// other path, so cap_hit stays the single source of truth.
+func (g *Gateway) denyAction(ctx context.Context, c *client, sourceOp, kind, reason string) {
+	g.sendTo(ctx, c, map[string]any{
+		"op":        "policy_denied",
+		"source_op": sourceOp,
+		"kind":      kind,
+		"reason":    reason,
+	})
+	g.log.Info("cap_hit", "surface", "ws_gateway", "kind", kind, "source_op", sourceOp)
+}
+
+// rateLimited is the per-target outbound-throttle counterpart to
+// denyAction. Emits {op: "rate_limited", ...} so the UI can render an
+// inline "wait Ns" badge next to the user's message, plus the same
+// cap_hit telemetry line for aggregation.
+func (g *Gateway) rateLimited(ctx context.Context, c *client, target string, retryAfter time.Duration) {
+	seconds := int(retryAfter.Round(time.Second) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	g.sendTo(ctx, c, map[string]any{
+		"op":          "rate_limited",
+		"target":      target,
+		"retry_after": seconds,
+		"reason":      "outbound rate limit",
+	})
+	g.log.Info("cap_hit",
+		"surface", "ws_gateway",
+		"kind", "outbound_rate",
+		"target", target,
+		"retry_after_s", seconds,
+	)
 }
 
 // dispatchInbound is a per-op switch; complexity grows with the WS protocol.
 //
 //nolint:gocyclo
-func (g *Gateway) dispatchInbound(p map[string]any) {
+func (g *Gateway) dispatchInbound(ctx context.Context, c *client, p map[string]any) {
 	op, _ := p["op"].(string)
 	switch op {
 	case "say":
@@ -416,6 +482,15 @@ func (g *Gateway) dispatchInbound(p map[string]any) {
 		text, _ := p["text"].(string)
 		if ch == "" || text == "" {
 			return
+		}
+		// Per-target outbound throttle — shared with the bouncer's
+		// PRIVMSG path. Bucket key is the target so a chatty user
+		// pestering one channel doesn't deny their other channels.
+		if throttle := g.bridge.OutboundThrottle(); throttle != nil {
+			if res := throttle.AllowWithReason(ch); !res.Allow {
+				g.rateLimited(ctx, c, ch, res.RetryAfter)
+				return
+			}
 		}
 		if err := g.sender.Send(&agent.OutboundEnvelope{
 			Connector:         "irc",
@@ -450,6 +525,10 @@ func (g *Gateway) dispatchInbound(p map[string]any) {
 		}
 	case "join":
 		if ch, _ := p["channel"].(string); ch != "" {
+			if allow, reason, kind := g.allowByPolicy(irc.CmdJoin); !allow {
+				g.denyAction(ctx, c, op, kind, reason)
+				return
+			}
 			_ = g.bridge.SendRaw(irc.CmdJoin + " " + ch)
 		}
 	case "part":
@@ -458,6 +537,10 @@ func (g *Gateway) dispatchInbound(p map[string]any) {
 		}
 	case "nick":
 		if n, _ := p["nick"].(string); n != "" {
+			if allow, reason, kind := g.allowByPolicy(irc.CmdNick); !allow {
+				g.denyAction(ctx, c, op, kind, reason)
+				return
+			}
 			_ = g.bridge.SendRaw(irc.CmdNick + " " + n)
 		}
 	case "mode":

@@ -71,6 +71,23 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		RealnameLocked: s.RealnameLocked,
 		MaxChannels:    s.MaxChannels,
 	})
+
+	// Per-target outbound throttle, when configured. Single instance
+	// shared between the bouncer (consults for attached-client PRIVMSG)
+	// and the WS gateway (consults for `say` op) so a user with both
+	// surfaces open shares one bucket per target.
+	if s.OutboundMaxPerWindow > 0 && s.OutboundWindowSeconds > 0 {
+		t, err := irc.NewThrottle(
+			s.OutboundMaxPerWindow,
+			time.Duration(s.OutboundWindowSeconds)*time.Second,
+			nil,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("runtime: outbound throttle: %w", err)
+		}
+		ircConn.SetOutboundThrottle(t)
+	}
+
 	a.AddConnector(ircConn)
 
 	if len(s.Connectors) > 1 {

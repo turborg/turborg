@@ -407,3 +407,27 @@ func TestConnectorIgnoresUnknownNickInUse433DuringHandshake(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already in use")
 }
+
+func TestConnectorClientLimitsAccessors(t *testing.T) {
+	c := irc.New(&irc.Settings{Hostname: "h", Nick: "n"}, nil, nil)
+
+	// Default: zero value (unrestricted).
+	assert.Equal(t, irc.ClientLimits{}, c.ClientLimits())
+
+	limits := irc.ClientLimits{NickLocked: true, MaxChannels: 5}
+	c.SetClientLimits(limits)
+	assert.Equal(t, limits, c.ClientLimits())
+}
+
+func TestConnectorOutboundThrottleAccessors(t *testing.T) {
+	c := irc.New(&irc.Settings{Hostname: "h", Nick: "n"}, nil, nil)
+
+	// Default: nil.
+	assert.Nil(t, c.OutboundThrottle())
+
+	tr, err := irc.NewThrottle(5, time.Second, nil)
+	require.NoError(t, err)
+	c.SetOutboundThrottle(tr)
+	assert.Same(t, tr, c.OutboundThrottle(),
+		"OutboundThrottle should return the exact pointer we set")
+}

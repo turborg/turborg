@@ -45,6 +45,11 @@ type Connector struct {
 	// during Start.
 	clientLimits ClientLimits
 
+	// outboundThrottle is the per-target client-originated PRIVMSG
+	// throttle. Shared with the WS gateway so a user running both
+	// HexChat and the web UI shares one bucket per target.
+	outboundThrottle *Throttle
+
 	// currentNick is the live nick the server confirmed for us. It
 	// starts as settings.Nick (the requested value), gets updated by
 	// the 001 RPL_WELCOME (where the server tells us the nick it
@@ -92,6 +97,17 @@ func (c *Connector) SetClientLimits(l ClientLimits) { c.clientLimits = l }
 // enforce the same rules against client-originated actions that don't
 // flow through the bouncer.
 func (c *Connector) ClientLimits() ClientLimits { return c.clientLimits }
+
+// SetOutboundThrottle installs the per-target outbound PRIVMSG throttle.
+// Pass nil to disable. Must be called before Start so the throttle is
+// in place when the bouncer is constructed; the WS gateway picks up
+// the same instance via OutboundThrottle().
+func (c *Connector) SetOutboundThrottle(t *Throttle) { c.outboundThrottle = t }
+
+// OutboundThrottle returns the per-target outbound throttle currently
+// installed on the connector (may be nil). Exposed so the WS gateway
+// can consult the same instance for web-originated PRIVMSG.
+func (c *Connector) OutboundThrottle() *Throttle { return c.outboundThrottle }
 
 // CurrentNick returns the live nick the server confirmed for the bot.
 // Initially the requested TURBORG_IRC_NICK, then overwritten by the
@@ -257,6 +273,7 @@ func (c *Connector) startBouncer(ctx context.Context) error {
 	}
 	b.AttachState(c.state, c.CurrentNick(), c.settings.EffectiveUsername(), "turborg")
 	b.AttachClientLimits(c.clientLimits)
+	b.AttachOutboundThrottle(c.outboundThrottle)
 	// sendUpstream is set before c.client is, so guard the dereference.
 	// Pre-bound bouncer clients that try to send forwardable commands
 	// before the upstream Dial completes get an error back rather than

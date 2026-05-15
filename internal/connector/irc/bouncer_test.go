@@ -1075,6 +1075,73 @@ func TestBouncerMaxChannelsAllowsJoinBelowCap(t *testing.T) {
 	assert.True(t, found, "JOIN below the cap must flow upstream")
 }
 
+func TestBouncerPerTargetOutboundThrottleRejectsAfterCap(t *testing.T) {
+	throttle, err := irc.NewThrottle(2, 30*time.Second, nil)
+	require.NoError(t, err)
+
+	b, addr := freshBouncer(t, "hunter2")
+	forwarded, mu := trackForwarded(b)
+	b.AttachState(irc.NewChannelState(), "turborg", "ident", "host")
+	b.AttachOutboundThrottle(throttle)
+
+	conn, r := authBouncerClient(t, addr)
+	for i := 0; i < 2; i++ {
+		writeLine(t, conn, "PRIVMSG #x :one")
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// Third PRIVMSG hits the cap → NOTICE with retry-after, line dropped.
+	writeLine(t, conn, "PRIVMSG #x :three")
+	notice := readUntilContains(r, conn, "NOTICE", 500*time.Millisecond)
+	assert.NotEmpty(t, notice, "client must receive a NOTICE when outbound throttle fires")
+	assert.Contains(t, notice, "rate limited")
+
+	mu.Lock()
+	defer mu.Unlock()
+	thirdSeen := false
+	twoSeen := 0
+	for _, l := range *forwarded {
+		if strings.Contains(l, ":three") {
+			thirdSeen = true
+		}
+		if strings.Contains(l, ":one") {
+			twoSeen++
+		}
+	}
+	assert.False(t, thirdSeen, "third PRIVMSG must be dropped at the throttle")
+	assert.Equal(t, 2, twoSeen, "first two PRIVMSGs forwarded")
+}
+
+func TestBouncerPerTargetOutboundThrottleScopesIndependently(t *testing.T) {
+	// One bucket per target — a chatty user in #a must not lock out #b.
+	throttle, err := irc.NewThrottle(1, 30*time.Second, nil)
+	require.NoError(t, err)
+
+	b, addr := freshBouncer(t, "hunter2")
+	forwarded, mu := trackForwarded(b)
+	b.AttachState(irc.NewChannelState(), "turborg", "ident", "host")
+	b.AttachOutboundThrottle(throttle)
+
+	conn, _ := authBouncerClient(t, addr)
+	writeLine(t, conn, "PRIVMSG #a :hi")
+	writeLine(t, conn, "PRIVMSG #b :hi")
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	var sawA, sawB bool
+	for _, l := range *forwarded {
+		if strings.Contains(l, "PRIVMSG #a") {
+			sawA = true
+		}
+		if strings.Contains(l, "PRIVMSG #b") {
+			sawB = true
+		}
+	}
+	assert.True(t, sawA, "#a should be forwarded")
+	assert.True(t, sawB, "#b is a separate bucket — must still be forwarded")
+}
+
 func TestBouncerZeroClientLimitsIsUnrestricted(t *testing.T) {
 	// Default (zero) ClientLimits should pass everything through — guards
 	// the operator who doesn't configure any policy.

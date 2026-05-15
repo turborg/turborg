@@ -488,6 +488,34 @@ func TestBuildLeavesRealnameAloneWhenLockUnset(t *testing.T) {
 	assert.Equal(t, "user-supplied custom name", ircCfg.RealName)
 }
 
+func TestBuildWiresOutboundThrottleWhenConfigured(t *testing.T) {
+	// OutboundMaxPerWindow > 0 + OutboundWindowSeconds > 0 → runtime
+	// constructs a throttle and attaches it to the connector so both the
+	// bouncer and the WS gateway can consult the same instance.
+	s := &config.Settings{
+		CommandPrefix:         "!",
+		OutboundMaxPerWindow:  5,
+		OutboundWindowSeconds: 30,
+	}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	require.NotNil(t, b.IRC)
+	assert.NotNil(t, b.IRC.OutboundThrottle(),
+		"OutboundThrottle must be wired when MaxPerWindow > 0")
+}
+
+func TestBuildLeavesOutboundThrottleNilWhenUnconfigured(t *testing.T) {
+	s := &config.Settings{CommandPrefix: "!"}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	assert.Nil(t, b.IRC.OutboundThrottle(),
+		"unconfigured throttle stays nil (unrestricted)")
+}
+
 func TestBuildIgnoresRealnameTemplateWithoutLock(t *testing.T) {
 	// RealnameTemplate set but Locked=false: the template is purely
 	// advisory and must not overwrite the user's choice. Catches the

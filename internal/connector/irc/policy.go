@@ -32,6 +32,24 @@ type ClientLimits struct {
 	MaxChannels int
 }
 
+// CapHitKind maps an IRC command to the canonical "kind" label used in
+// cap_hit telemetry. Stable identifier across surfaces (bouncer + WS
+// gateway) so downstream counters can aggregate by kind. Lives next to
+// ClientLimits because the kinds map to the same gates that struct
+// implements.
+func CapHitKind(cmd string) string {
+	switch cmd {
+	case CmdNick:
+		return "nick_locked"
+	case CmdUser:
+		return "realname_locked"
+	case CmdJoin:
+		return "channels"
+	default:
+		return cmd
+	}
+}
+
 // AllowCommand returns (true, "") when the action is permitted, or
 // (false, reason) when it must be rejected. The caller is responsible
 // for surfacing reason to the originator (NOTICE for bouncer clients,
