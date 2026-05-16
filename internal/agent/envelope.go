@@ -7,9 +7,9 @@ import (
 )
 
 // InboundEnvelope is a connector-originated message, normalized for the
-// agent. Mirrors turborg's Python pydantic shape: every connector produces
-// these, every handler consumes them, and protocol-specific extras live in
-// Metadata so the agent surface stays uniform.
+// agent. Every connector produces these, every handler consumes them, and
+// protocol-specific extras live in Metadata so the agent surface stays
+// uniform across IRC / Discord / Telegram / etc.
 type InboundEnvelope struct {
 	ID                uuid.UUID
 	Connector         string
@@ -52,10 +52,9 @@ func NewInbound(connector, channel, sender, text string) *InboundEnvelope {
 	}
 }
 
-// ReplyTo builds an OutboundEnvelope addressed back at the source of in. If
-// the source was a direct/DM message, the reply is routed to the sender
-// instead of the channel — same rule as Python's
-// OutboundEnvelope.reply().
+// ReplyTo builds an OutboundEnvelope addressed back at the source of in.
+// If the source was a direct/DM message, the reply is routed to the
+// sender instead of the channel.
 func ReplyTo(in *InboundEnvelope, text string) *OutboundEnvelope {
 	channel := in.Channel
 	if in.IsDirect {

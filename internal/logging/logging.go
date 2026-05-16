@@ -2,9 +2,9 @@
 //
 // Two formats are supported: text (human-readable, the default) and json
 // (one JSON object per line for ingestion by Loki/Datadog/CloudWatch
-// Insights without regex parsing). The level matches Python's
-// LOG_LEVEL contract (DEBUG/INFO/WARNING/ERROR — WARNING maps to slog
-// WARN for compatibility with Python's name).
+// Insights without regex parsing). Level names accept the familiar
+// DEBUG/INFO/WARNING/ERROR/CRITICAL spelling (case-insensitive) and
+// also the slog spelling WARN; both resolve to slog.LevelWarn.
 package logging
 
 import (
@@ -16,8 +16,8 @@ import (
 )
 
 // New builds a *slog.Logger configured per level + format. Level names
-// match Python (case-insensitive); unknown levels return an error
-// rather than silently defaulting.
+// are case-insensitive; unknown levels return an error rather than
+// silently defaulting.
 func New(w io.Writer, level, format string) (*slog.Logger, error) {
 	if w == nil {
 		w = os.Stderr
@@ -51,8 +51,9 @@ func parseLevel(level string) (slog.Level, error) {
 	case "ERROR":
 		return slog.LevelError, nil
 	case "CRITICAL":
-		// Python CRITICAL doesn't exist in slog; slog tops out at ERROR.
-		// Treat it as ERROR — same gate, slight naming mismatch.
+		// slog tops out at ERROR — CRITICAL collapses to the same gate
+		// so operators used to CRITICAL from other ecosystems still get
+		// the strictest level rather than a parse error.
 		return slog.LevelError, nil
 	}
 	return 0, errors.New("logging: unknown level " + level)

@@ -16,11 +16,12 @@ import (
 	"github.com/turborg/turborg/internal/llm"
 )
 
-// DefaultModel matches the Python implementation's default. Override
-// via Settings.Model or per-call WithModel.
+// DefaultModel is the model used when Settings.Model is empty.
+// Override via Settings.Model or per-call WithModel.
 const DefaultModel = "claude-sonnet-4-6"
 
-// DefaultMaxTokens matches the Python max_tokens=4096 default.
+// DefaultMaxTokens caps response length when the caller doesn't set
+// WithMaxTokens. 4096 is enough for ~5–10 IRC lines after wrapping.
 const DefaultMaxTokens = 4096
 
 // Settings configures an Anthropic provider. APIKey is required;

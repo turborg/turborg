@@ -8,10 +8,9 @@ import (
 	"github.com/caarlos0/env/v11"
 )
 
-// Settings is the env-driven config for the IRC connector. Tag names map
-// to the TURBORG_IRC_* contract the xshellz sidecar already sets; every
-// var name and default value matches Python core/connectors/irc/settings.py
-// byte-for-byte so the SaaS spawner needs no changes during the port.
+// Settings is the env-driven config for the IRC connector. Tag names
+// define the TURBORG_IRC_* contract — see docs/connectors/irc.md for
+// the full operator-facing reference.
 //
 // Required fields (no default): Hostname, Nick. Everything else defaults
 // to a sensible value or stays empty/disabled.
@@ -56,10 +55,10 @@ func LoadSettings() (*Settings, error) {
 	if err := env.ParseWithOptions(s, env.Options{Prefix: "TURBORG_IRC_"}); err != nil {
 		return nil, err
 	}
-	// Normalize Channels — accept both CSV (#a,#b) and the legacy
-	// Python pydantic-settings JSON-list (["#a","#b"]) format so an
-	// existing .env from the Python repo is a drop-in. Tolerates leading
-	// "[" / trailing "]" / surrounding quotes on individual entries.
+	// Normalize Channels — accept both CSV (#a,#b) and a JSON-array
+	// shape (["#a","#b"]) so the var is friendly to config systems
+	// that emit lists. Tolerates leading "[" / trailing "]" /
+	// surrounding quotes on individual entries.
 	s.Channels = parseChannelList(strings.Join(s.Channels, ","))
 	return s, nil
 }
@@ -87,7 +86,8 @@ func parseChannelList(raw string) []string {
 }
 
 // NormalizedChannels returns Channels with a '#' prefix added where the
-// caller omitted one. Matches Python normalized_channels().
+// caller omitted one. Channels already starting with #/&/+/! are passed
+// through unchanged.
 func (s *Settings) NormalizedChannels() []string {
 	out := make([]string, 0, len(s.Channels))
 	for _, ch := range s.Channels {
@@ -107,8 +107,9 @@ func (s *Settings) NormalizedChannels() []string {
 	return out
 }
 
-// EffectiveUsername returns Username if set, otherwise Nick. Matches
-// Python effective_username().
+// EffectiveUsername returns Username if set, otherwise Nick. The IRC
+// USER command requires a non-empty ident; defaulting to the nick is
+// the universally-accepted fallback when an operator doesn't set one.
 func (s *Settings) EffectiveUsername() string {
 	if s.Username != "" {
 		return s.Username

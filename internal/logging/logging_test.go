@@ -32,7 +32,7 @@ func TestNewJSONHandler(t *testing.T) {
 	assert.Equal(t, "v", got["k"])
 }
 
-func TestNewAcceptsPythonLevelNames(t *testing.T) {
+func TestNewAcceptsAllLevelAliases(t *testing.T) {
 	for _, lvl := range []string{"DEBUG", "INFO", "WARNING", "WARN", "ERROR", "CRITICAL", ""} {
 		_, err := logging.New(nil, lvl, "text")
 		assert.NoError(t, err, "level %q must be accepted", lvl)

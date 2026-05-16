@@ -1,8 +1,9 @@
-// Package web is turborg's WebSocket gateway: a JSON-over-WS protocol that
-// bridges IRC events to browser clients, plus the bundled vanilla-JS
-// reference UI served from the same HTTP server. SaaS deployments replace
-// the TokenVerifier with their own auth backend; self-host uses a single
-// shared password from TURBORG_WEB_PASSWORD.
+// Package web is turborg's control-plane gateway: a JSON-over-WS protocol
+// that streams the agent's events to browser clients and accepts command
+// ops, plus the bundled vanilla-JS reference UI served from the same HTTP
+// server. SaaS deployments replace the TokenVerifier with their own auth
+// backend; self-host uses a single shared password from
+// TURBORG_GATEWAY_PASSWORD.
 package web
 
 import (

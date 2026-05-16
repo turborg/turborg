@@ -51,9 +51,9 @@ In `#turborg-test`, type `!ping` — the bot replies `pong`. That's it.
 |------------------------------------------|---------------------------------------------------|
 | Enable the `!ask` AI command             | `TURBORG_ANTHROPIC_API_KEY=sk-...`                |
 | Attach HexChat through the bouncer       | `TURBORG_IRC_BOUNCER_PASSWORD=…`                  |
-| Open the web UI at `http://127.0.0.1:8765/` | `TURBORG_WEB_PASSWORD=…`                       |
+| Open the web UI at `http://127.0.0.1:8765/` | `TURBORG_GATEWAY_PASSWORD=…`                   |
 
-See `docs/configuration.md` for the full env-var reference — SASL, NickServ identify, rate limits, idle-shutdown, logging.
+See [`docs/connectors/irc.md`](docs/connectors/irc.md) for the IRC connector reference (SASL, NickServ identify, bouncer, rate limits, timing) and [`docs/gateway.md`](docs/gateway.md) for the gateway (WS protocol, auth, idle-shutdown).
 
 ## Quickstart: a minimal bot in Go
 
@@ -137,8 +137,8 @@ To expose the web UI to the host, also publish the port:
 
 ```bash
 docker run --rm \
-  -e TURBORG_WEB_PASSWORD=changeme \
-  -e TURBORG_WEB_HOST=0.0.0.0 \
+  -e TURBORG_GATEWAY_PASSWORD=changeme \
+  -e TURBORG_GATEWAY_HOST=0.0.0.0 \
   -p 8765:8765 \
   --env-file .env \
   ghcr.io/turborg/turborg:latest
@@ -146,12 +146,12 @@ docker run --rm \
 
 ## Connectors
 
-| Connector  | Status     | Notes                                  |
-|------------|------------|----------------------------------------|
-| IRC        | Stable     | with bouncer + WS gateway              |
-| Discord    | Roadmap    | hopper                                 |
-| Telegram   | Roadmap    | hopper                                 |
-| WhatsApp   | Roadmap    | hopper                                 |
+| Connector  | Status     | Notes                                                                  |
+|------------|------------|------------------------------------------------------------------------|
+| [IRC](docs/connectors/irc.md) | Stable | with bouncer + WS gateway — see [the IRC connector docs](docs/connectors/irc.md) for every env var |
+| Discord    | Roadmap    | hopper                                                                 |
+| Telegram   | Roadmap    | hopper                                                                 |
+| WhatsApp   | Roadmap    | hopper                                                                 |
 
 LLM providers are **optional**. turborg runs perfectly fine as a pure command-driven bot without any LLM. When you want one, Anthropic (default, with prompt caching) ships in-tree.
 

@@ -18,9 +18,9 @@ import (
 	"github.com/turborg/turborg/internal/connector/irc"
 )
 
-// Ring-buffer caps mirror the Python implementation. Bumping these
-// requires coordinating with docs/ui/PLAN.md — the Angular client team
-// sizes its IndexedDB backfill against the same numbers.
+// Ring-buffer caps for replay on new client attach. Bumping these is a
+// coordinated change with downstream UIs that size their local backfill
+// against the same numbers — see docs/ui/PLAN.md.
 const (
 	serverLogCap  = 100
 	channelLogCap = 200
@@ -120,7 +120,7 @@ func New(bridge IRCBridge, sender Sender, opts Options) (*Gateway, error) {
 	// Port 0 deliberately stays 0 so net.Listen picks an OS-assigned
 	// port — required for parallel tests, harmless in production where
 	// the runtime composer always passes an explicit port from
-	// TURBORG_WEB_PORT (default 8765 in config.Settings).
+	// TURBORG_GATEWAY_PORT (default 8765 in config.Settings).
 	g := &Gateway{
 		opts:       opts,
 		bridge:     bridge,

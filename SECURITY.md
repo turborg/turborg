@@ -42,8 +42,8 @@ Once 0.2 ships, 0.1.x will receive critical security fixes for 90 days, then mov
 
 In scope:
 
-- The published `turborg` Python package on PyPI
 - The official source repository at `github.com/turborg/turborg`
+- Published release artifacts (binaries, container images at `ghcr.io/turborg/turborg`)
 - The example bots in `examples/`
 
 Out of scope:

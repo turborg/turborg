@@ -21,8 +21,9 @@ you rights to use these trademarks.
 - **Forks**: if you maintain a fork that diverges meaningfully from upstream,
   you must rename it. Do not call your fork "turborg" or use a name likely to
   cause confusion (e.g. "turborg-pro", "turborg-plus", "real-turborg").
-- **Distributions and packages**: do not publish a package on PyPI, Docker Hub,
-  or any other registry under the name "turborg" or a confusingly similar name.
+- **Distributions and packages**: do not publish a package on any registry
+  (Docker Hub, Homebrew, Go module proxy, etc.) under the name "turborg" or
+  a confusingly similar name.
 - **Hosted services**: do not run a public hosted service called "turborg" or
   "turborg cloud". The official hosted offering is **hive.xshellz.com**.
 - **Merchandise, swag, or marketing materials** using the turborg or xshellz

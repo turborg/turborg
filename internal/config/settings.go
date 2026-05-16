@@ -1,6 +1,8 @@
 // Package config holds turborg's top-level Settings — the cross-cutting
-// env-var contract that lives next to TURBORG_ (not TURBORG_IRC_,
-// TURBORG_WEB_, etc., which live with their respective connectors).
+// env-var contract that lives under TURBORG_*. Per-connector knobs
+// (TURBORG_IRC_*, etc.) live with their respective connectors. The
+// gateway is a top-level control surface, not a connector, so its env
+// lives here under TURBORG_GATEWAY_*.
 //
 // Connector-specific settings stay in their own packages so installing
 // turborg without a particular connector does not require setting that
@@ -23,9 +25,8 @@ var ValidConnectors = map[string]bool{
 }
 
 // Settings is the top-level turborg config. Connector-specific knobs
-// (TURBORG_IRC_*, TURBORG_WEB_PASSWORD lives here for the gateway
-// toggle, but everything WS-protocol-shaped is on web.Options) are
-// loaded by their own packages — Settings stays narrow.
+// (TURBORG_IRC_*, …) are loaded by their own packages — Settings stays
+// narrow and cross-cutting.
 type Settings struct {
 	LogLevel  string `env:"LOG_LEVEL"  envDefault:"INFO"`
 	LogFormat string `env:"LOG_FORMAT" envDefault:"text"`
@@ -42,19 +43,23 @@ type Settings struct {
 	// empty, the single-connector quickstart path enables IRC only.
 	Connectors []string `env:"CONNECTORS" envSeparator:","`
 
-	WebPassword              string `env:"WEB_PASSWORD"`
-	WebHost                  string `env:"WEB_HOST"   envDefault:"127.0.0.1"`
-	WebPort                  int    `env:"WEB_PORT"   envDefault:"8765"`
-	WebMaxFailedAttempts     int    `env:"WEB_MAX_FAILED_ATTEMPTS" envDefault:"5"`
-	WebFailureWindowSeconds  int    `env:"WEB_FAILURE_WINDOW_SECONDS" envDefault:"60"`
-	WebLockoutSeconds        int    `env:"WEB_LOCKOUT_SECONDS" envDefault:"300"`
-	WebIdleShutdownSeconds   int    `env:"WEB_IDLE_SHUTDOWN_SECONDS"`
-
 	OwnerNick    string `env:"OWNER_NICK"`
 	OwnerAccount string `env:"OWNER_ACCOUNT"`
 
 	CommandMaxPerWindow  int `env:"COMMAND_MAX_PER_WINDOW"  envDefault:"5"`
 	CommandWindowSeconds int `env:"COMMAND_WINDOW_SECONDS"  envDefault:"30"`
+
+	// Gateway is the bot's control-plane surface: WS protocol + bundled
+	// reference UI. Today it streams IRC events; the env vars don't
+	// promise a specific protocol or connector, so the same names
+	// survive any future transport/connector additions.
+	GatewayPassword             string `env:"GATEWAY_PASSWORD"`
+	GatewayHost                 string `env:"GATEWAY_HOST" envDefault:"127.0.0.1"`
+	GatewayPort                 int    `env:"GATEWAY_PORT" envDefault:"8765"`
+	GatewayMaxFailedAttempts    int    `env:"GATEWAY_MAX_FAILED_ATTEMPTS" envDefault:"5"`
+	GatewayFailureWindowSeconds int    `env:"GATEWAY_FAILURE_WINDOW_SECONDS" envDefault:"60"`
+	GatewayLockoutSeconds       int    `env:"GATEWAY_LOCKOUT_SECONDS" envDefault:"300"`
+	GatewayIdleShutdownSeconds  int    `env:"GATEWAY_IDLE_SHUTDOWN_SECONDS"`
 }
 
 // Load parses TURBORG_* env vars into a Settings, normalizing the
@@ -97,9 +102,10 @@ func (s *Settings) normalize() error {
 // registered.
 func (s *Settings) AnthropicEnabled() bool { return s.AnthropicAPIKey != "" }
 
-// WebEnabled reports whether the WS gateway should be started.
-func (s *Settings) WebEnabled() bool { return s.WebPassword != "" }
+// GatewayEnabled reports whether the control-plane gateway should be
+// started. False = no listener, no UI, no /ws endpoint.
+func (s *Settings) GatewayEnabled() bool { return s.GatewayPassword != "" }
 
 // IdleShutdownEnabled reports whether the gateway's idle-shutdown timer
-// is configured.
-func (s *Settings) IdleShutdownEnabled() bool { return s.WebIdleShutdownSeconds > 0 }
+// is configured. Wired by the SaaS sidecar for free-tier containers.
+func (s *Settings) IdleShutdownEnabled() bool { return s.GatewayIdleShutdownSeconds > 0 }

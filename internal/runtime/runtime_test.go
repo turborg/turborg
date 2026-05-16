@@ -44,15 +44,15 @@ func TestBuildWithAnthropic(t *testing.T) {
 		"!ask command must be registered when LLM is wired")
 }
 
-func TestBuildWithWebGateway(t *testing.T) {
+func TestBuildWithGateway(t *testing.T) {
 	s := &config.Settings{
-		CommandPrefix:           "!",
-		WebPassword:             "hunter2",
-		WebHost:                 "127.0.0.1",
-		WebPort:                 0,
-		WebMaxFailedAttempts:    5,
-		WebFailureWindowSeconds: 60,
-		WebLockoutSeconds:       300,
+		CommandPrefix:               "!",
+		GatewayPassword:             "hunter2",
+		GatewayHost:                 "127.0.0.1",
+		GatewayPort:                 0,
+		GatewayMaxFailedAttempts:    5,
+		GatewayFailureWindowSeconds: 60,
+		GatewayLockoutSeconds:       300,
 	}
 	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
 	b, err := runtime.Build(s, ircCfg, nil)
@@ -223,18 +223,18 @@ func TestRunStandaloneReturnsOnCtxCancel(t *testing.T) {
 }
 
 func TestRunWithGatewayUnwindsOnAgentStartFailure(t *testing.T) {
-	// Web gateway is enabled; the IRC connector points at a port that
-	// is closed so Agent.Run fails fast. Run() must cancel the shared
-	// ctx so gateway.Serve also returns, and Wait must surface the
-	// agent error.
+	// Gateway is enabled; the IRC connector points at a port that is
+	// closed so Agent.Run fails fast. Run() must cancel the shared ctx
+	// so gateway.Serve also returns, and Wait must surface the agent
+	// error.
 	s := &config.Settings{
-		CommandPrefix:           "!",
-		WebPassword:             "p",
-		WebHost:                 "127.0.0.1",
-		WebPort:                 0,
-		WebMaxFailedAttempts:    5,
-		WebFailureWindowSeconds: 60,
-		WebLockoutSeconds:       300,
+		CommandPrefix:               "!",
+		GatewayPassword:             "p",
+		GatewayHost:                 "127.0.0.1",
+		GatewayPort:                 0,
+		GatewayMaxFailedAttempts:    5,
+		GatewayFailureWindowSeconds: 60,
+		GatewayLockoutSeconds:       300,
 	}
 	ircCfg := &irc.Settings{
 		Hostname:         "127.0.0.1",
@@ -309,19 +309,19 @@ func TestLoadIRCSettingsCrossFieldValidation(t *testing.T) {
 
 // --- buildLLM error path: invalid API key handled at New ------------------
 
-func TestBuildWithInvalidWebPasswordFailsClean(t *testing.T) {
-	// Empty password disables Web entirely; an explicitly empty value
-	// reaches buildGateway only when WebEnabled returns true. To
-	// exercise the error wrap, give web.NewStaticPasswordVerifier a
+func TestBuildWithInvalidGatewayPasswordFailsClean(t *testing.T) {
+	// Empty password disables the gateway entirely; an explicitly empty
+	// value reaches buildGateway only when GatewayEnabled returns true.
+	// To exercise the error wrap, give web.NewStaticPasswordVerifier a
 	// blank password.
 	s := &config.Settings{
-		CommandPrefix:           "!",
-		WebPassword:             " ", // single space — treated as set by WebEnabled but verifier rejects
-		WebHost:                 "127.0.0.1",
-		WebPort:                 0,
-		WebMaxFailedAttempts:    5,
-		WebFailureWindowSeconds: 60,
-		WebLockoutSeconds:       300,
+		CommandPrefix:               "!",
+		GatewayPassword:             " ", // single space — treated as set but verifier rejects
+		GatewayHost:                 "127.0.0.1",
+		GatewayPort:                 0,
+		GatewayMaxFailedAttempts:    5,
+		GatewayFailureWindowSeconds: 60,
+		GatewayLockoutSeconds:       300,
 	}
 	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
 	_, err := runtime.Build(s, ircCfg, nil)
@@ -331,15 +331,15 @@ func TestBuildWithInvalidWebPasswordFailsClean(t *testing.T) {
 	_ = err
 }
 
-func TestBuildWithBadWebRateLimitConfig(t *testing.T) {
+func TestBuildWithBadGatewayRateLimitConfig(t *testing.T) {
 	s := &config.Settings{
-		CommandPrefix:           "!",
-		WebPassword:             "ok",
-		WebHost:                 "127.0.0.1",
-		WebPort:                 0,
-		WebMaxFailedAttempts:    0, // invalid for the rate limiter
-		WebFailureWindowSeconds: 0,
-		WebLockoutSeconds:       0,
+		CommandPrefix:               "!",
+		GatewayPassword:             "ok",
+		GatewayHost:                 "127.0.0.1",
+		GatewayPort:                 0,
+		GatewayMaxFailedAttempts:    0, // invalid for the rate limiter
+		GatewayFailureWindowSeconds: 0,
+		GatewayLockoutSeconds:       0,
 	}
 	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
 	_, err := runtime.Build(s, ircCfg, nil)
@@ -347,16 +347,16 @@ func TestBuildWithBadWebRateLimitConfig(t *testing.T) {
 	assert.Contains(t, err.Error(), "ratelimit")
 }
 
-func TestBuildWebWithIdleShutdownConfigured(t *testing.T) {
+func TestBuildGatewayWithIdleShutdownConfigured(t *testing.T) {
 	s := &config.Settings{
-		CommandPrefix:           "!",
-		WebPassword:             "p",
-		WebHost:                 "127.0.0.1",
-		WebPort:                 0,
-		WebMaxFailedAttempts:    5,
-		WebFailureWindowSeconds: 60,
-		WebLockoutSeconds:       300,
-		WebIdleShutdownSeconds:  30,
+		CommandPrefix:               "!",
+		GatewayPassword:             "p",
+		GatewayHost:                 "127.0.0.1",
+		GatewayPort:                 0,
+		GatewayMaxFailedAttempts:    5,
+		GatewayFailureWindowSeconds: 60,
+		GatewayLockoutSeconds:       300,
+		GatewayIdleShutdownSeconds:  30,
 	}
 	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
 	b, err := runtime.Build(s, ircCfg, nil)
@@ -384,13 +384,13 @@ func TestBuildLLMReturnsErrorOnEmptyKey(t *testing.T) {
 
 func TestRunWithGatewayUnwindsOnCtxCancel(t *testing.T) {
 	s := &config.Settings{
-		CommandPrefix:           "!",
-		WebPassword:             "p",
-		WebHost:                 "127.0.0.1",
-		WebPort:                 0,
-		WebMaxFailedAttempts:    5,
-		WebFailureWindowSeconds: 60,
-		WebLockoutSeconds:       300,
+		CommandPrefix:               "!",
+		GatewayPassword:             "p",
+		GatewayHost:                 "127.0.0.1",
+		GatewayPort:                 0,
+		GatewayMaxFailedAttempts:    5,
+		GatewayFailureWindowSeconds: 60,
+		GatewayLockoutSeconds:       300,
 	}
 	ircCfg := &irc.Settings{
 		Hostname:           "fake",

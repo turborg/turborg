@@ -2,7 +2,7 @@
 //
 // The protocol parser is forgiving: a malformed line yields a Message with
 // Command="" rather than raising, so a single bad input does not crash the
-// connector. This matches the Python implementation's behavior.
+// connector. Callers should treat empty Command as "unparseable, drop".
 package irc
 
 import "strings"
