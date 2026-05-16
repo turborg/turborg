@@ -23,17 +23,21 @@ import (
 // --- test doubles ----------------------------------------------------------
 
 type fakeBridge struct {
-	nick   string
-	state  *irc.ChannelState
-	sentMu sync.Mutex
-	sent   []string
+	nick     string
+	state    *irc.ChannelState
+	sentMu   sync.Mutex
+	sent     []string
+	limits   irc.ClientLimits
+	throttle *irc.Throttle
 }
 
 func newFakeBridge(nick string) *fakeBridge {
 	return &fakeBridge{nick: nick, state: irc.NewChannelState()}
 }
-func (f *fakeBridge) CurrentNick() string       { return f.nick }
-func (f *fakeBridge) State() *irc.ChannelState  { return f.state }
+func (f *fakeBridge) CurrentNick() string            { return f.nick }
+func (f *fakeBridge) State() *irc.ChannelState       { return f.state }
+func (f *fakeBridge) ClientLimits() irc.ClientLimits { return f.limits }
+func (f *fakeBridge) OutboundThrottle() *irc.Throttle { return f.throttle }
 func (f *fakeBridge) SendRaw(line string) error {
 	f.sentMu.Lock()
 	defer f.sentMu.Unlock()
@@ -208,6 +212,48 @@ func TestWSAuthAcceptsBearerHeader(t *testing.T) {
 	})
 	require.NoError(t, err)
 	_ = conn.Close(websocket.StatusNormalClosure, "")
+}
+
+func TestWSAttachHookFiresOnSuccessfulHandshake(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		reasons []string
+	)
+	opts := newOptions(t, "secret")
+	opts.OnClientAttached = func(reason string) {
+		mu.Lock()
+		reasons = append(reasons, reason)
+		mu.Unlock()
+	}
+	g, _, td := startGateway(t, opts, newFakeBridge("turborg"), &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "secret")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(reasons) == 1 && reasons[0] == "ws_attach"
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestWSAttachHookSilentOnAuthFailure(t *testing.T) {
+	var fired atomic.Bool
+	opts := newOptions(t, "right-secret")
+	opts.OnClientAttached = func(_ string) { fired.Store(true) }
+	g, _, td := startGateway(t, opts, newFakeBridge("turborg"), &fakeSender{})
+	defer td()
+
+	url := "ws://" + g.Addr() + "/ws?token=wrong"
+	_, resp, err := websocket.Dial(context.Background(), url, nil)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+	require.Error(t, err)
+	// Give the auth-fail path enough time that any errant hook would fire.
+	time.Sleep(50 * time.Millisecond)
+	assert.False(t, fired.Load(), "auth failure must not fire the attach hook")
 }
 
 // --- state op on connect -----------------------------------------------
@@ -993,4 +1039,131 @@ func TestServerNoticeBufferTrimsAtCap(t *testing.T) {
 		}
 	}
 	assert.LessOrEqual(t, replayed, 100, "server log must be capped at serverLogCap")
+}
+
+// --- Operator-policy / throttle gates -------------------------------------
+
+func TestInboundNickDeniedWhenLocked(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	bridge.limits = irc.ClientLimits{NickLocked: true}
+
+	g, _, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	_ = readJSON(t, conn) // state
+
+	body, _ := json.Marshal(map[string]any{"op": "nick", "nick": "newnick"})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	got := readJSON(t, conn)
+	assert.Equal(t, "policy_denied", got["op"])
+	assert.Equal(t, "nick", got["source_op"])
+	assert.Equal(t, "nick_locked", got["kind"])
+	assert.Contains(t, got["reason"].(string), "nick")
+
+	// Nothing forwarded to the bridge.
+	assert.Empty(t, bridge.Sent(),
+		"NICK must not flow upstream when ClientLimits.NickLocked is set")
+}
+
+func TestInboundJoinDeniedAtChannelCap(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	bridge.limits = irc.ClientLimits{MaxChannels: 2}
+	bridge.state.OnSelfJoin("#a")
+	bridge.state.OnSelfJoin("#b")
+
+	g, _, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	_ = readJSON(t, conn) // state
+
+	body, _ := json.Marshal(map[string]any{"op": "join", "channel": "#c"})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	got := readJSON(t, conn)
+	assert.Equal(t, "policy_denied", got["op"])
+	assert.Equal(t, "channels", got["kind"])
+	assert.Contains(t, got["reason"].(string), "2")
+
+	assert.Empty(t, bridge.Sent(),
+		"JOIN must not flow upstream when MaxChannels is reached")
+}
+
+func TestInboundJoinAllowedBelowChannelCap(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	bridge.limits = irc.ClientLimits{MaxChannels: 5}
+	bridge.state.OnSelfJoin("#a")
+
+	g, _, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	_ = readJSON(t, conn) // state
+
+	body, _ := json.Marshal(map[string]any{"op": "join", "channel": "#b"})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	require.Eventually(t, func() bool { return len(bridge.Sent()) == 1 },
+		time.Second, 10*time.Millisecond)
+	assert.Equal(t, "JOIN #b", bridge.Sent()[0])
+}
+
+func TestInboundSayRateLimitedEmitsRateLimitedEvent(t *testing.T) {
+	throttle, err := irc.NewThrottle(2, 30*time.Second, nil)
+	require.NoError(t, err)
+	bridge := newFakeBridge("turborg")
+	bridge.throttle = throttle
+
+	sender := &fakeSender{}
+	g, _, td := startGateway(t, newOptions(t, "p"), bridge, sender)
+	defer td()
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	_ = readJSON(t, conn) // state
+
+	// First 2 sends pass the throttle and produce the MESSAGE_SENT echo.
+	for i := 0; i < 2; i++ {
+		body, _ := json.Marshal(map[string]any{"op": "say", "channel": "#x", "text": "hi"})
+		require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+		got := readJSON(t, conn)
+		require.Equal(t, "message", got["op"], "send %d should produce a message echo", i+1)
+	}
+
+	// Third send hits the cap and gets a rate_limited event back.
+	body, _ := json.Marshal(map[string]any{"op": "say", "channel": "#x", "text": "hi"})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+	got := readJSON(t, conn)
+	assert.Equal(t, "rate_limited", got["op"])
+	assert.Equal(t, "#x", got["target"])
+	assert.GreaterOrEqual(t, got["retry_after"].(float64), 1.0)
+
+	// Sender saw only the first two — the throttled call short-circuits
+	// before reaching agent.Sender.
+	assert.Len(t, sender.Outbound(), 2)
+}
+
+func TestInboundSayPerTargetThrottleScopesIndependently(t *testing.T) {
+	throttle, err := irc.NewThrottle(1, 30*time.Second, nil)
+	require.NoError(t, err)
+	bridge := newFakeBridge("turborg")
+	bridge.throttle = throttle
+
+	g, _, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	_ = readJSON(t, conn) // state
+
+	// #a uses its bucket.
+	bodyA, _ := json.Marshal(map[string]any{"op": "say", "channel": "#a", "text": "hi"})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, bodyA))
+	require.Equal(t, "message", readJSON(t, conn)["op"])
+
+	// #b is a different bucket — should NOT be throttled.
+	bodyB, _ := json.Marshal(map[string]any{"op": "say", "channel": "#b", "text": "hi"})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, bodyB))
+	require.Equal(t, "message", readJSON(t, conn)["op"],
+		"per-target scope: chatty user pestering #a must not lock out #b")
 }

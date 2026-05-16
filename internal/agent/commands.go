@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 )
@@ -22,10 +23,12 @@ type commandEntry struct {
 // CommandRegistry parses text that starts with Prefix and dispatches to a
 // registered handler. Names are case-insensitive.
 type CommandRegistry struct {
-	prefix   string
-	mu       sync.RWMutex
-	commands map[string]commandEntry
-	guard    CommandGuard
+	prefix       string
+	mu           sync.RWMutex
+	commands     map[string]commandEntry
+	guard        CommandGuard
+	maxDynamic   int
+	dynamicCount int
 }
 
 func NewCommandRegistry(prefix string) *CommandRegistry {
@@ -35,6 +38,10 @@ func NewCommandRegistry(prefix string) *CommandRegistry {
 	return &CommandRegistry{
 		prefix:   prefix,
 		commands: map[string]commandEntry{},
+		// Default: dynamic registrations not allowed. Operators that
+		// want to let users register their own commands set
+		// SetMaxDynamic at startup. -1 = unrestricted.
+		maxDynamic: 0,
 	}
 }
 
@@ -48,11 +55,50 @@ func (r *CommandRegistry) SetGuard(g CommandGuard) {
 	r.guard = g
 }
 
+// SetMaxDynamic caps how many user-defined (dynamic) commands the
+// registry will accept via RegisterDynamic. 0 = none allowed (default);
+// -1 = unrestricted; positive values cap at N. Builtin commands
+// registered via Register are uncapped — this only governs the dynamic
+// path. Called once at startup; not safe for concurrent reassignment.
+func (r *CommandRegistry) SetMaxDynamic(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.maxDynamic = n
+}
+
+// Register installs a command handler unconditionally. Used for
+// builtins wired at startup and other internally-trusted callers. See
+// RegisterDynamic for the capped path open to user-defined commands.
 func (r *CommandRegistry) Register(name string, handler CommandHandler, perCommandGuard CommandGuard) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	key := strings.ToLower(name)
 	r.commands[key] = commandEntry{name: key, handler: handler, guard: perCommandGuard}
+}
+
+// ErrDynamicCommandLimit signals that RegisterDynamic refused to install
+// the handler because the configured cap is already reached. The caller
+// surfaces this back to whoever asked (HTTP API, IRC command, etc).
+var ErrDynamicCommandLimit = errors.New("agent: dynamic command limit reached")
+
+// RegisterDynamic is the capped registration path used by anything that
+// installs user-defined commands at runtime. Returns
+// ErrDynamicCommandLimit when the registry's MaxDynamic cap (0 by
+// default — see SetMaxDynamic) would be exceeded. Re-registering an
+// existing name overwrites without consuming a new slot.
+func (r *CommandRegistry) RegisterDynamic(name string, handler CommandHandler, perCommandGuard CommandGuard) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := strings.ToLower(name)
+	_, alreadyExists := r.commands[key]
+	if !alreadyExists && r.maxDynamic != -1 && r.dynamicCount >= r.maxDynamic {
+		return ErrDynamicCommandLimit
+	}
+	r.commands[key] = commandEntry{name: key, handler: handler, guard: perCommandGuard}
+	if !alreadyExists {
+		r.dynamicCount++
+	}
+	return nil
 }
 
 func (r *CommandRegistry) Names() []string {

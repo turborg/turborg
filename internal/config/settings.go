@@ -60,6 +60,75 @@ type Settings struct {
 	GatewayFailureWindowSeconds int    `env:"GATEWAY_FAILURE_WINDOW_SECONDS" envDefault:"60"`
 	GatewayLockoutSeconds       int    `env:"GATEWAY_LOCKOUT_SECONDS" envDefault:"300"`
 	GatewayIdleShutdownSeconds  int    `env:"GATEWAY_IDLE_SHUTDOWN_SECONDS"`
+
+	// Operator policy controls. All optional. When absent the agent
+	// behaves exactly as before this section existed — no network
+	// whitelist, no channel cap, no identity lock, no outbound throttle
+	// beyond what the connector ships with. Zero/empty values uniformly
+	// mean "unrestricted" so absent-env and explicit-zero behave the same
+	// way.
+
+	// Plan is a free-form label. Not used at runtime; kept so the operator
+	// can correlate runtime logs with whatever policy bundle they applied.
+	Plan string `env:"PLAN"`
+
+	// AllowedNetworks restricts the IRC upstream to a hostname allowlist.
+	// Validated in runtime.Build against ircCfg.Hostname; empty = unrestricted.
+	AllowedNetworks []string `env:"ALLOWED_NETWORKS" envSeparator:","`
+
+	MaxChannels int `env:"MAX_CHANNELS"`
+
+	// NickLocked, RealnameLocked, RealnameTemplate pin parts of the
+	// agent's IRC identity. RealnameLocked + RealnameTemplate overwrites
+	// ircCfg.RealName at boot. NickLocked surfaces to the bouncer command
+	// policy which rejects /NICK from bouncer-attached clients.
+	//
+	// Ident (USER message ident) is not substituted here; operators wire
+	// it via TURBORG_IRC_USERNAME directly.
+	NickLocked       bool   `env:"NICK_LOCKED"`
+	RealnameLocked   bool   `env:"REALNAME_LOCKED"`
+	RealnameTemplate string `env:"REALNAME_TEMPLATE"`
+
+	// MaxConnectorsPerAgent caps how many distinct connector types the
+	// agent will wire up. 0 = unrestricted. Enforced at Load(); a
+	// TURBORG_CONNECTORS list longer than this fails fast.
+	MaxConnectorsPerAgent int `env:"MAX_CONNECTORS_PER_AGENT"`
+
+	// Per-target outbound message throttle. Distinct from the existing
+	// CommandMaxPerWindow / CTCPMaxPerWindow throttles, which govern
+	// bot-replies and CTCP responses respectively.
+	OutboundMaxPerWindow  int `env:"OUTBOUND_MAX_PER_WINDOW"`
+	OutboundWindowSeconds int `env:"OUTBOUND_WINDOW_SECONDS"`
+
+	// LLM caps. Validated here; runtime enforcement lands once an !ask-
+	// style LLM-backed command is wired in (no LLM-driven commands ship
+	// in turborg today).
+	LLMInputTokensPerDay  int      `env:"LLM_INPUT_TOKENS_PER_DAY"`
+	LLMOutputTokensPerDay int      `env:"LLM_OUTPUT_TOKENS_PER_DAY"`
+	AllowedLLMModels      []string `env:"ALLOWED_LLM_MODELS" envSeparator:","`
+
+	// CustomCommandsMax caps the dynamic-command registry. 0 = builtins
+	// only, -1 = unrestricted. The custom-commands API itself is not yet
+	// shipping; this knob is present so operators can pre-set it.
+	CustomCommandsMax int `env:"CUSTOM_COMMANDS_MAX"`
+
+	// OwnerDMNudgeEvery triggers a DM to the owner after every N outbound
+	// messages. 0 = disabled. Used by operators who want a regular usage
+	// summary delivered through IRC itself.
+	OwnerDMNudgeEvery int `env:"OWNER_DM_NUDGE_EVERY"`
+
+	// ActivityURL is an optional webhook the agent POSTs to whenever
+	// meaningful runtime activity occurs: the bot sending a message, a
+	// bouncer client attaching, or a WS gateway client completing the
+	// handshake. Empty = no posts. Payload is a single-field JSON object
+	// `{"reason": "<id>"}` where <id> is one of bot_spoke, bouncer_attach,
+	// ws_attach. Useful for operators wiring uptime / heartbeat dashboards
+	// without parsing log streams.
+	ActivityURL string `env:"ACTIVITY_URL"`
+
+	// ActivityToken is sent as a bearer Authorization header on every
+	// activity webhook POST. Optional.
+	ActivityToken string `env:"ACTIVITY_TOKEN"`
 }
 
 // Load parses TURBORG_* env vars into a Settings, normalizing the
@@ -94,7 +163,68 @@ func (s *Settings) normalize() error {
 		out = append(out, c)
 	}
 	s.Connectors = out
+
+	// Plan-tier consistency. Hostname-vs-AllowedNetworks lives in
+	// runtime.Build (needs ircCfg).
+	if s.OutboundMaxPerWindow > 0 && s.OutboundWindowSeconds <= 0 {
+		return errors.New("config: OUTBOUND_WINDOW_SECONDS must be > 0 when OUTBOUND_MAX_PER_WINDOW is set")
+	}
+	if s.LLMInputTokensPerDay < 0 {
+		return errors.New("config: LLM_INPUT_TOKENS_PER_DAY must be >= 0 (0 = unrestricted)")
+	}
+	if s.LLMOutputTokensPerDay < 0 {
+		return errors.New("config: LLM_OUTPUT_TOKENS_PER_DAY must be >= 0 (0 = unrestricted)")
+	}
+	if s.MaxChannels < 0 {
+		return errors.New("config: MAX_CHANNELS must be >= 0 (0 = unrestricted)")
+	}
+	if s.MaxConnectorsPerAgent < 0 {
+		return errors.New("config: MAX_CONNECTORS_PER_AGENT must be >= 0 (0 = unrestricted)")
+	}
+	// Cap-exceeded branch will land once a second valid connector exists.
+	// Today the dedup loop above keeps len(s.Connectors) <= 1 with "irc"
+	// the only ValidConnectors entry, so a cap-vs-count compare is unreachable.
+
+	// AllowedNetworks: trim entries, drop empties. The hostname check
+	// itself runs in runtime.Build.
+	if len(s.AllowedNetworks) > 0 {
+		cleaned := make([]string, 0, len(s.AllowedNetworks))
+		for _, n := range s.AllowedNetworks {
+			n = strings.TrimSpace(n)
+			if n != "" {
+				cleaned = append(cleaned, n)
+			}
+		}
+		s.AllowedNetworks = cleaned
+	}
+
+	// AllowedLLMModels: same trim-and-drop-empties pass.
+	if len(s.AllowedLLMModels) > 0 {
+		cleaned := make([]string, 0, len(s.AllowedLLMModels))
+		for _, m := range s.AllowedLLMModels {
+			m = strings.TrimSpace(m)
+			if m != "" {
+				cleaned = append(cleaned, m)
+			}
+		}
+		s.AllowedLLMModels = cleaned
+	}
+
 	return nil
+}
+
+// HostnameAllowed reports whether the given upstream hostname satisfies
+// the plan's network whitelist. Empty whitelist = unrestricted (true).
+func (s *Settings) HostnameAllowed(hostname string) bool {
+	if len(s.AllowedNetworks) == 0 {
+		return true
+	}
+	for _, allowed := range s.AllowedNetworks {
+		if allowed == hostname {
+			return true
+		}
+	}
+	return false
 }
 
 // AnthropicEnabled reports whether an Anthropic LLM provider should be
@@ -107,5 +237,10 @@ func (s *Settings) AnthropicEnabled() bool { return s.AnthropicAPIKey != "" }
 func (s *Settings) GatewayEnabled() bool { return s.GatewayPassword != "" }
 
 // IdleShutdownEnabled reports whether the gateway's idle-shutdown timer
-// is configured. Wired by the SaaS sidecar for free-tier containers.
+// is configured.
 func (s *Settings) IdleShutdownEnabled() bool { return s.GatewayIdleShutdownSeconds > 0 }
+
+// ActivityEnabled reports whether the agent should POST runtime
+// activity signals to a remote observer. False when ACTIVITY_URL is
+// unset; the notifier in that case is a no-op.
+func (s *Settings) ActivityEnabled() bool { return s.ActivityURL != "" }

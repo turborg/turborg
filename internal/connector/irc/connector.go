@@ -38,6 +38,34 @@ type Connector struct {
 	bouncer  *Bouncer
 	ctcp     *Throttle
 
+	// clientLimits is the operator-policy struct the bouncer consults
+	// before forwarding client-originated commands upstream. Held here
+	// so runtime.Build can hand it to the connector before Start; it
+	// gets attached to the bouncer when (and if) the bouncer is created
+	// during Start.
+	clientLimits ClientLimits
+
+	// outboundThrottle is the per-target client-originated PRIVMSG
+	// throttle. Shared with the WS gateway so a user running both
+	// HexChat and the web UI shares one bucket per target.
+	outboundThrottle *Throttle
+
+	// bouncerAttachHook is forwarded onto the bouncer once it is built
+	// during startBouncer. Held here so SetBouncerAttachHook can run
+	// before Start without depending on bouncer existence yet.
+	bouncerAttachHook func(reason string)
+
+	// ownerNudge, when non-nil, emits a periodic usage-summary DM to
+	// the configured owner nick. nil = disabled.
+	ownerNudge *OwnerNudge
+
+	// onBotSpoke, when non-nil, fires for each bot-originated outbound
+	// PRIVMSG. Wired by runtime so an external observer can distinguish
+	// bot-driven activity from incoming channel chatter. Bouncer-tunneled
+	// PRIVMSGs go through a different code path (AttachUpstream callback)
+	// and are NOT considered bot_spoke — those are bouncer-attach activity.
+	onBotSpoke func(reason string)
+
 	// currentNick is the live nick the server confirmed for us. It
 	// starts as settings.Nick (the requested value), gets updated by
 	// the 001 RPL_WELCOME (where the server tells us the nick it
@@ -73,6 +101,48 @@ func (c *Connector) Name() string                          { return "irc" }
 func (c *Connector) Inbound() <-chan *agent.InboundEnvelope { return c.inbox }
 func (c *Connector) ClaimSupervision() bool                { return true }
 func (c *Connector) State() *ChannelState                  { return c.state }
+
+// SetClientLimits installs the operator-policy struct that gates
+// client-initiated commands (NICK, USER realname, JOIN-vs-channel-cap).
+// Must be called before Start so the limits are in place when the
+// bouncer is constructed. Calling later is a no-op.
+func (c *Connector) SetClientLimits(l ClientLimits) { c.clientLimits = l }
+
+// ClientLimits returns the operator-policy struct currently installed
+// on the connector. Used by adjacent surfaces (e.g. the WS gateway) to
+// enforce the same rules against client-originated actions that don't
+// flow through the bouncer.
+func (c *Connector) ClientLimits() ClientLimits { return c.clientLimits }
+
+// SetOutboundThrottle installs the per-target outbound PRIVMSG throttle.
+// Pass nil to disable. Must be called before Start so the throttle is
+// in place when the bouncer is constructed; the WS gateway picks up
+// the same instance via OutboundThrottle().
+func (c *Connector) SetOutboundThrottle(t *Throttle) { c.outboundThrottle = t }
+
+// OutboundThrottle returns the per-target outbound throttle currently
+// installed on the connector (may be nil). Exposed so the WS gateway
+// can consult the same instance for web-originated PRIVMSG.
+func (c *Connector) OutboundThrottle() *Throttle { return c.outboundThrottle }
+
+// SetOwnerNudge installs the periodic owner-DM usage summary. Pass nil
+// to disable. When set, Connector.Send increments the nudge counter
+// after each successful PRIVMSG write and the nudge emits a DM when
+// the count crosses a multiple of EveryN.
+func (c *Connector) SetOwnerNudge(n *OwnerNudge) { c.ownerNudge = n }
+
+// SetActivityHook installs a callback fired for each bot-originated
+// outbound PRIVMSG. Pass nil to disable. Wired by runtime so an
+// observer learns the bot is doing work, even on dashboard-only or
+// silent-channel deployments where log scraping for PRIVMSG would miss
+// the signal. Bouncer-tunneled and incoming PRIVMSG do NOT fire this
+// hook — those reflect user activity, not bot activity.
+func (c *Connector) SetActivityHook(hook func(reason string)) { c.onBotSpoke = hook }
+
+// SetBouncerAttachHook installs a callback the bouncer fires on each
+// successful client auth. Pass nil to disable. Must be called before
+// Start so the bouncer picks it up when it is constructed.
+func (c *Connector) SetBouncerAttachHook(hook func(reason string)) { c.bouncerAttachHook = hook }
 
 // CurrentNick returns the live nick the server confirmed for the bot.
 // Initially the requested TURBORG_IRC_NICK, then overwritten by the
@@ -123,6 +193,13 @@ func (c *Connector) Send(env *agent.OutboundEnvelope) error {
 	}
 	if c.bouncer != nil {
 		c.bouncer.BroadcastAsSelf(line, nil)
+	}
+	// Owner-nudge counter. Passing c.client.WriteLine directly (not
+	// c.Send) so the nudge DM doesn't recurse back through this method
+	// and double-count.
+	c.ownerNudge.Note(c.client.WriteLine)
+	if c.onBotSpoke != nil {
+		c.onBotSpoke("bot_spoke")
 	}
 	return nil
 }
@@ -237,6 +314,9 @@ func (c *Connector) startBouncer(ctx context.Context) error {
 		return err
 	}
 	b.AttachState(c.state, c.CurrentNick(), c.settings.EffectiveUsername(), "turborg")
+	b.AttachClientLimits(c.clientLimits)
+	b.AttachOutboundThrottle(c.outboundThrottle)
+	b.AttachActivityHook(c.bouncerAttachHook)
 	// sendUpstream is set before c.client is, so guard the dereference.
 	// Pre-bound bouncer clients that try to send forwardable commands
 	// before the upstream Dial completes get an error back rather than

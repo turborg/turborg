@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/turborg/turborg/internal/activity"
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/config"
 	"github.com/turborg/turborg/internal/connector/irc"
@@ -40,10 +41,11 @@ const AskSystemPrompt = "You are turborg, an IRC chatbot. Keep replies short and
 // connectors are added; built-in commands are registered; the owner +
 // throttle guard is installed.
 type Built struct {
-	Agent   *agent.Agent
-	IRC     *irc.Connector
-	Gateway *web.Gateway
-	LLM     llm.Provider // nil when Anthropic is not configured
+	Agent    *agent.Agent
+	IRC      *irc.Connector
+	Gateway  *web.Gateway
+	LLM      llm.Provider       // nil when Anthropic is not configured
+	Activity *activity.Notifier // never nil; no-op when ACTIVITY_URL is unset
 }
 
 // Build wires the agent + connectors + gateway from settings. Callers
@@ -54,14 +56,58 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		log = slog.Default()
 	}
 
+	if err := applyOperatorPolicy(s, ircCfg); err != nil {
+		return nil, err
+	}
+
 	provider, err := buildLLM(s)
 	if err != nil {
 		return nil, err
 	}
 
 	a := agent.NewWithPrefix(log, s.CommandPrefix)
+	a.Commands.SetMaxDynamic(s.CustomCommandsMax)
+
+	notifier := activity.New(s.ActivityURL, s.ActivityToken, log)
 
 	ircConn := irc.New(ircCfg, log, a.Events)
+	ircConn.SetClientLimits(irc.ClientLimits{
+		NickLocked:     s.NickLocked,
+		RealnameLocked: s.RealnameLocked,
+		MaxChannels:    s.MaxChannels,
+	})
+	if notifier.Enabled() {
+		// Bind the notifier into the connector + bouncer. The Hook method
+		// keeps the IRC package free of an activity-package import — it
+		// only sees a func(string).
+		ircConn.SetActivityHook(notifier.Hook)
+		ircConn.SetBouncerAttachHook(notifier.Hook)
+	}
+
+	// Per-target outbound throttle, when configured. Single instance
+	// shared between the bouncer (consults for attached-client PRIVMSG)
+	// and the WS gateway (consults for `say` op) so a user with both
+	// surfaces open shares one bucket per target.
+	if s.OutboundMaxPerWindow > 0 && s.OutboundWindowSeconds > 0 {
+		t, err := irc.NewThrottle(
+			s.OutboundMaxPerWindow,
+			time.Duration(s.OutboundWindowSeconds)*time.Second,
+			nil,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("runtime: outbound throttle: %w", err)
+		}
+		ircConn.SetOutboundThrottle(t)
+	}
+
+	// Owner-DM nudge: when the operator has set both a target owner nick
+	// and a positive interval, the connector DMs the owner every N
+	// outbound PRIVMSGs with a usage summary. Daily counter resets at
+	// UTC midnight inside the nudge itself.
+	if nudge := irc.NewOwnerNudge(s.OwnerNick, s.OwnerDMNudgeEvery); nudge != nil {
+		ircConn.SetOwnerNudge(nudge)
+	}
+
 	a.AddConnector(ircConn)
 
 	if len(s.Connectors) > 1 {
@@ -78,10 +124,10 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	RegisterBuiltinCommands(a, provider)
 	a.Commands.SetGuard(BuildCommandGuard(s))
 
-	built := &Built{Agent: a, IRC: ircConn, LLM: provider}
+	built := &Built{Agent: a, IRC: ircConn, LLM: provider, Activity: notifier}
 
 	if s.GatewayEnabled() {
-		gw, err := buildGateway(s, ircConn, log)
+		gw, err := buildGateway(s, ircConn, a, log, notifier)
 		if err != nil {
 			return nil, err
 		}
@@ -90,6 +136,29 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	}
 
 	return built, nil
+}
+
+// applyOperatorPolicy runs cross-cutting policy checks at boot. Catches
+// misconfigurations the env layer alone can't see — e.g. ALLOWED_NETWORKS
+// set but IRC_HOSTNAME points outside the allowlist. Mutates ircCfg in
+// place when the policy forces a value (realname lock).
+//
+// All checks are no-ops when the corresponding policy env is unset, so
+// operators who don't configure anything see no behavior change.
+func applyOperatorPolicy(s *config.Settings, ircCfg *irc.Settings) error {
+	if ircCfg != nil && !s.HostnameAllowed(ircCfg.Hostname) {
+		return fmt.Errorf("runtime: IRC hostname %q is not in TURBORG_ALLOWED_NETWORKS=%s",
+			ircCfg.Hostname, strings.Join(s.AllowedNetworks, ","))
+	}
+
+	// Realname lock: template overrides whatever value arrived via
+	// TURBORG_IRC_REAL_NAME. Done before the connector is constructed so
+	// the constructor sees the locked value as its initial state.
+	if ircCfg != nil && s.RealnameLocked && s.RealnameTemplate != "" {
+		ircCfg.RealName = s.RealnameTemplate
+	}
+
+	return nil
 }
 
 func buildLLM(s *config.Settings) (llm.Provider, error) {
@@ -107,7 +176,7 @@ func buildLLM(s *config.Settings) (llm.Provider, error) {
 	return p, nil
 }
 
-func buildGateway(s *config.Settings, ircConn *irc.Connector, log *slog.Logger) (*web.Gateway, error) {
+func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, log *slog.Logger, notifier *activity.Notifier) (*web.Gateway, error) {
 	verifier, err := web.NewStaticPasswordVerifier(s.GatewayPassword)
 	if err != nil {
 		return nil, fmt.Errorf("runtime: gateway verifier: %w", err)
@@ -127,6 +196,9 @@ func buildGateway(s *config.Settings, ircConn *irc.Connector, log *slog.Logger) 
 		Verifier:    verifier,
 		RateLimiter: rl,
 		Log:         log,
+	}
+	if notifier.Enabled() {
+		opts.OnClientAttached = notifier.Hook
 	}
 	if s.IdleShutdownEnabled() {
 		opts.IdleShutdownSeconds = s.GatewayIdleShutdownSeconds

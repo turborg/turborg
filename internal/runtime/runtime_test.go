@@ -60,6 +60,36 @@ func TestBuildWithGateway(t *testing.T) {
 	require.NotNil(t, b.Gateway)
 }
 
+func TestBuildActivityNoopWhenURLUnset(t *testing.T) {
+	s := &config.Settings{CommandPrefix: "!"}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	require.NotNil(t, b.Activity)
+	assert.False(t, b.Activity.Enabled(),
+		"activity notifier must be a no-op when TURBORG_ACTIVITY_URL is unset")
+}
+
+func TestBuildActivityEnabledWhenURLSet(t *testing.T) {
+	s := &config.Settings{
+		CommandPrefix:           "!",
+		ActivityURL:             "http://observer.local/mark",
+		ActivityToken:           "shh",
+		GatewayPassword:             "hunter2",
+		GatewayHost:                 "127.0.0.1",
+		GatewayPort:                 0,
+		GatewayMaxFailedAttempts:    5,
+		GatewayFailureWindowSeconds: 60,
+		GatewayLockoutSeconds:       300,
+	}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	require.NotNil(t, b.Activity)
+	assert.True(t, b.Activity.Enabled())
+	assert.NotNil(t, b.Gateway, "gateway must still wire when activity is enabled")
+}
+
 func TestBuildRejectsUnknownConnector(t *testing.T) {
 	s := &config.Settings{CommandPrefix: "!", Connectors: []string{"irc", "discord"}}
 	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
@@ -413,6 +443,143 @@ func TestRunWithGatewayUnwindsOnCtxCancel(t *testing.T) {
 		t.Fatal("Run did not return within timeout")
 	}
 	cancel()
+}
+
+func TestBuildRejectsHostnameOutsideAllowedNetworks(t *testing.T) {
+	// Self-host operator with an empty whitelist is unrestricted — no
+	// rejection. Set the whitelist to a value that doesn't include
+	// ircCfg.Hostname and Build must refuse to come up.
+	s := &config.Settings{
+		CommandPrefix:   "!",
+		AllowedNetworks: []string{"irc.libera.chat"},
+	}
+	ircCfg := &irc.Settings{Hostname: "irc.efnet.org", Nick: "turborg"}
+
+	_, err := runtime.Build(s, ircCfg, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ALLOWED_NETWORKS")
+	assert.Contains(t, err.Error(), "irc.efnet.org")
+}
+
+func TestBuildAcceptsHostnameInWhitelist(t *testing.T) {
+	s := &config.Settings{
+		CommandPrefix:   "!",
+		AllowedNetworks: []string{"irc.libera.chat", "irc.oftc.net"},
+	}
+	ircCfg := &irc.Settings{Hostname: "irc.oftc.net", Nick: "turborg"}
+
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	require.NotNil(t, b.IRC)
+}
+
+func TestBuildAcceptsAnyHostnameWhenWhitelistEmpty(t *testing.T) {
+	// Empty AllowedNetworks = unrestricted (the self-host default). Bot
+	// must come up regardless of the hostname value.
+	s := &config.Settings{CommandPrefix: "!"}
+	ircCfg := &irc.Settings{Hostname: "irc.some-private.example", Nick: "turborg"}
+
+	_, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+}
+
+func TestBuildLocksRealnameToTemplate(t *testing.T) {
+	// RealnameLocked + RealnameTemplate set → realname overrides whatever
+	// arrived via TURBORG_IRC_REAL_NAME. Operators use this to force a
+	// fixed identity string regardless of per-deploy env wiring.
+	s := &config.Settings{
+		CommandPrefix:    "!",
+		RealnameLocked:   true,
+		RealnameTemplate: "fixed realname for this deployment",
+	}
+	ircCfg := &irc.Settings{
+		Hostname: "irc.libera.chat",
+		Nick:     "turborg",
+		RealName: "user-supplied custom name",
+	}
+
+	_, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "fixed realname for this deployment", ircCfg.RealName,
+		"locked realname must overwrite ircCfg.RealName at Build time")
+}
+
+func TestBuildLeavesRealnameAloneWhenLockUnset(t *testing.T) {
+	// No RealnameLocked flag → user-supplied realname survives unchanged.
+	s := &config.Settings{CommandPrefix: "!"}
+	ircCfg := &irc.Settings{
+		Hostname: "irc.libera.chat",
+		Nick:     "turborg",
+		RealName: "user-supplied custom name",
+	}
+
+	_, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "user-supplied custom name", ircCfg.RealName)
+}
+
+func TestBuildWiresOutboundThrottleWhenConfigured(t *testing.T) {
+	// OutboundMaxPerWindow > 0 + OutboundWindowSeconds > 0 → runtime
+	// constructs a throttle and attaches it to the connector so both the
+	// bouncer and the WS gateway can consult the same instance.
+	s := &config.Settings{
+		CommandPrefix:         "!",
+		OutboundMaxPerWindow:  5,
+		OutboundWindowSeconds: 30,
+	}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	require.NotNil(t, b.IRC)
+	assert.NotNil(t, b.IRC.OutboundThrottle(),
+		"OutboundThrottle must be wired when MaxPerWindow > 0")
+}
+
+func TestBuildLeavesOutboundThrottleNilWhenUnconfigured(t *testing.T) {
+	s := &config.Settings{CommandPrefix: "!"}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	assert.Nil(t, b.IRC.OutboundThrottle(),
+		"unconfigured throttle stays nil (unrestricted)")
+}
+
+func TestBuildWiresOwnerNudgeWhenConfigured(t *testing.T) {
+	// Both OwnerNick and OwnerDMNudgeEvery set → runtime constructs the
+	// nudge and attaches it. We can't observe the nudge directly (no
+	// getter on the connector), so this just exercises the wiring path
+	// for coverage.
+	s := &config.Settings{
+		CommandPrefix:     "!",
+		OwnerNick:         "alice",
+		OwnerDMNudgeEvery: 100,
+	}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+
+	_, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+}
+
+func TestBuildIgnoresRealnameTemplateWithoutLock(t *testing.T) {
+	// RealnameTemplate set but Locked=false: the template is purely
+	// advisory and must not overwrite the user's choice. Catches the
+	// foot-gun of someone wiring the template env without the lock flag.
+	s := &config.Settings{
+		CommandPrefix:    "!",
+		RealnameLocked:   false,
+		RealnameTemplate: "some advisory string",
+	}
+	ircCfg := &irc.Settings{
+		Hostname: "irc.libera.chat",
+		Nick:     "turborg",
+		RealName: "user-supplied",
+	}
+
+	_, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "user-supplied", ircCfg.RealName)
 }
 
 // --- fakeLLM stub --------------------------------------------------------
