@@ -233,6 +233,12 @@ type Bouncer struct {
 	// bucket per target.
 	outboundThrottle *Throttle
 
+	// onAttach, when non-nil, fires once per successful client auth
+	// with the reason string the activity package uses. nil = no-op.
+	// Wired by runtime so an external observer can be told a real user
+	// just attached, distinct from "bot is alive" log scrapes.
+	onAttach func(reason string)
+
 	logMu      sync.Mutex
 	channelLog map[string][]string
 }
@@ -283,6 +289,16 @@ func (b *Bouncer) AttachOutboundThrottle(t *Throttle) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.outboundThrottle = t
+}
+
+// AttachActivityHook installs a callback fired once per successful client
+// auth. Pass nil to disable. Lets the runtime forward "a client is using
+// this bouncer right now" signals to an external observer without the
+// bouncer itself knowing what the observer is.
+func (b *Bouncer) AttachActivityHook(hook func(reason string)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.onAttach = hook
 }
 
 func (b *Bouncer) AttachOutboundObserver(cb ForwardedObserver) {
@@ -644,6 +660,12 @@ func (b *Bouncer) handlePass(client *BouncerClient, params []string) {
 			b.rateLimiter.RecordSuccess(ip)
 		}
 		b.log.Info("bouncer auth success", "ip", ip)
+		b.mu.Lock()
+		hook := b.onAttach
+		b.mu.Unlock()
+		if hook != nil {
+			hook("bouncer_attach")
+		}
 
 		// IRCv3: if the client is mid-CAP-negotiation, hold the
 		// welcome + state replay until CAP END. Sending 001 now would

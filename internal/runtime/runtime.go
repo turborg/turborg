@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/turborg/turborg/internal/activity"
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/config"
 	"github.com/turborg/turborg/internal/connector/irc"
@@ -40,10 +41,11 @@ const AskSystemPrompt = "You are turborg, an IRC chatbot. Keep replies short and
 // connectors are added; built-in commands are registered; the owner +
 // throttle guard is installed.
 type Built struct {
-	Agent   *agent.Agent
-	IRC     *irc.Connector
-	Gateway *web.Gateway
-	LLM     llm.Provider // nil when Anthropic is not configured
+	Agent    *agent.Agent
+	IRC      *irc.Connector
+	Gateway  *web.Gateway
+	LLM      llm.Provider       // nil when Anthropic is not configured
+	Activity *activity.Notifier // never nil; no-op when ACTIVITY_URL is unset
 }
 
 // Build wires the agent + connectors + gateway from settings. Callers
@@ -66,12 +68,21 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	a := agent.NewWithPrefix(log, s.CommandPrefix)
 	a.Commands.SetMaxDynamic(s.CustomCommandsMax)
 
+	notifier := activity.New(s.ActivityURL, s.ActivityToken, log)
+
 	ircConn := irc.New(ircCfg, log, a.Events)
 	ircConn.SetClientLimits(irc.ClientLimits{
 		NickLocked:     s.NickLocked,
 		RealnameLocked: s.RealnameLocked,
 		MaxChannels:    s.MaxChannels,
 	})
+	if notifier.Enabled() {
+		// Bind the notifier into the connector + bouncer. The Hook method
+		// keeps the IRC package free of an activity-package import — it
+		// only sees a func(string).
+		ircConn.SetActivityHook(notifier.Hook)
+		ircConn.SetBouncerAttachHook(notifier.Hook)
+	}
 
 	// Per-target outbound throttle, when configured. Single instance
 	// shared between the bouncer (consults for attached-client PRIVMSG)
@@ -113,10 +124,10 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	RegisterBuiltinCommands(a, provider)
 	a.Commands.SetGuard(BuildCommandGuard(s))
 
-	built := &Built{Agent: a, IRC: ircConn, LLM: provider}
+	built := &Built{Agent: a, IRC: ircConn, LLM: provider, Activity: notifier}
 
 	if s.GatewayEnabled() {
-		gw, err := buildGateway(s, ircConn, log)
+		gw, err := buildGateway(s, ircConn, a, log, notifier)
 		if err != nil {
 			return nil, err
 		}
@@ -165,7 +176,7 @@ func buildLLM(s *config.Settings) (llm.Provider, error) {
 	return p, nil
 }
 
-func buildGateway(s *config.Settings, ircConn *irc.Connector, log *slog.Logger) (*web.Gateway, error) {
+func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, log *slog.Logger, notifier *activity.Notifier) (*web.Gateway, error) {
 	verifier, err := web.NewStaticPasswordVerifier(s.GatewayPassword)
 	if err != nil {
 		return nil, fmt.Errorf("runtime: gateway verifier: %w", err)
@@ -185,6 +196,9 @@ func buildGateway(s *config.Settings, ircConn *irc.Connector, log *slog.Logger) 
 		Verifier:    verifier,
 		RateLimiter: rl,
 		Log:         log,
+	}
+	if notifier.Enabled() {
+		opts.OnClientAttached = notifier.Hook
 	}
 	if s.IdleShutdownEnabled() {
 		opts.IdleShutdownSeconds = s.GatewayIdleShutdownSeconds

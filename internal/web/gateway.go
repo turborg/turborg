@@ -66,6 +66,12 @@ type Options struct {
 	// stop).
 	IdleShutdownSeconds int
 	OnIdleShutdown      func()
+
+	// OnClientAttached fires once per successful WS handshake, with a
+	// stable reason identifier. nil = disabled. Wired by runtime so an
+	// external observer can learn that a dashboard client is actively
+	// using this agent — distinct from "bot is alive" log signal.
+	OnClientAttached func(reason string)
 }
 
 // Gateway is an HTTP server exposing /ws (WebSocket), /health, /metrics,
@@ -290,6 +296,9 @@ func (g *Gateway) handleWS(w http.ResponseWriter, r *http.Request) {
 	g.metrics.connections++
 	g.metMu.Unlock()
 	g.log.Info("web auth success", "ip", ip)
+	if g.opts.OnClientAttached != nil {
+		g.opts.OnClientAttached("ws_attach")
+	}
 
 	connectedAt := time.Now()
 	defer func() {

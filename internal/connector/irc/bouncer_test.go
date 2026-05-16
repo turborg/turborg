@@ -1142,6 +1142,53 @@ func TestBouncerPerTargetOutboundThrottleScopesIndependently(t *testing.T) {
 	assert.True(t, sawB, "#b is a separate bucket — must still be forwarded")
 }
 
+func TestBouncerActivityHookFiresOnAuthSuccess(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	var (
+		mu      sync.Mutex
+		reasons []string
+	)
+	b.AttachActivityHook(func(reason string) {
+		mu.Lock()
+		reasons = append(reasons, reason)
+		mu.Unlock()
+	})
+
+	conn, r := bouncerClient(t, addr)
+	_, _ = r.ReadString('\n')
+	writeLine(t, conn, "PASS hunter2")
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, err := r.ReadString('\n')
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(reasons) == 1 && reasons[0] == "bouncer_attach"
+	}, time.Second, 10*time.Millisecond, "hook must fire exactly once with reason=bouncer_attach")
+}
+
+func TestBouncerActivityHookSilentOnAuthFailure(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	var fired bool
+	var mu sync.Mutex
+	b.AttachActivityHook(func(_ string) {
+		mu.Lock()
+		fired = true
+		mu.Unlock()
+	})
+
+	conn, r := bouncerClient(t, addr)
+	_, _ = r.ReadString('\n')
+	writeLine(t, conn, "PASS wrong")
+	// Wait long enough that any hook fired during handlePass would land.
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.False(t, fired, "auth failure must not fire the activity hook")
+}
+
 func TestBouncerZeroClientLimitsIsUnrestricted(t *testing.T) {
 	// Default (zero) ClientLimits should pass everything through — guards
 	// the operator who doesn't configure any policy.

@@ -214,6 +214,48 @@ func TestWSAuthAcceptsBearerHeader(t *testing.T) {
 	_ = conn.Close(websocket.StatusNormalClosure, "")
 }
 
+func TestWSAttachHookFiresOnSuccessfulHandshake(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		reasons []string
+	)
+	opts := newOptions(t, "secret")
+	opts.OnClientAttached = func(reason string) {
+		mu.Lock()
+		reasons = append(reasons, reason)
+		mu.Unlock()
+	}
+	g, _, td := startGateway(t, opts, newFakeBridge("turborg"), &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "secret")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(reasons) == 1 && reasons[0] == "ws_attach"
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestWSAttachHookSilentOnAuthFailure(t *testing.T) {
+	var fired atomic.Bool
+	opts := newOptions(t, "right-secret")
+	opts.OnClientAttached = func(_ string) { fired.Store(true) }
+	g, _, td := startGateway(t, opts, newFakeBridge("turborg"), &fakeSender{})
+	defer td()
+
+	url := "ws://" + g.Addr() + "/ws?token=wrong"
+	_, resp, err := websocket.Dial(context.Background(), url, nil)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+	require.Error(t, err)
+	// Give the auth-fail path enough time that any errant hook would fire.
+	time.Sleep(50 * time.Millisecond)
+	assert.False(t, fired.Load(), "auth failure must not fire the attach hook")
+}
+
 // --- state op on connect -----------------------------------------------
 
 func TestWSSendsStateOnConnect(t *testing.T) {

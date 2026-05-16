@@ -19,6 +19,8 @@ threshold:
 override:
   - path: ^internal/agent$
     threshold: 98
+  - path: ^internal/activity$
+    threshold: 90
   - path: ^internal/config$
     threshold: 95
   - path: ^internal/llm$

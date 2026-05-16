@@ -60,6 +60,36 @@ func TestBuildWithGateway(t *testing.T) {
 	require.NotNil(t, b.Gateway)
 }
 
+func TestBuildActivityNoopWhenURLUnset(t *testing.T) {
+	s := &config.Settings{CommandPrefix: "!"}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	require.NotNil(t, b.Activity)
+	assert.False(t, b.Activity.Enabled(),
+		"activity notifier must be a no-op when TURBORG_ACTIVITY_URL is unset")
+}
+
+func TestBuildActivityEnabledWhenURLSet(t *testing.T) {
+	s := &config.Settings{
+		CommandPrefix:           "!",
+		ActivityURL:             "http://observer.local/mark",
+		ActivityToken:           "shh",
+		GatewayPassword:             "hunter2",
+		GatewayHost:                 "127.0.0.1",
+		GatewayPort:                 0,
+		GatewayMaxFailedAttempts:    5,
+		GatewayFailureWindowSeconds: 60,
+		GatewayLockoutSeconds:       300,
+	}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	require.NotNil(t, b.Activity)
+	assert.True(t, b.Activity.Enabled())
+	assert.NotNil(t, b.Gateway, "gateway must still wire when activity is enabled")
+}
+
 func TestBuildRejectsUnknownConnector(t *testing.T) {
 	s := &config.Settings{CommandPrefix: "!", Connectors: []string{"irc", "discord"}}
 	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}

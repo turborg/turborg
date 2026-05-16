@@ -116,6 +116,19 @@ type Settings struct {
 	// messages. 0 = disabled. Used by operators who want a regular usage
 	// summary delivered through IRC itself.
 	OwnerDMNudgeEvery int `env:"OWNER_DM_NUDGE_EVERY"`
+
+	// ActivityURL is an optional webhook the agent POSTs to whenever
+	// meaningful runtime activity occurs: the bot sending a message, a
+	// bouncer client attaching, or a WS gateway client completing the
+	// handshake. Empty = no posts. Payload is a single-field JSON object
+	// `{"reason": "<id>"}` where <id> is one of bot_spoke, bouncer_attach,
+	// ws_attach. Useful for operators wiring uptime / heartbeat dashboards
+	// without parsing log streams.
+	ActivityURL string `env:"ACTIVITY_URL"`
+
+	// ActivityToken is sent as a bearer Authorization header on every
+	// activity webhook POST. Optional.
+	ActivityToken string `env:"ACTIVITY_TOKEN"`
 }
 
 // Load parses TURBORG_* env vars into a Settings, normalizing the
@@ -224,5 +237,10 @@ func (s *Settings) AnthropicEnabled() bool { return s.AnthropicAPIKey != "" }
 func (s *Settings) GatewayEnabled() bool { return s.GatewayPassword != "" }
 
 // IdleShutdownEnabled reports whether the gateway's idle-shutdown timer
-// is configured. Wired by the SaaS sidecar for free-tier containers.
+// is configured.
 func (s *Settings) IdleShutdownEnabled() bool { return s.GatewayIdleShutdownSeconds > 0 }
+
+// ActivityEnabled reports whether the agent should POST runtime
+// activity signals to a remote observer. False when ACTIVITY_URL is
+// unset; the notifier in that case is a no-op.
+func (s *Settings) ActivityEnabled() bool { return s.ActivityURL != "" }

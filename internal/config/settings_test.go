@@ -141,6 +141,20 @@ func TestLoadPolicyFullStack(t *testing.T) {
 	assert.Equal(t, 100, s.OwnerDMNudgeEvery)
 }
 
+func TestActivityEnabledMirrorsURL(t *testing.T) {
+	s, err := config.Load()
+	require.NoError(t, err)
+	assert.False(t, s.ActivityEnabled(), "default = no activity URL = disabled")
+
+	t.Setenv("TURBORG_ACTIVITY_URL", "http://observer.local/mark")
+	t.Setenv("TURBORG_ACTIVITY_TOKEN", "shh")
+	s, err = config.Load()
+	require.NoError(t, err)
+	assert.True(t, s.ActivityEnabled())
+	assert.Equal(t, "http://observer.local/mark", s.ActivityURL)
+	assert.Equal(t, "shh", s.ActivityToken)
+}
+
 func TestHostnameAllowed(t *testing.T) {
 	t.Setenv("TURBORG_ALLOWED_NETWORKS", "irc.libera.chat,irc.oftc.net")
 	s, err := config.Load()
