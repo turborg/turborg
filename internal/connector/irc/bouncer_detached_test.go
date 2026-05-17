@@ -223,6 +223,26 @@ func TestPreferredNickConsumedOnNextRegister(t *testing.T) {
 	assert.Empty(t, conn.PreferredNick())
 }
 
+// TestSetPreferredNickFiresChangeHookOnlyOnRealChange covers the
+// change-detection inside SetPreferredNick: idempotent set-to-same
+// must not refire the hook, but every real value transition must.
+func TestSetPreferredNickFiresChangeHookOnlyOnRealChange(t *testing.T) {
+	conn := irc.New(&irc.Settings{
+		Hostname: "127.0.0.1",
+		Nick:     "turborg",
+	}, nil, nil)
+
+	var calls int
+	conn.SetPreferredNickChangeHook(func() { calls++ })
+
+	conn.SetPreferredNick("alpha")
+	conn.SetPreferredNick("alpha") // no-op
+	conn.SetPreferredNick("beta")
+	conn.SetPreferredNick("") // back to empty also counts
+	conn.SetPreferredNick("") // no-op
+	assert.Equal(t, 3, calls)
+}
+
 // TestDetachedPrivmsgRejectionStillFlows confirms commit 2's PRIVMSG
 // reject path still works after the per-command dispatcher landed
 // (regression coverage for the refactor).

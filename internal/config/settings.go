@@ -129,6 +129,29 @@ type Settings struct {
 	// ActivityToken is sent as a bearer Authorization header on every
 	// activity webhook POST. Optional.
 	ActivityToken string `env:"ACTIVITY_TOKEN"`
+
+	// StateWebhookURL is the endpoint the agent PUTs authoritative
+	// per-connector state to (current connection status, joined
+	// channels with any cached +k keys, preferred nick) whenever
+	// that state changes. Payload is an idempotent JSON snapshot —
+	// receivers overwrite-on-write. Empty = no PUTs, no goroutine
+	// spawned. Distinct from ACTIVITY_URL: that one carries
+	// fire-and-forget event signals; this one carries a full state
+	// mirror.
+	StateWebhookURL string `env:"STATE_WEBHOOK_URL"`
+
+	// StateWebhookToken is sent as a bearer Authorization header on
+	// every state-webhook PUT. Optional.
+	StateWebhookToken string `env:"STATE_WEBHOOK_TOKEN"`
+
+	// StateWebhookDebounceMs is the debounce window applied to the
+	// state-webhook emitter. A bursty client mutation (e.g.
+	// /join #a,#b,#c) coalesces into a single PUT so receivers see
+	// one snapshot per change, not one per channel. 0 disables the
+	// debounce (every state change fires immediately); the upper
+	// bound keeps a misconfigured value from making a dashboard
+	// view feel laggy.
+	StateWebhookDebounceMs int `env:"STATE_WEBHOOK_DEBOUNCE_MS" envDefault:"250"`
 }
 
 // Load parses TURBORG_* env vars into a Settings, normalizing the
@@ -149,6 +172,18 @@ func (s *Settings) normalize() error {
 	if s.CommandPrefix == "" {
 		return errors.New("config: COMMAND_PREFIX must not be empty")
 	}
+	if err := s.normalizeConnectors(); err != nil {
+		return err
+	}
+	if err := s.validatePolicyBounds(); err != nil {
+		return err
+	}
+	s.AllowedNetworks = trimDropEmpties(s.AllowedNetworks)
+	s.AllowedLLMModels = trimDropEmpties(s.AllowedLLMModels)
+	return nil
+}
+
+func (s *Settings) normalizeConnectors() error {
 	seen := map[string]bool{}
 	out := s.Connectors[:0]
 	for _, c := range s.Connectors {
@@ -163,9 +198,16 @@ func (s *Settings) normalize() error {
 		out = append(out, c)
 	}
 	s.Connectors = out
+	// Cap-exceeded branch will land once a second valid connector exists.
+	// Today the dedup loop above keeps len(s.Connectors) <= 1 with "irc"
+	// the only ValidConnectors entry, so a cap-vs-count compare is unreachable.
+	return nil
+}
 
-	// Plan-tier consistency. Hostname-vs-AllowedNetworks lives in
-	// runtime.Build (needs ircCfg).
+// validatePolicyBounds runs the numeric/range checks on operator-policy
+// fields. Each check is independent — the function fails on the first
+// error so the operator gets pointed at one problem at a time.
+func (s *Settings) validatePolicyBounds() error {
 	if s.OutboundMaxPerWindow > 0 && s.OutboundWindowSeconds <= 0 {
 		return errors.New("config: OUTBOUND_WINDOW_SECONDS must be > 0 when OUTBOUND_MAX_PER_WINDOW is set")
 	}
@@ -181,36 +223,24 @@ func (s *Settings) normalize() error {
 	if s.MaxConnectorsPerAgent < 0 {
 		return errors.New("config: MAX_CONNECTORS_PER_AGENT must be >= 0 (0 = unrestricted)")
 	}
-	// Cap-exceeded branch will land once a second valid connector exists.
-	// Today the dedup loop above keeps len(s.Connectors) <= 1 with "irc"
-	// the only ValidConnectors entry, so a cap-vs-count compare is unreachable.
-
-	// AllowedNetworks: trim entries, drop empties. The hostname check
-	// itself runs in runtime.Build.
-	if len(s.AllowedNetworks) > 0 {
-		cleaned := make([]string, 0, len(s.AllowedNetworks))
-		for _, n := range s.AllowedNetworks {
-			n = strings.TrimSpace(n)
-			if n != "" {
-				cleaned = append(cleaned, n)
-			}
-		}
-		s.AllowedNetworks = cleaned
+	if s.StateWebhookDebounceMs < 0 || s.StateWebhookDebounceMs > 5000 {
+		return errors.New("config: STATE_WEBHOOK_DEBOUNCE_MS must be in [0, 5000]")
 	}
-
-	// AllowedLLMModels: same trim-and-drop-empties pass.
-	if len(s.AllowedLLMModels) > 0 {
-		cleaned := make([]string, 0, len(s.AllowedLLMModels))
-		for _, m := range s.AllowedLLMModels {
-			m = strings.TrimSpace(m)
-			if m != "" {
-				cleaned = append(cleaned, m)
-			}
-		}
-		s.AllowedLLMModels = cleaned
-	}
-
 	return nil
+}
+
+func trimDropEmpties(in []string) []string {
+	if len(in) == 0 {
+		return in
+	}
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // HostnameAllowed reports whether the given upstream hostname satisfies

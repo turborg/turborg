@@ -107,8 +107,9 @@ type Connector struct {
 	// during detached-state NICK handling so the supervisor's next
 	// register() uses the queued nick instead of settings.Nick.
 	// Cleared after the supervisor consumes it on the next handshake.
-	preferredNickMu sync.RWMutex
-	preferredNick   string
+	preferredNickMu       sync.RWMutex
+	preferredNick         string
+	preferredNickChangeCB func()
 
 	stopOnce sync.Once
 }
@@ -222,10 +223,29 @@ func (c *Connector) SetUpstreamWarnHook(hook func(serverReason string, dwell tim
 // upstream — the supervisor's next bringUp picks it up via
 // effectiveNick(). Passing the empty string clears any pending queued
 // nick.
+//
+// Fires the change callback (when one is installed via
+// SetPreferredNickChangeHook) when the stored value actually moves.
+// Repeated SetPreferredNick("x") calls with the same x don't refire.
 func (c *Connector) SetPreferredNick(nick string) {
 	c.preferredNickMu.Lock()
-	defer c.preferredNickMu.Unlock()
+	changed := c.preferredNick != nick
 	c.preferredNick = nick
+	cb := c.preferredNickChangeCB
+	c.preferredNickMu.Unlock()
+	if changed && cb != nil {
+		cb()
+	}
+}
+
+// SetPreferredNickChangeHook installs a callback fired whenever
+// SetPreferredNick changes the queued nick (no-op on calls that
+// leave it unchanged). Pass nil to disable. Used by the state-sync
+// emitter to learn when the snapshot's "nick" field needs re-pushing.
+func (c *Connector) SetPreferredNickChangeHook(hook func()) {
+	c.preferredNickMu.Lock()
+	defer c.preferredNickMu.Unlock()
+	c.preferredNickChangeCB = hook
 }
 
 // PreferredNick returns the currently-queued preferred nick, or empty

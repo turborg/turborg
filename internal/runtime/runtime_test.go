@@ -562,6 +562,33 @@ func TestBuildWiresOwnerNudgeWhenConfigured(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestBuildStatePushInertWhenWebhookURLUnset(t *testing.T) {
+	s := &config.Settings{CommandPrefix: "!"}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	require.NotNil(t, b.StatePush, "StatePush field is always non-nil")
+	// Inert emitter must not spawn a goroutine; calling NotifyChange
+	// + Stop on it is safe.
+	b.StatePush.NotifyChange()
+	b.StatePush.Stop()
+}
+
+func TestBuildStatePushEnabledWhenWebhookURLSet(t *testing.T) {
+	s := &config.Settings{
+		CommandPrefix:          "!",
+		StateWebhookURL:        "http://obs/c/abc/state",
+		StateWebhookToken:      "shh",
+		StateWebhookDebounceMs: 1,
+	}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	require.NotNil(t, b.StatePush)
+	// Goroutine started: Stop must be called to keep goleak clean.
+	b.StatePush.Stop()
+}
+
 func TestBuildIgnoresRealnameTemplateWithoutLock(t *testing.T) {
 	// RealnameTemplate set but Locked=false: the template is purely
 	// advisory and must not overwrite the user's choice. Catches the
