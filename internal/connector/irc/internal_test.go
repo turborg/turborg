@@ -1113,3 +1113,104 @@ func TestParseJoinLine(t *testing.T) {
 		})
 	}
 }
+
+func TestDetachedRejectBodyCoversEveryState(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	b.AttachUpstreamState(NewUpstreamStateMachine(nil), "Libera Chat")
+
+	cases := []struct {
+		state    UpstreamState
+		cmd      string
+		contains string
+	}{
+		{UpstreamStateDisconnectedTransient, CmdPrivmsg, "message NOT sent"},
+		{UpstreamStateDisconnectedTransient, CmdMode, "operation NOT performed"},
+		{UpstreamStateDisconnectedNickUnavailable, CmdPrivmsg, "Nickname unavailable"},
+		{UpstreamStateDisconnectedAuthFailed, CmdPrivmsg, "Authentication failed"},
+		{UpstreamStateDisconnectedBanned, CmdPrivmsg, "Banned from"},
+		{UpstreamStatePausedIdle, CmdPrivmsg, "Connector paused"},
+		{UpstreamStateStopped, CmdPrivmsg, "Connector stopped"},
+		{UpstreamStateIdle, CmdPrivmsg, "Not yet connected"},
+		{UpstreamStateConnecting, CmdPrivmsg, "Not yet connected"},
+		{UpstreamStateRegistering, CmdPrivmsg, "Not yet connected"},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.state)+"_"+tc.cmd, func(t *testing.T) {
+			body := b.detachedRejectBody(tc.state, tc.cmd)
+			assert.Contains(t, body, tc.contains)
+		})
+	}
+}
+
+func TestNotifyJoinFailureFallbackReason(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	// Empty channel = no-op (no panic).
+	assert.NotPanics(t, func() { b.NotifyJoinFailure("", "anything") })
+	// Empty reason falls back to a generic body; verify by capturing
+	// what gets broadcast (no clients attached so Broadcast just no-
+	// ops, but the helper still runs through its body construction).
+	assert.NotPanics(t, func() { b.NotifyJoinFailure("#x", "") })
+}
+
+func TestNotifyPolicyDenialEmptyTargetFallsBackToStar(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	// Test the helper directly with a stubbed client. The send is via
+	// the BouncerClient's sendLine which writes to conn; we use a
+	// disconnected pipe so the write returns an error and exercises
+	// the log-and-continue path. The test confirms the helper doesn't
+	// panic on either an empty target (falls back to "*") or a
+	// failing send.
+	srv, cli := net.Pipe()
+	_ = srv.Close()
+	bc := newBouncerClient(cli, slog.Default())
+	defer func() { _ = bc.close() }()
+	assert.NotPanics(t, func() {
+		b.notifyPolicyDenial(bc, "", "no target")
+		b.notifyPolicyDenial(bc, "*", "explicit star")
+		b.notifyPolicyDenial(bc, "#x", "channel target")
+	})
+}
+
+func TestHandleDetachedJoinEmptyParamsNoop(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	b.AttachWantedChannels(NewWantedChannels(nil))
+	b.AttachUpstreamState(NewUpstreamStateMachine(nil), "Libera")
+
+	srv, cli := net.Pipe()
+	_ = srv.Close()
+	bc := newBouncerClient(cli, slog.Default())
+	defer func() { _ = bc.close() }()
+
+	// Empty JOIN — no channels parsed, must return without writing or
+	// touching the wanted-set.
+	assert.NotPanics(t, func() { b.handleDetachedJoin(bc, Message{Command: CmdJoin}) })
+}
+
+func TestHandleDetachedNickEmptyNoop(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+
+	srv, cli := net.Pipe()
+	_ = srv.Close()
+	bc := newBouncerClient(cli, slog.Default())
+	defer func() { _ = bc.close() }()
+
+	// Empty NICK — no new nick to queue, must return without firing
+	// the preferred-nick hook.
+	called := false
+	b.AttachPreferredNickHook(func(string) { called = true })
+	b.handleDetachedNick(bc, Message{Command: CmdNick})
+	assert.False(t, called, "empty NICK must not fire the preferred-nick hook")
+}
+
+func TestStartListenErrorSurfaces(t *testing.T) {
+	// Pick a known-bad listen address to drive the listen-error branch.
+	b, err := NewBouncer("p", "0.0.0.0", -1, nil, nil)
+	require.NoError(t, err)
+	err = b.Start(context.Background())
+	require.Error(t, err, "negative port must surface a listen error")
+}

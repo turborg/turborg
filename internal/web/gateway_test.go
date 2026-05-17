@@ -62,13 +62,17 @@ func (f *fakeBridge) Sent() []string {
 }
 
 type fakeSender struct {
-	mu   sync.Mutex
-	sent []*agent.OutboundEnvelope
+	mu      sync.Mutex
+	sent    []*agent.OutboundEnvelope
+	sendErr error // non-nil = every Send call returns this
 }
 
 func (s *fakeSender) Send(env *agent.OutboundEnvelope) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.sendErr != nil {
+		return s.sendErr
+	}
 	s.sent = append(s.sent, env)
 	return nil
 }

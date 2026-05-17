@@ -3,6 +3,7 @@ package web_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -133,6 +134,33 @@ func TestGatewaySayRejectedWhenStateNotRegistered(t *testing.T) {
 
 	assert.Empty(t, sender.Outbound(),
 		"rejected say must NOT reach the sender — that's the load-bearing fix")
+}
+
+// TestGatewaySayWriteErrorPathRejects covers the write-error race
+// branch from Edge 2: state was registered at the gate, the sender's
+// Send call failed mid-flight (upstream just went down). The user
+// must see a send_message.rejected frame rather than silent loss.
+func TestGatewaySayWriteErrorPathRejects(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	sender := &fakeSender{sendErr: errors.New("upstream write failed mid-flight")}
+	g, _, td := startGateway(t, newOptions(t, "p"), bridge, sender)
+	defer td()
+
+	ws := dialWS(t, g.Addr(), "p")
+	defer ws.Close(0, "")
+	_ = readJSON(t, ws)
+
+	require.NoError(t, ws.Write(context.Background(), websocket.MessageText,
+		[]byte(`{"op":"say","channel":"#a","text":"hi"}`)))
+
+	got := drainUntilOp(t, ws, "send_message.rejected", time.Second)
+	require.NotNil(t, got,
+		"sender write failure must surface as send_message.rejected, not silent drop")
+	assert.Equal(t, "#a", got["target"])
+	assert.Equal(t, "hi", got["body"])
+	// State stayed registered (no transition fired), so reason falls
+	// back to the generic "send_failed" with the wrapped error text.
+	assert.Equal(t, "send_failed", got["reason"])
 }
 
 // TestGatewaySayDuringRegisteredFlowsThrough is the happy-path

@@ -293,6 +293,74 @@ func TestUpstreamSubscriptionUnsubscribeOnZeroValueIsNoOp(t *testing.T) {
 	assert.NotPanics(t, func() { empty.Unsubscribe() })
 }
 
+func TestDescribeUpstreamStateCoversEveryArm(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		state    irc.UpstreamState
+		network  string
+		reason   string
+		contains []string
+	}{
+		{irc.UpstreamStateRegistered, "Libera", "", nil},
+		{irc.UpstreamStateIdle, "Libera", "", []string{"not yet started"}},
+		{irc.UpstreamStateConnecting, "Libera", "", []string{"Currently connecting", "Libera"}},
+		{irc.UpstreamStateRegistering, "Libera", "", []string{"Currently connecting"}},
+		{irc.UpstreamStateDisconnectedTransient, "Libera", "EOF",
+			[]string{"Currently disconnected", "EOF", "NOT be delivered"}},
+		{irc.UpstreamStateDisconnectedNickUnavailable, "Libera", "",
+			[]string{"Nickname unavailable", "Libera"}},
+		{irc.UpstreamStateDisconnectedAuthFailed, "Libera", "bad password",
+			[]string{"Authentication failed", "bad password", "update credentials"}},
+		{irc.UpstreamStateDisconnectedBanned, "Libera", "K-Lined: spam",
+			[]string{"Banned from", "K-Lined: spam", "manual intervention"}},
+		{irc.UpstreamStatePausedIdle, "Libera", "",
+			[]string{"paused", "Restart"}},
+		{irc.UpstreamStateStopped, "Libera", "",
+			[]string{"Connector stopped"}},
+		{"unknown_state", "Libera", "", nil},
+		// Empty network name must fall back to a generic placeholder.
+		{irc.UpstreamStateDisconnectedTransient, "", "",
+			[]string{"the network"}},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.state)+"_"+tc.network, func(t *testing.T) {
+			body := irc.DescribeUpstreamState(tc.state, tc.network, tc.reason)
+			if len(tc.contains) == 0 {
+				assert.Empty(t, body)
+				return
+			}
+			for _, want := range tc.contains {
+				assert.Contains(t, body, want)
+			}
+		})
+	}
+}
+
+func TestSeverityForUpstreamStateCoversEveryArm(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		state irc.UpstreamState
+		want  string
+	}{
+		{irc.UpstreamStateRegistered, "info"},
+		{irc.UpstreamStateConnecting, "warning"},
+		{irc.UpstreamStateRegistering, "warning"},
+		{irc.UpstreamStateDisconnectedTransient, "warning"},
+		{irc.UpstreamStateDisconnectedNickUnavailable, "warning"},
+		{irc.UpstreamStateDisconnectedAuthFailed, "error"},
+		{irc.UpstreamStateDisconnectedBanned, "error"},
+		{irc.UpstreamStatePausedIdle, "error"},
+		{irc.UpstreamStateStopped, "error"},
+		{irc.UpstreamStateIdle, ""}, // no banner severity assigned
+		{"unknown_state", ""},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.state), func(t *testing.T) {
+			assert.Equal(t, tc.want, irc.SeverityForUpstreamState(tc.state))
+		})
+	}
+}
+
 func TestParseERRORLineEmptyTrailingReturnsEmptyOk(t *testing.T) {
 	t.Parallel()
 	// Server may send a bare `ERROR` with no body — protocol allows
