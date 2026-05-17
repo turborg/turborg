@@ -1198,41 +1198,13 @@ func (b *Bouncer) detachedRejectBody(state UpstreamState, cmd string) string {
 		" — " + verb + ". Reconnecting."
 }
 
-// describeUpstreamState returns the human-readable NOTICE body the
-// bouncer surfaces when the upstream is in the given state. Empty
-// return = no NOTICE for this state (registered is the live happy
-// path and needs no surfacing).
+// describeUpstreamState is a thin wrapper that threads the bouncer's
+// network name into the package-level DescribeUpstreamState helper so
+// the IRC bouncer + WS gateway render identical bodies. Empty return
+// = no NOTICE for this state (registered is the live happy path and
+// needs no surfacing).
 func (b *Bouncer) describeUpstreamState(state UpstreamState, serverReason string) string {
-	network := b.network()
-	reasonSuffix := ""
-	if serverReason != "" {
-		reasonSuffix = ": " + serverReason
-	}
-	switch state {
-	case UpstreamStateRegistered:
-		return ""
-	case UpstreamStateIdle:
-		return "Connector not yet started — waiting for first network connect attempt."
-	case UpstreamStateConnecting, UpstreamStateRegistering:
-		return "Currently connecting to " + network + ". Channels will appear when registration completes."
-	case UpstreamStateDisconnectedTransient:
-		return "Currently disconnected from " + network + reasonSuffix +
-			". Reconnecting; messages sent now will NOT be delivered."
-	case UpstreamStateDisconnectedNickUnavailable:
-		return "Nickname unavailable on " + network +
-			" — retrying with an alternate. Channels will appear when registration completes."
-	case UpstreamStateDisconnectedAuthFailed:
-		return "Authentication failed for " + network + reasonSuffix +
-			". Automatic reconnect stopped — update credentials and restart the connector."
-	case UpstreamStateDisconnectedBanned:
-		return "Banned from " + network + reasonSuffix +
-			". Automatic reconnect stopped — manual intervention required."
-	case UpstreamStatePausedIdle:
-		return "Connector paused after extended unreachability. Restart to retry."
-	case UpstreamStateStopped:
-		return "Connector stopped."
-	}
-	return ""
+	return DescribeUpstreamState(state, b.network(), serverReason)
 }
 
 // surfaceStateToClient sends a state-informative NOTICE to a single

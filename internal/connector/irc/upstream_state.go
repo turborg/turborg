@@ -363,6 +363,80 @@ func ClassifyBanReason(reason string) (UpstreamState, bool) {
 	return "", false
 }
 
+// DescribeUpstreamState returns the operator-neutral human-readable
+// body that surfaces a state change to attached clients. Both the
+// IRC bouncer (NOTICE body) and the WS gateway (event message field)
+// call this so the wording stays consistent across surfaces.
+//
+// networkName is the human-readable network identifier (e.g. "Libera
+// Chat" or the IRC hostname); falls back to "the network" when empty.
+// serverReason is appended when non-empty so failure causes like
+// "Ping timeout: 240 seconds" or "K-Lined: spam" thread through to
+// the surfaced body.
+func DescribeUpstreamState(state UpstreamState, networkName, serverReason string) string {
+	network := networkName
+	if network == "" {
+		network = "the network"
+	}
+	reasonSuffix := ""
+	if serverReason != "" {
+		reasonSuffix = ": " + serverReason
+	}
+	switch state {
+	case UpstreamStateRegistered:
+		return ""
+	case UpstreamStateIdle:
+		return "Connector not yet started — waiting for first network connect attempt."
+	case UpstreamStateConnecting, UpstreamStateRegistering:
+		return "Currently connecting to " + network +
+			". Channels will appear when registration completes."
+	case UpstreamStateDisconnectedTransient:
+		return "Currently disconnected from " + network + reasonSuffix +
+			". Reconnecting; messages sent now will NOT be delivered."
+	case UpstreamStateDisconnectedNickUnavailable:
+		return "Nickname unavailable on " + network +
+			" — retrying with an alternate. Channels will appear when registration completes."
+	case UpstreamStateDisconnectedAuthFailed:
+		return "Authentication failed for " + network + reasonSuffix +
+			". Automatic reconnect stopped — update credentials and restart the connector."
+	case UpstreamStateDisconnectedBanned:
+		return "Banned from " + network + reasonSuffix +
+			". Automatic reconnect stopped — manual intervention required."
+	case UpstreamStatePausedIdle:
+		return "Connector paused after extended unreachability. Restart to retry."
+	case UpstreamStateStopped:
+		return "Connector stopped."
+	}
+	return ""
+}
+
+// SeverityForUpstreamState maps a state to the severity label used by
+// the WS gateway's connector.state_changed event payload. Mirrors the
+// three-level scheme the test UI + appui will use to colour-code
+// banners and decide whether to disable the send input.
+//
+//   - "info" for registered (the recovery "back live" event)
+//   - "warning" for connecting/registering and recoverable disconnects
+//   - "error" for terminal disconnects (auth_failed, banned,
+//     paused_idle, stopped)
+//   - "" (empty) for idle, which doesn't warrant a banner
+func SeverityForUpstreamState(state UpstreamState) string {
+	switch state {
+	case UpstreamStateRegistered:
+		return "info"
+	case UpstreamStateConnecting, UpstreamStateRegistering,
+		UpstreamStateDisconnectedTransient,
+		UpstreamStateDisconnectedNickUnavailable:
+		return "warning"
+	case UpstreamStateDisconnectedAuthFailed,
+		UpstreamStateDisconnectedBanned,
+		UpstreamStatePausedIdle,
+		UpstreamStateStopped:
+		return "error"
+	}
+	return ""
+}
+
 // ClassifyDisconnectMessage is the convenience wrapper that combines
 // ParseERRORLine and ClassifyBanReason. Returns:
 //

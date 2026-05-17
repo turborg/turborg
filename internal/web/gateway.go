@@ -41,6 +41,12 @@ type IRCBridge interface {
 	// be nil = unrestricted). Shared with the bouncer so a user with
 	// both surfaces open shares one bucket per target.
 	OutboundThrottle() *irc.Throttle
+	// UpstreamState returns the per-connector upstream state machine.
+	// The gateway subscribes to it during Subscribe so it can emit
+	// connector.state_changed events to attached WS clients on every
+	// state transition, and gate WS send_message frames on the
+	// `registered` state.
+	UpstreamState() *irc.UpstreamStateMachine
 }
 
 // Sender is the agent surface for outbound envelopes — the gateway
@@ -91,6 +97,11 @@ type Gateway struct {
 	listener net.Listener
 	cancel   context.CancelFunc
 	started  time.Time
+
+	// stateSub is the gateway's subscription to the per-connector
+	// upstream state machine. Cleaned up in Stop so a re-Subscribed
+	// gateway doesn't leak handlers across lifecycle restarts.
+	stateSub *irc.Subscription
 
 	// Per-channel + server-log ring buffers replayed on (re)connect so
 	// a UI that closed mid-traffic sees what flowed in while it was
@@ -149,7 +160,9 @@ func New(bridge IRCBridge, sender Sender, opts Options) (*Gateway, error) {
 
 // Subscribe registers handlers on bus for every event the gateway
 // fans out. Call before Serve; calling more than once unsubscribes
-// the prior set and re-registers.
+// the prior set and re-registers. Also subscribes to the IRC
+// upstream state machine so connector.state_changed events flow to
+// WS clients on every transition.
 func (g *Gateway) Subscribe(bus *agent.EventBus) {
 	g.mu.Lock()
 	g.bus = bus
@@ -168,6 +181,16 @@ func (g *Gateway) Subscribe(bus *agent.EventBus) {
 	bus.Subscribe(agent.EventListResult, g.onListResult)
 	bus.Subscribe(agent.EventWhoResult, g.onWhoResult)
 	bus.Subscribe(agent.EventJoinFailed, g.onJoinFailed)
+
+	if machine := g.bridge.UpstreamState(); machine != nil {
+		sub := machine.Subscribe(g.onUpstreamStateChange)
+		g.mu.Lock()
+		if g.stateSub != nil {
+			g.stateSub.Unsubscribe()
+		}
+		g.stateSub = sub
+		g.mu.Unlock()
+	}
 }
 
 // Serve binds the listener and blocks until ctx is canceled. Returns
@@ -236,9 +259,14 @@ func (g *Gateway) Addr() string {
 func (g *Gateway) Stop() {
 	g.mu.Lock()
 	cancel := g.cancel
+	sub := g.stateSub
 	g.cancel = nil
+	g.stateSub = nil
 	g.mu.Unlock()
 	g.cancelIdleTimer()
+	if sub != nil {
+		sub.Unsubscribe()
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -492,6 +520,18 @@ func (g *Gateway) dispatchInbound(ctx context.Context, c *client, p map[string]a
 		if ch == "" || text == "" {
 			return
 		}
+		// Gate on upstream state — if the connector isn't registered
+		// the WS send_message would either silently disappear (state
+		// != registered, supervisor reconnecting) or race against
+		// the write side. Refuse with a send_message.rejected frame
+		// the UI can render against its optimistically-shown bubble.
+		if machine := g.bridge.UpstreamState(); machine != nil {
+			if state := machine.State(); state != irc.UpstreamStateRegistered {
+				g.rejectSend(ctx, c, ch, text, string(state),
+					irc.DescribeUpstreamState(state, "", machine.ServerReason()))
+				return
+			}
+		}
 		// Per-target outbound throttle — shared with the bouncer's
 		// PRIVMSG path. Bucket key is the target so a chatty user
 		// pestering one channel doesn't deny their other channels.
@@ -508,6 +548,20 @@ func (g *Gateway) dispatchInbound(ctx context.Context, c *client, p map[string]a
 			Text:              text,
 		}); err != nil {
 			g.log.Warn("web say send", "err", err)
+			// Write-error race fix: per-frame rejection NOTICE
+			// travels with the failing write rather than leaving the
+			// optimistically-rendered bubble in an indeterminate
+			// state. State may already have flipped to non-registered;
+			// describe it if so, otherwise surface the raw error.
+			rejReason := "send_failed"
+			rejMessage := err.Error()
+			if machine := g.bridge.UpstreamState(); machine != nil {
+				if state := machine.State(); state != irc.UpstreamStateRegistered {
+					rejReason = string(state)
+					rejMessage = irc.DescribeUpstreamState(state, "", machine.ServerReason())
+				}
+			}
+			g.rejectSend(ctx, c, ch, text, rejReason, rejMessage)
 			return
 		}
 		// Publish MESSAGE_SENT so the gateway's own onMessageSent
@@ -775,10 +829,40 @@ func (g *Gateway) onWhoResult(_ context.Context, ev *agent.Event) {
 func (g *Gateway) onJoinFailed(_ context.Context, ev *agent.Event) {
 	reason, _ := ev.Fields["reason"].(string)
 	g.broadcast(map[string]any{
-		"op":      "join_failed",
+		"op":      "channel.rejoin_failed",
 		"channel": ev.Fields["channel"],
 		"code":    ev.Fields["code"],
 		"reason":  reason,
+	})
+}
+
+// onUpstreamStateChange fans connector.state_changed events to every
+// attached WS client when the IRC connector's upstream state machine
+// transitions. Severity colour-coding + human-readable body come from
+// the irc package so the bouncer NOTICE wording and the gateway event
+// message stay in lockstep.
+func (g *Gateway) onUpstreamStateChange(change irc.UpstreamStateChange) {
+	g.broadcast(map[string]any{
+		"op":            "connector.state_changed",
+		"state":         string(change.To),
+		"prior_state":   string(change.From),
+		"message":       irc.DescribeUpstreamState(change.To, "", change.ServerReason),
+		"severity":      irc.SeverityForUpstreamState(change.To),
+		"server_reason": change.ServerReason,
+	})
+}
+
+// rejectSend emits a send_message.rejected frame to the originating
+// client when a WS-originated say op can't reach upstream. Carries
+// the original target + body so the UI can mark the optimistically-
+// rendered message as failed and surface the reason inline.
+func (g *Gateway) rejectSend(ctx context.Context, c *client, target, body, reasonState, message string) {
+	g.sendTo(ctx, c, map[string]any{
+		"op":      "send_message.rejected",
+		"target":  target,
+		"body":    body,
+		"reason":  reasonState,
+		"message": message,
 	})
 }
 
