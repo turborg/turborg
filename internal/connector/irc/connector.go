@@ -103,6 +103,13 @@ type Connector struct {
 	nickMu      sync.RWMutex
 	currentNick string
 
+	// preferredNickMu guards preferredNick. The bouncer SetPreferredNick
+	// during detached-state NICK handling so the supervisor's next
+	// register() uses the queued nick instead of settings.Nick.
+	// Cleared after the supervisor consumes it on the next handshake.
+	preferredNickMu sync.RWMutex
+	preferredNick   string
+
 	stopOnce sync.Once
 }
 
@@ -208,6 +215,40 @@ func (c *Connector) SetBouncerAttachHook(hook func(reason string)) { c.bouncerAt
 // blip.
 func (c *Connector) SetUpstreamWarnHook(hook func(serverReason string, dwell time.Duration)) {
 	c.onUpstreamWarn = hook
+}
+
+// SetPreferredNick queues a nick to use on the next registration.
+// Called by the bouncer when a client issues NICK during a detached
+// upstream — the supervisor's next bringUp picks it up via
+// effectiveNick(). Passing the empty string clears any pending queued
+// nick.
+func (c *Connector) SetPreferredNick(nick string) {
+	c.preferredNickMu.Lock()
+	defer c.preferredNickMu.Unlock()
+	c.preferredNick = nick
+}
+
+// PreferredNick returns the currently-queued preferred nick, or empty
+// when none is queued. Used by tests; the supervisor consumes the
+// value via effectiveNick().
+func (c *Connector) PreferredNick() string {
+	c.preferredNickMu.RLock()
+	defer c.preferredNickMu.RUnlock()
+	return c.preferredNick
+}
+
+// effectiveNick returns the nick the supervisor should register with:
+// the queued preferred nick when set, falling back to the env-configured
+// settings.Nick. The queued nick is consumed on success — cleared so a
+// later transient reconnect doesn't keep re-applying the override.
+func (c *Connector) effectiveNick() string {
+	c.preferredNickMu.RLock()
+	queued := c.preferredNick
+	c.preferredNickMu.RUnlock()
+	if queued != "" {
+		return queued
+	}
+	return c.settings.Nick
 }
 
 // CurrentNick returns the live nick the server confirmed for the bot.
@@ -406,6 +447,10 @@ func (c *Connector) bringUp(ctx context.Context) error {
 	}
 
 	c.machine.Transition(UpstreamStateRegistered)
+	// Successful registration consumes any queued preferred-nick — a
+	// later transient disconnect must not silently re-apply it on the
+	// next reconnect (the user only asked for the nick change once).
+	c.SetPreferredNick("")
 	return nil
 }
 
@@ -465,6 +510,7 @@ func (c *Connector) startBouncer(ctx context.Context) error {
 	b.AttachActivityHook(c.bouncerAttachHook)
 	b.AttachUpstreamState(c.machine, c.settings.Hostname)
 	b.AttachWantedChannels(c.wanted)
+	b.AttachPreferredNickHook(c.SetPreferredNick)
 	// Reuse the existing onUpstreamWarn hook slot: the supervisor's
 	// long-outage watchdog calls into the bouncer's broadcast so
 	// channels get a stronger "still retrying" NOTICE at the warn
@@ -535,7 +581,7 @@ func (c *Connector) register(ctx context.Context) error {
 	if err := c.client.WriteLine(user); err != nil {
 		return fmt.Errorf("irc USER: %w", err)
 	}
-	if err := c.client.WriteLine(CmdNick + " " + c.settings.Nick); err != nil {
+	if err := c.client.WriteLine(CmdNick + " " + c.effectiveNick()); err != nil {
 		return fmt.Errorf("irc NICK: %w", err)
 	}
 	if err := c.client.WriteLine(CmdCap + " END"); err != nil {

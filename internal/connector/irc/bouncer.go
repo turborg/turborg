@@ -255,6 +255,12 @@ type Bouncer struct {
 	// joined post-startup, with the channel keys the user supplied.
 	wanted *WantedChannels
 
+	// setPreferredNick is the hook the bouncer fires for detached-
+	// state NICK commands so the supervisor's next register() uses
+	// the queued nick rather than the env-configured one. nil disables
+	// queuing; the bouncer still acknowledges the NICK with a NOTICE.
+	setPreferredNick func(nick string)
+
 	logMu      sync.Mutex
 	channelLog map[string][]string
 }
@@ -344,6 +350,17 @@ func (b *Bouncer) AttachWantedChannels(w *WantedChannels) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.wanted = w
+}
+
+// AttachPreferredNickHook installs the callback the bouncer fires
+// when a client issues NICK during a detached upstream. The connector
+// stores the queued nick and applies it on the next register(). nil
+// disables queuing — clients still see a "queued" NOTICE on detached
+// NICK but the next registration uses the env-configured nick.
+func (b *Bouncer) AttachPreferredNickHook(hook func(nick string)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.setPreferredNick = hook
 }
 
 // upstreamState returns the live upstream state. Defaults to
@@ -1024,25 +1041,118 @@ func (b *Bouncer) notifyPolicyDenial(client *BouncerClient, target, reason strin
 	}
 }
 
-// rejectForDetached is the per-message handler the PRIVMSG gate routes
-// to when upstream isn't `registered`. PRIVMSG/NOTICE produce a
-// channel-targeted "NOT sent" NOTICE so the rejection lands in the
-// buffer where the user typed; other forwardable commands produce a
-// status-targeted NOTICE explaining the operation was refused.
+// rejectForDetached is the per-command handler the upstream-state
+// gate in handleLine routes to when upstream isn't `registered`. It
+// distinguishes "queue-and-tell-the-truth" semantics from "refuse-
+// and-explain": JOIN / PART / NICK get queued into the connector's
+// wanted-set or preferred-nick slot for the next reconnect (with a
+// "queued" NOTICE so the user knows what's going to happen), while
+// PRIVMSG / NOTICE / MODE / TOPIC / KICK / NAMES get refused with a
+// channel-targeted NOTICE that explains why.
 //
-// More nuanced per-command handling (queue JOINs into a wanted-set,
-// reply truthfully to query commands) is layered on top of this in
-// follow-up commits — this commit keeps the universal "refuse +
-// surface" shape.
+// Never fakes a successful acknowledgement upstream — that's the
+// silent-message-loss bug this plan exists to fix. If the operation
+// can't actually flow upstream right now, the client must learn that
+// at the moment it asks, not five minutes later when something
+// inconsistent surfaces.
 func (b *Bouncer) rejectForDetached(client *BouncerClient, msg Message) {
+	switch msg.Command {
+	case CmdJoin:
+		b.handleDetachedJoin(client, msg)
+	case CmdPart:
+		b.handleDetachedPart(client, msg)
+	case CmdNick:
+		b.handleDetachedNick(client, msg)
+	default:
+		b.handleDetachedRefusal(client, msg)
+	}
+}
+
+// handleDetachedJoin queues the channel(s) into the wanted-set so the
+// supervisor's next reconnect rejoins them, then NOTICEs the client
+// per channel with what was queued. Channel keys from the JOIN line
+// are preserved.
+func (b *Bouncer) handleDetachedJoin(client *BouncerClient, msg Message) {
+	b.mu.Lock()
+	wanted := b.wanted
+	b.mu.Unlock()
+	channels, keys := parseJoinLine(msg.Params, msg.Trailing)
+	if len(channels) == 0 {
+		return
+	}
+	for i, ch := range channels {
+		if wanted != nil {
+			wanted.Add(ch, keys[i])
+		}
+		body := "Queued JOIN " + ch + " — channel will be available when reconnected to " +
+			b.network() + "."
+		_ = client.sendLine(":turborg-bouncer NOTICE " + ch + " :" + body)
+	}
+}
+
+// handleDetachedPart removes the channel(s) from the wanted-set so
+// the supervisor doesn't silently rejoin them on the next reconnect,
+// then NOTICEs the client per channel.
+func (b *Bouncer) handleDetachedPart(client *BouncerClient, msg Message) {
+	b.mu.Lock()
+	wanted := b.wanted
+	b.mu.Unlock()
+	if len(msg.Params) == 0 {
+		return
+	}
+	for _, ch := range splitAndTrim(msg.Params[0], ",") {
+		if wanted != nil {
+			wanted.Remove(ch)
+		}
+		body := "Removed " + ch + " from the auto-join list. Will not rejoin on next reconnect."
+		_ = client.sendLine(":turborg-bouncer NOTICE " + ch + " :" + body)
+	}
+}
+
+// handleDetachedNick queues the requested nick for the next
+// registration via the connector's preferred-nick hook (when wired)
+// and NOTICEs the client. Doesn't fake a NICK echo — that would lie
+// about the bot's identity during the outage.
+func (b *Bouncer) handleDetachedNick(client *BouncerClient, msg Message) {
+	newNick := msg.Trailing
+	if newNick == "" && len(msg.Params) > 0 {
+		newNick = msg.Params[0]
+	}
+	newNick = strings.TrimSpace(newNick)
+	if newNick == "" {
+		return
+	}
+	b.mu.Lock()
+	hook := b.setPreferredNick
+	b.mu.Unlock()
+	if hook != nil {
+		hook(newNick)
+	}
+	body := "Nick change queued — " + newNick + " will be used on next reconnect to " +
+		b.network() + "."
+	_ = client.sendLine(":turborg-bouncer NOTICE " + b.statusTarget() + " :" + body)
+}
+
+// handleDetachedRefusal handles every forwardable command that can't
+// be queued and replayed: PRIVMSG / NOTICE / MODE / TOPIC / KICK /
+// NAMES. PRIVMSG and NOTICE rejections target the channel/nick the
+// message was destined for (the buffer where the user typed). Others
+// target the status placeholder.
+func (b *Bouncer) handleDetachedRefusal(client *BouncerClient, msg Message) {
 	state := b.upstreamState()
 	body := b.detachedRejectBody(state, msg.Command)
 	target := b.statusTarget()
-	if (msg.Command == CmdPrivmsg || msg.Command == CmdNotice) && len(msg.Params) > 0 {
-		target = msg.Params[0]
+	switch msg.Command {
+	case CmdPrivmsg, CmdNotice:
+		if len(msg.Params) > 0 {
+			target = msg.Params[0]
+		}
+	case CmdMode, CmdTopic, CmdKick, CmdNames:
+		if len(msg.Params) > 0 {
+			target = msg.Params[0]
+		}
 	}
-	line := ":turborg-bouncer NOTICE " + target + " :" + body
-	if err := client.sendLine(line); err != nil {
+	if err := client.sendLine(":turborg-bouncer NOTICE " + target + " :" + body); err != nil {
 		b.log.Debug("bouncer detached reject", "err", err)
 	}
 }

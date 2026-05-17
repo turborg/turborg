@@ -165,6 +165,56 @@ func TestSupervisorReplaysKeyedJoinOnReconnect(t *testing.T) {
 	}
 }
 
+// TestSupervisorRegistersWithPreferredNickOnReconnect is the
+// integration story for queued NICK during detached: the connector
+// gets a preferred nick set externally (as the bouncer would after a
+// NICK during detached), then on the next register() the upstream
+// receives NICK <preferred>, and registration success clears the
+// queue.
+func TestSupervisorRegistersWithPreferredNickOnReconnect(t *testing.T) {
+	fs := newReconnectTestServer(t)
+
+	conn := irc.New(&irc.Settings{
+		Hostname: "127.0.0.1",
+		Port:     fs.Port(),
+		Nick:     "turborg",
+	}, nil, nil)
+	conn.SetPreferredNick("shinynewnick")
+
+	a := agent.New(nil)
+	a.AddConnector(conn)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+
+	require.Eventually(t, func() bool {
+		return conn.UpstreamState().State() == irc.UpstreamStateRegistered
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Fake server must have received the queued nick, not the env one.
+	var sawQueued bool
+	for _, l := range fs.Received() {
+		if l == "NICK shinynewnick" {
+			sawQueued = true
+			break
+		}
+	}
+	assert.True(t, sawQueued,
+		"register() must use the queued preferred nick; received=%v", fs.Received())
+
+	// Successful registration must have cleared the queue.
+	assert.Empty(t, conn.PreferredNick(),
+		"successful register() consumes the queued nick so transient blips don't re-apply it")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent did not shut down")
+	}
+}
+
 // TestUpstreamSelfJoinEchoDoesNotClobberKey covers the "Add semantics"
 // invariant from the unit tests at the connector level: when upstream
 // echoes a JOIN for a +k channel (server omits the key from echo), the
