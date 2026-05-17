@@ -807,7 +807,12 @@ func (b *Bouncer) allowByPolicy(client *BouncerClient, msg Message) bool {
 		currentChannels = b.state.Count()
 	}
 	if allow, reason := limits.AllowCommand(msg.Command, currentChannels); !allow {
-		b.notifyPolicyDenial(client, reason)
+		// AllowCommand currently gates NICK / USER / JOIN — none of
+		// which carry channel context the user has open in their
+		// client (a JOIN over-cap means the user never made it into
+		// the target channel). Route the NOTICE to the bot's nick so
+		// it lands in the client's server status tab.
+		b.notifyPolicyDenial(client, b.statusTarget(), reason)
 		b.log.Info("cap_hit",
 			"surface", "bouncer",
 			"kind", CapHitKind(msg.Command),
@@ -818,7 +823,9 @@ func (b *Bouncer) allowByPolicy(client *BouncerClient, msg Message) bool {
 
 	// Per-target outbound throttle. Only PRIVMSG is gated here; bot-
 	// originated command replies (which take a different path) keep
-	// their existing per-sender command throttle.
+	// their existing per-sender command throttle. The NOTICE is
+	// addressed to the PRIVMSG's target channel/nick so it lands in
+	// the buffer where the user typed, not the server status tab.
 	if msg.Command == CmdPrivmsg && throttle != nil && len(msg.Params) > 0 {
 		target := msg.Params[0]
 		if res := throttle.AllowWithReason(target); !res.Allow {
@@ -826,7 +833,8 @@ func (b *Bouncer) allowByPolicy(client *BouncerClient, msg Message) bool {
 			if seconds < 1 {
 				seconds = 1
 			}
-			b.notifyPolicyDenial(client, fmt.Sprintf("rate limited — wait %ds before sending to %s again", seconds, target))
+			b.notifyPolicyDenial(client, target,
+				fmt.Sprintf("Message rate-limited — wait %ds before sending to %s again. NOT sent.", seconds, target))
 			b.log.Info("cap_hit",
 				"surface", "bouncer",
 				"kind", "outbound_rate",
@@ -840,15 +848,34 @@ func (b *Bouncer) allowByPolicy(client *BouncerClient, msg Message) bool {
 	return true
 }
 
+// statusTarget returns the target string used for service NOTICEs that
+// have no specific channel context (nick changes, channel-cap rejects,
+// realname locks). When the bouncer has learned the bot's upstream
+// nick, that's the right target — most clients route nick-targeted
+// NOTICEs into the server status tab. Pre-registration the IRC `*`
+// placeholder is used.
+func (b *Bouncer) statusTarget() string {
+	b.upstreamMu.RLock()
+	defer b.upstreamMu.RUnlock()
+	if b.upstreamNick == "" {
+		return "*"
+	}
+	return b.upstreamNick
+}
 
 // notifyPolicyDenial sends a NOTICE back to the originating client when
-// an operator-policy gate refuses one of its commands. Uses the same
-// synthetic prefix the bouncer already uses for PONG so existing IRC
-// clients render it in the network/status tab rather than treating it
-// as a channel message. Errors are logged at debug level — a failed
-// NOTICE shouldn't fail the surrounding handler.
-func (b *Bouncer) notifyPolicyDenial(client *BouncerClient, reason string) {
-	line := ":turborg-bouncer NOTICE * :" + reason
+// an operator-policy gate refuses one of its commands. The target
+// chooses where the NOTICE lands in the client's UI: pass a channel
+// name for messages tied to a channel (rate limits, channel-targeted
+// rejects), or the bot's nick / `*` for messages that have no channel
+// context (nick locks, channel-cap rejects). Errors are logged at
+// debug level — a failed NOTICE shouldn't fail the surrounding
+// handler.
+func (b *Bouncer) notifyPolicyDenial(client *BouncerClient, target, reason string) {
+	if target == "" {
+		target = "*"
+	}
+	line := ":turborg-bouncer NOTICE " + target + " :" + reason
 	if err := client.sendLine(line); err != nil {
 		b.log.Debug("bouncer policy notice", "err", err)
 	}

@@ -1094,7 +1094,8 @@ func TestBouncerPerTargetOutboundThrottleRejectsAfterCap(t *testing.T) {
 	writeLine(t, conn, "PRIVMSG #x :three")
 	notice := readUntilContains(r, conn, "NOTICE", 500*time.Millisecond)
 	assert.NotEmpty(t, notice, "client must receive a NOTICE when outbound throttle fires")
-	assert.Contains(t, notice, "rate limited")
+	assert.Contains(t, notice, "rate-limited")
+	assert.Contains(t, notice, "NOT sent")
 
 	mu.Lock()
 	defer mu.Unlock()
