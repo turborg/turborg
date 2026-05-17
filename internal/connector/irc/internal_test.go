@@ -1002,3 +1002,56 @@ func TestWatchdogPollInterval(t *testing.T) {
 		})
 	}
 }
+
+func TestBouncerWarnHookBroadcastsStrongerNotice(t *testing.T) {
+	machine := NewUpstreamStateMachine(nil)
+	state := NewChannelState()
+	state.OnSelfJoin("#a")
+
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	b.AttachState(state, "turborg", "ident", "host")
+	b.AttachUpstreamState(machine, "Libera Chat")
+	b.AttachUpstream(func(string) error { return nil })
+
+	require.NoError(t, b.Start(context.Background()))
+	t.Cleanup(func() { _ = b.Stop() })
+
+	addr := b.Addr()
+	conn, err := net.DialTimeout("tcp", addr, time.Second)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	r := bufio.NewReader(conn)
+	_, _ = r.ReadString('\n')
+	_, err = conn.Write([]byte("PASS p\r\n"))
+	require.NoError(t, err)
+	for {
+		conn.SetReadDeadline(time.Now().Add(time.Second))
+		line, err := r.ReadString('\n')
+		if err != nil || strings.Contains(line, " 001 ") {
+			break
+		}
+	}
+
+	// Simulate the supervisor's escalation watchdog firing — unexported
+	// method, so this test lives next to the implementation rather than
+	// in the external _test package.
+	b.onUpstreamWarn("Ping timeout: 240 seconds", 11*time.Minute)
+
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	var got string
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		if strings.Contains(line, "still retrying") {
+			got = line
+			break
+		}
+	}
+	require.NotEmpty(t, got, "warn hook must broadcast a stronger NOTICE")
+	assert.Contains(t, got, "#a")
+	assert.Contains(t, got, "11m")
+	assert.Contains(t, got, "Ping timeout: 240 seconds")
+}

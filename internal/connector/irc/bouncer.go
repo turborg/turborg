@@ -239,6 +239,16 @@ type Bouncer struct {
 	// just attached, distinct from "bot is alive" log scrapes.
 	onAttach func(reason string)
 
+	// machine is the per-connector upstream state machine the bouncer
+	// subscribes to so it can surface state to attached clients (entry
+	// NOTICEs on transition, state-informative NOTICEs on fresh
+	// attach, PRIVMSG-gating). nil before AttachUpstreamState has been
+	// called — treated as "always registered" so tests that don't care
+	// about state can leave it un-attached.
+	machine     *UpstreamStateMachine
+	networkName string
+	stateSub    *Subscription
+
 	logMu      sync.Mutex
 	channelLog map[string][]string
 }
@@ -307,6 +317,45 @@ func (b *Bouncer) AttachOutboundObserver(cb ForwardedObserver) {
 	b.onForwarded = cb
 }
 
+// AttachUpstreamState binds the per-connector upstream state machine
+// + a human-readable network name (e.g. "Libera Chat") used in state-
+// surfacing NOTICE bodies. Must be called before Start. Network name
+// defaults to "the network" when empty. Subscription is created in
+// Start so it can be torn down in Stop without leaking goroutines or
+// double-firing on a fresh Start/Stop cycle.
+func (b *Bouncer) AttachUpstreamState(machine *UpstreamStateMachine, networkName string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.machine = machine
+	b.networkName = networkName
+}
+
+// upstreamState returns the live upstream state. Defaults to
+// UpstreamStateRegistered when no state machine has been attached —
+// keeps tests that pre-date the state machine working without
+// modification (they implicitly assume the bouncer never refuses to
+// forward).
+func (b *Bouncer) upstreamState() UpstreamState {
+	b.mu.Lock()
+	machine := b.machine
+	b.mu.Unlock()
+	if machine == nil {
+		return UpstreamStateRegistered
+	}
+	return machine.State()
+}
+
+// network returns the human-readable network name for NOTICE bodies.
+// Falls back to a generic placeholder when no name was attached.
+func (b *Bouncer) network() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.networkName == "" {
+		return "the network"
+	}
+	return b.networkName
+}
+
 // AttachState binds a live ChannelState plus the upstream identity used
 // when crafting synthetic JOIN lines for state replay.
 func (b *Bouncer) AttachState(state *ChannelState, nick, ident, host string) {
@@ -359,10 +408,18 @@ func (b *Bouncer) Start(ctx context.Context) error {
 	}
 	b.mu.Lock()
 	b.listener = l
+	machine := b.machine
 	b.mu.Unlock()
 
 	bctx, cancel := context.WithCancel(ctx)
 	b.cancel = cancel
+
+	if machine != nil {
+		sub := machine.Subscribe(b.onUpstreamStateChange)
+		b.mu.Lock()
+		b.stateSub = sub
+		b.mu.Unlock()
+	}
 
 	b.wg.Add(1)
 	go b.acceptLoop(bctx, l)
@@ -378,6 +435,7 @@ func (b *Bouncer) Stop() error {
 	b.mu.Lock()
 	cancel := b.cancel
 	listener := b.listener
+	stateSub := b.stateSub
 	clients := make([]*BouncerClient, 0, len(b.clients))
 	for c := range b.clients {
 		clients = append(clients, c)
@@ -385,8 +443,12 @@ func (b *Bouncer) Stop() error {
 	b.clients = map[*BouncerClient]struct{}{}
 	b.listener = nil
 	b.cancel = nil
+	b.stateSub = nil
 	b.mu.Unlock()
 
+	if stateSub != nil {
+		stateSub.Unsubscribe()
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -509,6 +571,17 @@ func (b *Bouncer) handleLine(client *BouncerClient, line string) {
 		return
 	}
 
+	// Gate forwardable client commands on upstream state — anything
+	// other than `registered` reroutes through the detached handler,
+	// which surfaces a state-appropriate NOTICE rather than silently
+	// dropping the line. PRIVMSG/NOTICE specifically need their NOTICE
+	// addressed to the channel target so the rejection lands in the
+	// buffer where the user typed.
+	if b.upstreamState() != UpstreamStateRegistered {
+		b.rejectForDetached(client, msg)
+		return
+	}
+
 	b.mu.Lock()
 	send := b.sendUpstream
 	observer := b.onForwarded
@@ -525,29 +598,38 @@ func (b *Bouncer) handleLine(client *BouncerClient, line string) {
 		b.log.Debug("bouncer forward upstream", "err", err)
 		return
 	}
-	if msg.Command == CmdPrivmsg || msg.Command == CmdNotice {
-		// Server doesn't echo PRIVMSG / NOTICE back; broadcast to other
-		// bouncer clients ourselves. If the originator negotiated
-		// echo-message (IRCv3), fan to them too — that's what the cap
-		// promises: "your own messages will come back to you so you
-		// can render them through the same incoming-message path that
-		// every other client uses." Without the cap, exclude the
-		// originator to avoid double-display.
-		var exclude *BouncerClient
-		if !client.hasCap("echo-message") {
-			exclude = client
-		}
-		b.BroadcastAsSelf(line, exclude)
-		if observer != nil && len(msg.Params) > 0 {
-			b.upstreamMu.RLock()
-			sender := b.upstreamNick
-			b.upstreamMu.RUnlock()
-			if sender == "" {
-				sender = "*"
-			}
-			observer(msg.Params[0], sender, msg.Trailing, msg.Command)
-		}
+	b.fanForwarded(client, msg, line, observer)
+}
+
+// fanForwarded broadcasts a successfully-forwarded PRIVMSG/NOTICE to
+// other attached bouncer clients (server doesn't echo) and notifies the
+// outbound observer for downstream subscribers (EventBus, WS gateway).
+// Extracted from handleLine so the gocyclo budget stays under the
+// project threshold.
+func (b *Bouncer) fanForwarded(client *BouncerClient, msg Message, line string, observer ForwardedObserver) {
+	if msg.Command != CmdPrivmsg && msg.Command != CmdNotice {
+		return
 	}
+	// If the originator negotiated echo-message (IRCv3), fan to them
+	// too — that's what the cap promises: "your own messages will come
+	// back to you so you can render them through the same incoming-
+	// message path that every other client uses." Without the cap,
+	// exclude the originator to avoid double-display.
+	var exclude *BouncerClient
+	if !client.hasCap("echo-message") {
+		exclude = client
+	}
+	b.BroadcastAsSelf(line, exclude)
+	if observer == nil || len(msg.Params) == 0 {
+		return
+	}
+	b.upstreamMu.RLock()
+	sender := b.upstreamNick
+	b.upstreamMu.RUnlock()
+	if sender == "" {
+		sender = "*"
+	}
+	observer(msg.Params[0], sender, msg.Trailing, msg.Command)
 }
 
 // supportedCaps is the set of IRCv3 capabilities the bouncer
@@ -695,10 +777,11 @@ func (b *Bouncer) handlePass(client *BouncerClient, params []string) {
 	_ = client.close()
 }
 
-// sendWelcome emits the 001 welcome + state replay + channel-log
-// replay for a freshly-authenticated client. Called either inline
-// from handlePass (no CAP negotiation in progress) or from CAP END
-// (client was negotiating caps when PASS authenticated).
+// sendWelcome emits the 001 welcome + state-surfacing NOTICE (when
+// upstream isn't registered) + state replay + channel-log replay for
+// a freshly-authenticated client. Called either inline from handlePass
+// (no CAP negotiation in progress) or from CAP END (client was
+// negotiating caps when PASS authenticated).
 func (b *Bouncer) sendWelcome(client *BouncerClient) {
 	b.upstreamMu.RLock()
 	target := b.upstreamNick
@@ -707,6 +790,11 @@ func (b *Bouncer) sendWelcome(client *BouncerClient) {
 		target = "*"
 	}
 	_ = client.sendLine(fmt.Sprintf(":turborg-bouncer 001 %s :Welcome to the turborg bouncer", target))
+	// Tell the client where upstream stands BEFORE the JOIN replay so
+	// a client attaching during a long outage sees an explanation
+	// instead of a silent gap. When upstream is registered this is a
+	// no-op and the normal channel replay carries the live state.
+	b.surfaceStateToClient(client)
 	b.replayState(client)
 	b.replayChannelLogs(client)
 }
@@ -878,6 +966,189 @@ func (b *Bouncer) notifyPolicyDenial(client *BouncerClient, target, reason strin
 	line := ":turborg-bouncer NOTICE " + target + " :" + reason
 	if err := client.sendLine(line); err != nil {
 		b.log.Debug("bouncer policy notice", "err", err)
+	}
+}
+
+// rejectForDetached is the per-message handler the PRIVMSG gate routes
+// to when upstream isn't `registered`. PRIVMSG/NOTICE produce a
+// channel-targeted "NOT sent" NOTICE so the rejection lands in the
+// buffer where the user typed; other forwardable commands produce a
+// status-targeted NOTICE explaining the operation was refused.
+//
+// More nuanced per-command handling (queue JOINs into a wanted-set,
+// reply truthfully to query commands) is layered on top of this in
+// follow-up commits — this commit keeps the universal "refuse +
+// surface" shape.
+func (b *Bouncer) rejectForDetached(client *BouncerClient, msg Message) {
+	state := b.upstreamState()
+	body := b.detachedRejectBody(state, msg.Command)
+	target := b.statusTarget()
+	if (msg.Command == CmdPrivmsg || msg.Command == CmdNotice) && len(msg.Params) > 0 {
+		target = msg.Params[0]
+	}
+	line := ":turborg-bouncer NOTICE " + target + " :" + body
+	if err := client.sendLine(line); err != nil {
+		b.log.Debug("bouncer detached reject", "err", err)
+	}
+}
+
+// detachedRejectBody returns the per-state NOTICE body for a rejected
+// client command. The body explains both the operation outcome ("NOT
+// sent" / "NOT performed") and the reason (transient / banned /
+// auth-failed / paused).
+func (b *Bouncer) detachedRejectBody(state UpstreamState, cmd string) string {
+	verb := "operation NOT performed"
+	if cmd == CmdPrivmsg || cmd == CmdNotice {
+		verb = "message NOT sent"
+	}
+	network := b.network()
+	switch state {
+	case UpstreamStateDisconnectedNickUnavailable:
+		return "Nickname unavailable on " + network +
+			" — " + verb + ". Retrying with an alternate."
+	case UpstreamStateDisconnectedAuthFailed:
+		return "Authentication failed for " + network +
+			" — " + verb + ". Update credentials and restart the connector."
+	case UpstreamStateDisconnectedBanned:
+		return "Banned from " + network +
+			" — " + verb + ". Manual intervention required."
+	case UpstreamStatePausedIdle:
+		return "Connector paused after extended unreachability — " +
+			verb + ". Restart to retry."
+	case UpstreamStateStopped:
+		return "Connector stopped — " + verb + "."
+	case UpstreamStateIdle, UpstreamStateConnecting, UpstreamStateRegistering:
+		return "Not yet connected to " + network +
+			" — " + verb + ". Connecting…"
+	}
+	// disconnected_transient + safety default.
+	return "Not connected to " + network +
+		" — " + verb + ". Reconnecting."
+}
+
+// describeUpstreamState returns the human-readable NOTICE body the
+// bouncer surfaces when the upstream is in the given state. Empty
+// return = no NOTICE for this state (registered is the live happy
+// path and needs no surfacing).
+func (b *Bouncer) describeUpstreamState(state UpstreamState, serverReason string) string {
+	network := b.network()
+	reasonSuffix := ""
+	if serverReason != "" {
+		reasonSuffix = ": " + serverReason
+	}
+	switch state {
+	case UpstreamStateRegistered:
+		return ""
+	case UpstreamStateIdle:
+		return "Connector not yet started — waiting for first network connect attempt."
+	case UpstreamStateConnecting, UpstreamStateRegistering:
+		return "Currently connecting to " + network + ". Channels will appear when registration completes."
+	case UpstreamStateDisconnectedTransient:
+		return "Currently disconnected from " + network + reasonSuffix +
+			". Reconnecting; messages sent now will NOT be delivered."
+	case UpstreamStateDisconnectedNickUnavailable:
+		return "Nickname unavailable on " + network +
+			" — retrying with an alternate. Channels will appear when registration completes."
+	case UpstreamStateDisconnectedAuthFailed:
+		return "Authentication failed for " + network + reasonSuffix +
+			". Automatic reconnect stopped — update credentials and restart the connector."
+	case UpstreamStateDisconnectedBanned:
+		return "Banned from " + network + reasonSuffix +
+			". Automatic reconnect stopped — manual intervention required."
+	case UpstreamStatePausedIdle:
+		return "Connector paused after extended unreachability. Restart to retry."
+	case UpstreamStateStopped:
+		return "Connector stopped."
+	}
+	return ""
+}
+
+// surfaceStateToClient sends a state-informative NOTICE to a single
+// client based on the current upstream state. Fired on client attach
+// after the welcome banner so a freshly-connecting HexChat doesn't see
+// "connected, no channels, no error" when upstream is detached.
+// Skips when state == registered (the normal JOIN replay path covers
+// it).
+func (b *Bouncer) surfaceStateToClient(c *BouncerClient) {
+	b.mu.Lock()
+	machine := b.machine
+	b.mu.Unlock()
+	if machine == nil {
+		return
+	}
+	state := machine.State()
+	body := b.describeUpstreamState(state, machine.ServerReason())
+	if body == "" {
+		return
+	}
+	_ = c.sendLine(":turborg-bouncer NOTICE * :" + body)
+}
+
+// onUpstreamStateChange is the state-machine subscriber. Broadcasts
+// the entry NOTICE to every joined channel × every attached client
+// on state-class change (registered ↔ non-registered). Intra-detach
+// transitions (e.g. connecting → registering) are suppressed because
+// the previous non-registered broadcast already covered the user.
+func (b *Bouncer) onUpstreamStateChange(change UpstreamStateChange) {
+	enteringRegistered := change.To == UpstreamStateRegistered
+	leavingRegistered := change.From == UpstreamStateRegistered && change.To != UpstreamStateRegistered
+	// Skip intra-non-registered transitions to keep the channel buffer
+	// from filling with "still connecting" repeats.
+	if !enteringRegistered && !leavingRegistered {
+		return
+	}
+	var body string
+	if enteringRegistered {
+		// Only fire on transition FROM a disconnected/paused state —
+		// the initial idle→connecting→registering→registered cycle on
+		// agent startup would otherwise spam every channel with a
+		// "reconnected" NOTICE the user never asked for.
+		if change.From == UpstreamStateIdle || change.From == UpstreamStateConnecting ||
+			change.From == UpstreamStateRegistering {
+			return
+		}
+		body = "Reconnected to " + b.network() + ". You're back live."
+	} else {
+		body = b.describeUpstreamState(change.To, change.ServerReason)
+		if body == "" {
+			return
+		}
+	}
+	b.broadcastChannelNotice(body)
+}
+
+// onUpstreamWarn is wired from the connector's escalation watchdog.
+// Fires once per transient-outage window when UpstreamWarnAfter has
+// elapsed without a successful reconnect — gives the user a
+// progressively-stronger signal that the outage is real and ongoing
+// rather than a momentary blip.
+func (b *Bouncer) onUpstreamWarn(serverReason string, dwell time.Duration) {
+	rounded := dwell.Round(time.Minute)
+	if rounded <= 0 {
+		rounded = dwell.Round(time.Second)
+	}
+	body := "Network unreachable for over " + rounded.String() +
+		" — still retrying."
+	if serverReason != "" {
+		body += " Last reason: " + serverReason + "."
+	}
+	b.broadcastChannelNotice(body)
+}
+
+// broadcastChannelNotice fans the same service NOTICE into every
+// joined channel × every attached client. The double iteration is the
+// shape of "tell everyone who's watching every channel they're
+// watching it." Single-attached-client clients get one NOTICE per
+// channel; multi-attached deployments get the same NOTICE per channel
+// per client.
+func (b *Bouncer) broadcastChannelNotice(body string) {
+	if body == "" || b.state == nil {
+		return
+	}
+	channels := b.state.JoinedChannels()
+	for _, info := range channels {
+		line := ":turborg-bouncer NOTICE " + info.Name + " :" + body
+		b.Broadcast(line, nil)
 	}
 }
 

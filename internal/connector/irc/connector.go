@@ -441,16 +441,27 @@ func (c *Connector) startBouncer(ctx context.Context) error {
 	b.AttachClientLimits(c.clientLimits)
 	b.AttachOutboundThrottle(c.outboundThrottle)
 	b.AttachActivityHook(c.bouncerAttachHook)
+	b.AttachUpstreamState(c.machine, c.settings.Hostname)
+	// Reuse the existing onUpstreamWarn hook slot: the supervisor's
+	// long-outage watchdog calls into the bouncer's broadcast so
+	// channels get a stronger "still retrying" NOTICE at the warn
+	// threshold. Operators who want a different observer can override
+	// before Start by calling SetUpstreamWarnHook again — last setter
+	// wins.
+	c.SetUpstreamWarnHook(b.onUpstreamWarn)
 	// sendUpstream is set before c.client is, so guard the dereference.
 	// Pre-bound bouncer clients that try to send forwardable commands
 	// before the upstream Dial completes get an error back rather than
-	// a nil-deref panic. Once Connector.Start has set c.client, sends
-	// go through transparently.
+	// a nil-deref panic. Once bringUp has set c.client, sends go
+	// through transparently — and across reconnects the closure picks
+	// up whatever client the supervisor most recently installed via
+	// getClient().
 	b.AttachUpstream(func(line string) error {
-		if c.client == nil {
+		cli := c.getClient()
+		if cli == nil {
 			return errors.New("irc: upstream not yet connected; please retry")
 		}
-		return c.client.WriteLine(line)
+		return cli.WriteLine(line)
 	})
 	if c.events != nil {
 		b.AttachOutboundObserver(func(channel, sender, text, kind string) {
