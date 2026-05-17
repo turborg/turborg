@@ -1226,7 +1226,67 @@ func (c *Connector) dispatchLine(ctx context.Context, line string) {
 				})
 			}
 		}
+	case ErrBannedFromChan, ErrBadChannelKey, ErrChannelIsFull,
+		ErrInviteOnlyChan, ErrBadChanMask:
+		c.handleJoinFailure(ctx, msg)
 	}
+}
+
+// handleJoinFailure processes per-channel JOIN rejection numerics
+// (474/475/471/473/476). The supervisor's reconnect replay can issue a
+// burst of JOINs and have individual channels rejected for unrelated
+// reasons (banned, bad key, full, invite-only, malformed name) — each
+// failure must be honest with the user rather than silently retried.
+//
+// Per-failure work:
+//   - Drop the channel from the wanted-set so the next reconnect
+//     doesn't re-attempt it. The user can /join again to retry.
+//   - Notify attached bouncer clients via a channel-targeted NOTICE.
+//   - Publish EventJoinFailed so the web gateway can render the same
+//     signal in its UI.
+func (c *Connector) handleJoinFailure(ctx context.Context, msg Message) {
+	// Most servers format these numerics as `:server <code> <ournick>
+	// <channel> :<reason>` — channel is params[1] (second positional).
+	if len(msg.Params) < 2 {
+		return
+	}
+	channel := msg.Params[1]
+	reason := msg.Trailing
+	if reason == "" {
+		reason = humanReadableJoinFailure(msg.Command)
+	}
+	c.wanted.Remove(channel)
+	if c.bouncer != nil {
+		c.bouncer.NotifyJoinFailure(channel, reason)
+	}
+	c.publish(ctx, agent.Event{
+		Type: agent.EventJoinFailed,
+		Fields: map[string]any{
+			"connector": c.Name(),
+			"channel":   channel,
+			"code":      msg.Command,
+			"reason":    reason,
+		},
+	})
+}
+
+// humanReadableJoinFailure maps the join-failure numerics to a generic
+// reason when the server didn't supply one. Used as a fallback so the
+// NOTICE body is never empty.
+func humanReadableJoinFailure(code string) string {
+	switch code {
+	case ErrBannedFromChan:
+		return "banned from channel"
+	case ErrBadChannelKey:
+		return "channel key required or incorrect"
+	case ErrChannelIsFull:
+		return "channel is full"
+	case ErrInviteOnlyChan:
+		return "channel is invite-only"
+	case ErrBadChanMask:
+		return "channel name not accepted by the network"
+	}
+	return "rejected by network"
 }
 
 // shouldFanOutToBouncer keeps protocol noise off bouncer clients.

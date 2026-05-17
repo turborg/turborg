@@ -46,6 +46,7 @@ const (
 	ErrInviteOnlyChan   = "473"
 	ErrBannedFromChan   = "474"
 	ErrBadChannelKey    = "475"
+	ErrBadChanMask      = "476"
 )
 
 // IRC commands turborg sends or recognizes on the wire.

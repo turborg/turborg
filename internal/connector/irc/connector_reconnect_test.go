@@ -117,6 +117,13 @@ func TestSupervisorTerminalOnAuthFailedHaltsReconnect(t *testing.T) {
 // accept loop, completes the standard handshake per session, and lets
 // tests Kill() the current session to simulate an upstream drop. Each
 // fresh client connection counts as a new session in Sessions().
+// writerLike is the narrow slice of net.Conn the joinHook callback
+// uses. Defined as an interface so the hook signature doesn't leak
+// net.Conn into edge-test code that just needs to write a reply.
+type writerLike interface {
+	Write(p []byte) (n int, err error)
+}
+
 type reconnectTestServer struct {
 	t        *testing.T
 	listener net.Listener
@@ -132,6 +139,20 @@ type reconnectTestServer struct {
 	// replies with instead of 001/376 — exercises the classifier's
 	// nick-unavailable / auth-failed / banned branches.
 	rejectAfter string
+
+	// joinHook lets edge tests intercept the JOIN reply. Returning
+	// true means "I handled this JOIN" and suppresses the default
+	// self-JOIN echo; returning false falls through to the standard
+	// behavior. Used by the rejoin-failure tests to surface 474/475/
+	// 471/473/476 numerics on specific channels.
+	joinHook func(conn writerLike, line string) bool
+}
+
+// firstNickForTest is the test-fixture accessor for the cached NICK
+// the server saw during this session. Exported (camelCase) for use
+// from sibling _test files in the same package.
+func (s *reconnectTestServer) firstNickForTest() string {
+	return s.firstNickLocked()
 }
 
 func newReconnectTestServer(t *testing.T) *reconnectTestServer {
@@ -262,6 +283,9 @@ func (s *reconnectTestServer) handleLine(conn net.Conn, line string) {
 			_, _ = conn.Write([]byte(":fake 376 " + nick + " :End of MOTD\r\n"))
 		}
 	case strings.HasPrefix(line, "JOIN "):
+		if s.joinHook != nil && s.joinHook(conn, line) {
+			return
+		}
 		target := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
 		nick := s.firstNickLocked()
 		_, _ = conn.Write([]byte(":" + nick + "!~u@host JOIN " + target + "\r\n"))

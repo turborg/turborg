@@ -629,6 +629,13 @@ func (b *Bouncer) handleLine(client *BouncerClient, line string) {
 	}
 	if err := send(line); err != nil {
 		b.log.Debug("bouncer forward upstream", "err", err)
+		// Write failed mid-flight — upstream just went down and the
+		// state machine hasn't caught up yet (we passed the gate
+		// moments ago). Surface this specific failure to the client
+		// rather than silent-dropping. Only PRIVMSG/NOTICE get a
+		// channel-targeted NOTICE; other commands hit the generic
+		// detached handler which targets the status placeholder.
+		b.rejectForDetached(client, msg)
 		return
 	}
 	b.afterForwarded(client, msg, line, observer)
@@ -1315,6 +1322,25 @@ func (b *Bouncer) broadcastChannelNotice(body string) {
 		line := ":turborg-bouncer NOTICE " + info.Name + " :" + body
 		b.Broadcast(line, nil)
 	}
+}
+
+// NotifyJoinFailure broadcasts a per-channel NOTICE to every attached
+// client when the supervisor's reconnect-time rejoin of `channel`
+// failed for a server-given reason. Called by the connector's
+// dispatchLine when it observes 474/475/471/473/476 — the wanted-set
+// drop happens in the same flow so the failed channel doesn't haunt
+// future reconnects.
+func (b *Bouncer) NotifyJoinFailure(channel, reason string) {
+	if channel == "" {
+		return
+	}
+	if reason == "" {
+		reason = "rejected by network"
+	}
+	body := "Could not rejoin " + channel + ": " + reason +
+		". Removed from auto-join. Use /join " + channel + " to retry."
+	line := ":turborg-bouncer NOTICE " + channel + " :" + body
+	b.Broadcast(line, nil)
 }
 
 // replay ring so a bouncer client that reconnects later sees the
