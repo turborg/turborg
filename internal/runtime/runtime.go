@@ -26,6 +26,7 @@ import (
 	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/llm/anthropic"
+	"github.com/turborg/turborg/internal/statepush"
 	"github.com/turborg/turborg/internal/version"
 	"github.com/turborg/turborg/internal/web"
 )
@@ -41,11 +42,12 @@ const AskSystemPrompt = "You are turborg, an IRC chatbot. Keep replies short and
 // connectors are added; built-in commands are registered; the owner +
 // throttle guard is installed.
 type Built struct {
-	Agent    *agent.Agent
-	IRC      *irc.Connector
-	Gateway  *web.Gateway
-	LLM      llm.Provider       // nil when Anthropic is not configured
-	Activity *activity.Notifier // never nil; no-op when ACTIVITY_URL is unset
+	Agent        *agent.Agent
+	IRC          *irc.Connector
+	Gateway      *web.Gateway
+	LLM          llm.Provider        // nil when Anthropic is not configured
+	Activity     *activity.Notifier  // never nil; no-op when ACTIVITY_URL is unset
+	StatePush    *statepush.Emitter  // never nil; inert no-op when STATE_WEBHOOK_URL is unset
 }
 
 // Build wires the agent + connectors + gateway from settings. Callers
@@ -108,6 +110,21 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		ircConn.SetOwnerNudge(nudge)
 	}
 
+	// State-webhook emitter. Mirrors authoritative per-connector
+	// state (current connection status + joined channels + preferred
+	// nick) to the configured STATE_WEBHOOK_URL endpoint whenever
+	// that state changes. When STATE_WEBHOOK_URL is unset the
+	// emitter is an inert no-op (no goroutine, no PUTs); the
+	// snapshot builder closure is harmless either way.
+	stateClient := statepush.NewClient(s.StateWebhookURL, s.StateWebhookToken, log)
+	stateEmitter := statepush.NewEmitter(
+		stateClient,
+		buildIRCSnapshot(ircConn),
+		time.Duration(s.StateWebhookDebounceMs)*time.Millisecond,
+		log,
+	)
+	wireStatePushEmitter(ircConn, stateEmitter)
+
 	a.AddConnector(ircConn)
 
 	if len(s.Connectors) > 1 {
@@ -124,7 +141,13 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	RegisterBuiltinCommands(a, provider)
 	a.Commands.SetGuard(BuildCommandGuard(s))
 
-	built := &Built{Agent: a, IRC: ircConn, LLM: provider, Activity: notifier}
+	built := &Built{
+		Agent:     a,
+		IRC:       ircConn,
+		LLM:       provider,
+		Activity:  notifier,
+		StatePush: stateEmitter,
+	}
 
 	if s.GatewayEnabled() {
 		gw, err := buildGateway(s, ircConn, a, log, notifier)
@@ -303,6 +326,55 @@ func BuildCommandGuard(s *config.Settings) agent.CommandGuard {
 	}
 }
 
+// buildIRCSnapshot returns a snapshot builder closed over ircConn. The
+// builder is called by the state-webhook emitter each time the
+// debounce window fires; the value reflects the connector's
+// authoritative state at that moment.
+//
+// Nick precedence: the queued preferred-nick wins when non-empty (it
+// represents the user's stated intent for the next registration);
+// fall through to the live current-nick otherwise.
+func buildIRCSnapshot(ircConn *irc.Connector) statepush.SnapshotBuilder {
+	return func() statepush.Snapshot {
+		machine := ircConn.UpstreamState()
+		nick := ircConn.PreferredNick()
+		if nick == "" {
+			nick = ircConn.CurrentNick()
+		}
+		wanted := ircConn.WantedChannels().Snapshot()
+		channels := make([]statepush.ChannelSnapshot, 0, len(wanted))
+		for _, w := range wanted {
+			channels = append(channels, statepush.NewChannelSnapshot(w.Name, w.Key))
+		}
+		return statepush.Snapshot{
+			Connectors: map[string]statepush.ConnectorSnapshot{
+				ircConn.Name(): {
+					State:    string(machine.State()),
+					Since:    machine.EnteredAt().UTC(),
+					Channels: channels,
+					Nick:     nick,
+				},
+			},
+		}
+	}
+}
+
+// wireStatePushEmitter attaches the emitter's NotifyChange to the
+// three authoritative-state sources on the IRC connector: state-
+// machine transitions, wanted-channels mutations, and preferred-nick
+// changes. Safe to call even when the emitter is inert (no-op
+// NotifyChange is fine, and the subscriptions register but never
+// fire anything useful).
+func wireStatePushEmitter(ircConn *irc.Connector, emitter *statepush.Emitter) {
+	if ircConn == nil || emitter == nil {
+		return
+	}
+	notify := emitter.NotifyChange
+	ircConn.UpstreamState().Subscribe(func(irc.UpstreamStateChange) { notify() })
+	ircConn.WantedChannels().SetOnChange(notify)
+	ircConn.SetPreferredNickChangeHook(notify)
+}
+
 // LoadIRCSettings wraps irc.LoadSettings with a helpful error that
 // names the TURBORG_IRC_ prefix the user is expected to set.
 func LoadIRCSettings() (*irc.Settings, error) {
@@ -320,6 +392,9 @@ func LoadIRCSettings() (*irc.Settings, error) {
 // returning (cleanly or with an error) cancels the shared context, so
 // the other unwinds in milliseconds. Returns the first non-nil error.
 func Run(ctx context.Context, b *Built) error {
+	if b.StatePush != nil {
+		defer b.StatePush.Stop()
+	}
 	if b.Gateway == nil {
 		return b.Agent.Run(ctx)
 	}

@@ -216,6 +216,27 @@ func TestNormalizeTrimsAllowedLLMModelsWhitespace(t *testing.T) {
 	assert.Equal(t, []string{"claude-sonnet-4-6", "claude-opus-4-7"}, s.AllowedLLMModels)
 }
 
+func TestNormalizeRejectsNegativeStateWebhookDebounce(t *testing.T) {
+	t.Setenv("TURBORG_STATE_WEBHOOK_DEBOUNCE_MS", "-1")
+	_, err := config.Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "STATE_WEBHOOK_DEBOUNCE_MS")
+}
+
+func TestNormalizeRejectsExcessiveStateWebhookDebounce(t *testing.T) {
+	t.Setenv("TURBORG_STATE_WEBHOOK_DEBOUNCE_MS", "5001")
+	_, err := config.Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "STATE_WEBHOOK_DEBOUNCE_MS")
+}
+
+func TestStateWebhookDebounceDefault(t *testing.T) {
+	s, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, 250, s.StateWebhookDebounceMs,
+		"default debounce coalesces bursty channel mutations into one PUT")
+}
+
 func TestNormalizeTrimsAllowedNetworksWhitespace(t *testing.T) {
 	t.Setenv("TURBORG_ALLOWED_NETWORKS", " irc.libera.chat , , irc.oftc.net ")
 	s, err := config.Load()

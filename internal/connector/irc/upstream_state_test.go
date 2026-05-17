@@ -275,6 +275,19 @@ func TestUpstreamStateMachineDurationIn(t *testing.T) {
 	assert.Less(t, d, 5*time.Second)
 }
 
+func TestUpstreamStateMachineEnteredAtMovesOnTransition(t *testing.T) {
+	t.Parallel()
+	m := irc.NewUpstreamStateMachine(nil)
+	first := m.EnteredAt()
+	require.False(t, first.IsZero(), "EnteredAt is set at construction")
+
+	time.Sleep(10 * time.Millisecond)
+	m.Transition(irc.UpstreamStateConnecting)
+	second := m.EnteredAt()
+	assert.True(t, second.After(first),
+		"EnteredAt must advance on a real transition")
+}
+
 func TestUpstreamStateMachineSubscribeNilFnReturnsInertHandle(t *testing.T) {
 	t.Parallel()
 	m := irc.NewUpstreamStateMachine(nil)

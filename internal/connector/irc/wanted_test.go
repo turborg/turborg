@@ -88,6 +88,54 @@ func TestWantedChannelsRemoveMissingIsNoOp(t *testing.T) {
 	assert.Equal(t, 1, w.Len())
 }
 
+func TestWantedChannelsOnChangeFiresOnInsertAndRemove(t *testing.T) {
+	t.Parallel()
+	w := irc.NewWantedChannels(nil)
+	var calls int
+	w.SetOnChange(func() { calls++ })
+
+	w.Add("#a", "")
+	w.Add("#b", "")
+	w.Remove("#a")
+	assert.Equal(t, 3, calls, "fresh insert + insert + remove = 3 fires")
+}
+
+func TestWantedChannelsOnChangeFiresOnKeyRotationOnly(t *testing.T) {
+	t.Parallel()
+	w := irc.NewWantedChannels(nil)
+	var calls int
+	w.SetOnChange(func() { calls++ })
+
+	w.Add("#a", "old") // fresh insert → fires
+	w.Add("#a", "old") // same key → no fire
+	w.Add("#a", "")    // empty key with existing entry → no fire (preserves stored key)
+	w.Add("#a", "new") // key rotation → fires
+	assert.Equal(t, 2, calls)
+}
+
+func TestWantedChannelsOnChangeNotFiredForSeedEntries(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	// Seed during construction — callback isn't installed yet, so
+	// seed entries don't fire. Install the callback *after*
+	// construction (the documented contract).
+	w := irc.NewWantedChannels([]string{"#a", "#b"})
+	w.SetOnChange(func() { calls++ })
+	assert.Equal(t, 0, calls)
+	// Sanity: a post-seed mutation still fires.
+	w.Add("#c", "")
+	assert.Equal(t, 1, calls)
+}
+
+func TestWantedChannelsOnChangeNotFiredOnNoOpRemove(t *testing.T) {
+	t.Parallel()
+	w := irc.NewWantedChannels(nil)
+	var calls int
+	w.SetOnChange(func() { calls++ })
+	w.Remove("#nothere")
+	assert.Equal(t, 0, calls)
+}
+
 func TestWantedChannelsConcurrentMutationIsSafe(t *testing.T) {
 	t.Parallel()
 	w := irc.NewWantedChannels(nil)

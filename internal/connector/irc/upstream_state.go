@@ -191,6 +191,16 @@ func (m *UpstreamStateMachine) DurationIn() time.Duration {
 	return time.Since(m.enteredAt)
 }
 
+// EnteredAt returns the wall-clock time the machine entered its current
+// state. Snapshot consumers (state-mirror emitter, status dashboards)
+// use it to label the active state with an absolute timestamp rather
+// than a relative duration.
+func (m *UpstreamStateMachine) EnteredAt() time.Time {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.enteredAt
+}
+
 // Transition moves the machine to a new state and notifies subscribers.
 // Transitioning to the current state is a no-op (no subscriber fire, no
 // enteredAt reset) — keeps repeated "still transient" announcements from

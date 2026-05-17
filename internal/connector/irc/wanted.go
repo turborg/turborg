@@ -33,18 +33,40 @@ type WantedChannels struct {
 	mu       sync.RWMutex
 	channels map[string]WantedChannel // lowercased name → entry
 	order    []string                 // insertion order for deterministic replay
+
+	// onChange fires after every mutation that actually changed the set
+	// (a no-op Add of an already-present name with no new key, or a
+	// Remove of an absent name, does NOT fire). Read under mu, called
+	// outside the lock so handlers can call back into the set without
+	// deadlocking.
+	onChange func()
 }
 
 // NewWantedChannels returns a set seeded with the given channel list.
 // Each seed entry starts with an empty key — the operator-configured
 // list never carries credentials. Pass nil/empty for an empty starting
 // set.
+//
+// The OnChange callback is not fired for seed entries — seeding is
+// startup wiring, not a runtime mutation, and observers shouldn't see
+// a flurry of "channel added" events for what is effectively the
+// initial state.
 func NewWantedChannels(seed []string) *WantedChannels {
 	w := &WantedChannels{channels: map[string]WantedChannel{}}
 	for _, name := range seed {
 		w.Add(name, "")
 	}
 	return w
+}
+
+// SetOnChange installs a callback fired after every mutation that
+// changes the set. Pass nil to disable. Must be called after seeding
+// (typically right after NewWantedChannels) so seed entries don't
+// fire the callback. Concurrent-safe with Add/Remove.
+func (w *WantedChannels) SetOnChange(fn func()) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.onChange = fn
 }
 
 // Add inserts or updates an entry. The "update" semantics are biased
@@ -55,26 +77,40 @@ func NewWantedChannels(seed []string) *WantedChannels {
 //
 // First insert wins on case preservation — repeated Adds keep the
 // originally-cased Name so display matches what the user first typed.
+//
+// Fires the OnChange callback when (and only when) the set actually
+// changed: a fresh insert, or a key update on an existing entry.
+// Repeated no-op Adds don't fire — keeps observer chatter proportional
+// to real state changes.
 func (w *WantedChannels) Add(name, key string) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return
 	}
 	w.mu.Lock()
-	defer w.mu.Unlock()
+	changed := false
 	lc := strings.ToLower(name)
 	if existing, ok := w.channels[lc]; ok {
-		if key != "" {
+		if key != "" && existing.Key != key {
 			existing.Key = key
 			w.channels[lc] = existing
+			changed = true
 		}
-		return
+	} else {
+		w.channels[lc] = WantedChannel{Name: name, Key: key}
+		w.order = append(w.order, lc)
+		changed = true
 	}
-	w.channels[lc] = WantedChannel{Name: name, Key: key}
-	w.order = append(w.order, lc)
+	cb := w.onChange
+	w.mu.Unlock()
+	if changed && cb != nil {
+		cb()
+	}
 }
 
 // Remove drops an entry. No-op when the entry isn't present.
+// Fires the OnChange callback when (and only when) an entry was
+// actually removed.
 func (w *WantedChannels) Remove(name string) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -82,8 +118,8 @@ func (w *WantedChannels) Remove(name string) {
 	}
 	lc := strings.ToLower(name)
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if _, ok := w.channels[lc]; !ok {
+		w.mu.Unlock()
 		return
 	}
 	delete(w.channels, lc)
@@ -92,6 +128,11 @@ func (w *WantedChannels) Remove(name string) {
 			w.order = append(w.order[:i], w.order[i+1:]...)
 			break
 		}
+	}
+	cb := w.onChange
+	w.mu.Unlock()
+	if cb != nil {
+		cb()
 	}
 }
 
