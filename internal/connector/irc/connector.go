@@ -51,6 +51,13 @@ type Connector struct {
 	bouncer  *Bouncer
 	ctcp     *Throttle
 
+	// wanted is the "channels I want to be in" set the reconnect
+	// supervisor replays JOINs from. Seeded at construction from the
+	// operator-configured channel list; grown/shrunk at runtime by
+	// upstream-observed self-JOIN/PART echoes and by client-originated
+	// JOIN/PART commands routed through the bouncer.
+	wanted *WantedChannels
+
 	// clientLimits is the operator-policy struct the bouncer consults
 	// before forwarding client-originated commands upstream. Held here
 	// so runtime.Build can hand it to the connector before Start; it
@@ -113,9 +120,15 @@ func New(s *Settings, log *slog.Logger, events *agent.EventBus) *Connector {
 		inbox:       make(chan *agent.InboundEnvelope, 64),
 		state:       NewChannelState(),
 		machine:     NewUpstreamStateMachine(log),
+		wanted:      NewWantedChannels(s.NormalizedChannels()),
 		currentNick: s.Nick,
 	}
 }
+
+// WantedChannels returns the connector's wanted-channels set. Used by
+// the bouncer (to record keys from client-originated JOIN frames) and
+// by tests. The pointer is stable for the lifetime of the Connector.
+func (c *Connector) WantedChannels() *WantedChannels { return c.wanted }
 
 // getClient returns the live upstream client pointer. nil before the
 // first Dial and during the gap between a session ending and the
@@ -355,13 +368,22 @@ func (c *Connector) bringUp(ctx context.Context) error {
 	}
 	c.log.Info("irc handshake complete", "nick", c.settings.Nick)
 
-	for _, ch := range c.settings.NormalizedChannels() {
-		c.log.Info("irc joining channel", "channel", ch)
-		if err := cli.WriteLine(CmdJoin + " " + ch); err != nil {
+	// Replay every channel the supervisor's wanted-set has tracked —
+	// initially this is just the operator-configured channel list, but
+	// across reconnects it grows / shrinks with client-driven JOIN /
+	// PART activity and carries channel keys captured from those
+	// JOINs so +k channels rejoin cleanly without 475 ERR_BADCHANNELKEY.
+	for _, w := range c.wanted.Snapshot() {
+		line := CmdJoin + " " + w.Name
+		if w.Key != "" {
+			line += " " + w.Key
+		}
+		c.log.Info("irc joining channel", "channel", w.Name, "keyed", w.Key != "")
+		if err := cli.WriteLine(line); err != nil {
 			_ = cli.Close()
 			c.setClient(nil)
 			c.classifyFallback(err)
-			return fmt.Errorf("irc JOIN %s: %w", ch, err)
+			return fmt.Errorf("irc JOIN %s: %w", w.Name, err)
 		}
 	}
 	if c.settings.NickServPassword != "" {
@@ -442,6 +464,7 @@ func (c *Connector) startBouncer(ctx context.Context) error {
 	b.AttachOutboundThrottle(c.outboundThrottle)
 	b.AttachActivityHook(c.bouncerAttachHook)
 	b.AttachUpstreamState(c.machine, c.settings.Hostname)
+	b.AttachWantedChannels(c.wanted)
 	// Reuse the existing onUpstreamWarn hook slot: the supervisor's
 	// long-outage watchdog calls into the bouncer's broadcast so
 	// channels get a stronger "still retrying" NOTICE at the warn
@@ -1218,6 +1241,10 @@ func (c *Connector) handleJoin(ctx context.Context, msg Message) {
 	nick := Nick(msg.Prefix)
 	if nick == c.settings.Nick {
 		c.state.OnSelfJoin(channel)
+		// Server doesn't echo the key on JOIN echo, so Add with an
+		// empty key — WantedChannels.Add preserves any previously-
+		// stored key for this channel.
+		c.wanted.Add(channel, "")
 	} else {
 		c.state.OnMemberJoin(channel, nick)
 	}
@@ -1235,6 +1262,7 @@ func (c *Connector) handlePart(ctx context.Context, msg Message) {
 	nick := Nick(msg.Prefix)
 	if nick == c.settings.Nick {
 		c.state.OnSelfPart(channel)
+		c.wanted.Remove(channel)
 	} else {
 		c.state.OnMemberPart(channel, nick)
 	}

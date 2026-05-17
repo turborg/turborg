@@ -249,6 +249,12 @@ type Bouncer struct {
 	networkName string
 	stateSub    *Subscription
 
+	// wanted is the per-connector wanted-channels set the bouncer
+	// updates when it observes a client-originated JOIN / PART. Lets
+	// the supervisor's reconnect replay pick up channels the user
+	// joined post-startup, with the channel keys the user supplied.
+	wanted *WantedChannels
+
 	logMu      sync.Mutex
 	channelLog map[string][]string
 }
@@ -328,6 +334,16 @@ func (b *Bouncer) AttachUpstreamState(machine *UpstreamStateMachine, networkName
 	defer b.mu.Unlock()
 	b.machine = machine
 	b.networkName = networkName
+}
+
+// AttachWantedChannels binds the per-connector wanted-channels set
+// the bouncer mutates on observed client JOIN/PART traffic. The
+// supervisor reads from this set on every reconnect to know what
+// channels (and with what keys) to rejoin.
+func (b *Bouncer) AttachWantedChannels(w *WantedChannels) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.wanted = w
 }
 
 // upstreamState returns the live upstream state. Defaults to
@@ -598,18 +614,32 @@ func (b *Bouncer) handleLine(client *BouncerClient, line string) {
 		b.log.Debug("bouncer forward upstream", "err", err)
 		return
 	}
-	b.fanForwarded(client, msg, line, observer)
+	b.afterForwarded(client, msg, line, observer)
 }
 
-// fanForwarded broadcasts a successfully-forwarded PRIVMSG/NOTICE to
-// other attached bouncer clients (server doesn't echo) and notifies the
-// outbound observer for downstream subscribers (EventBus, WS gateway).
-// Extracted from handleLine so the gocyclo budget stays under the
-// project threshold.
-func (b *Bouncer) fanForwarded(client *BouncerClient, msg Message, line string, observer ForwardedObserver) {
-	if msg.Command != CmdPrivmsg && msg.Command != CmdNotice {
-		return
+// afterForwarded runs the post-send bookkeeping that the bouncer owes
+// upon successfully forwarding a client command upstream:
+//
+//   - PRIVMSG/NOTICE: fan to other attached clients (server doesn't
+//     echo own messages) and notify the outbound observer.
+//   - JOIN/PART: update the per-connector wanted-channels set so the
+//     supervisor's reconnect replay reflects the client's current
+//     channel intent — including any channel keys the JOIN carried.
+//
+// Extracted from handleLine to keep its cyclomatic complexity within
+// the project's gocyclo budget.
+func (b *Bouncer) afterForwarded(client *BouncerClient, msg Message, line string, observer ForwardedObserver) {
+	switch msg.Command {
+	case CmdPrivmsg, CmdNotice:
+		b.fanMessage(client, msg, line, observer)
+	case CmdJoin:
+		b.recordJoinedToWanted(msg)
+	case CmdPart:
+		b.recordPartedFromWanted(msg)
 	}
+}
+
+func (b *Bouncer) fanMessage(client *BouncerClient, msg Message, line string, observer ForwardedObserver) {
 	// If the originator negotiated echo-message (IRCv3), fan to them
 	// too — that's what the cap promises: "your own messages will come
 	// back to you so you can render them through the same incoming-
@@ -630,6 +660,31 @@ func (b *Bouncer) fanForwarded(client *BouncerClient, msg Message, line string, 
 		sender = "*"
 	}
 	observer(msg.Params[0], sender, msg.Trailing, msg.Command)
+}
+
+func (b *Bouncer) recordJoinedToWanted(msg Message) {
+	b.mu.Lock()
+	wanted := b.wanted
+	b.mu.Unlock()
+	if wanted == nil {
+		return
+	}
+	channels, keys := parseJoinLine(msg.Params, msg.Trailing)
+	for i, ch := range channels {
+		wanted.Add(ch, keys[i])
+	}
+}
+
+func (b *Bouncer) recordPartedFromWanted(msg Message) {
+	b.mu.Lock()
+	wanted := b.wanted
+	b.mu.Unlock()
+	if wanted == nil || len(msg.Params) == 0 {
+		return
+	}
+	for _, ch := range splitAndTrim(msg.Params[0], ",") {
+		wanted.Remove(ch)
+	}
 }
 
 // supportedCaps is the set of IRCv3 capabilities the bouncer

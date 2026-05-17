@@ -1055,3 +1055,61 @@ func TestBouncerWarnHookBroadcastsStrongerNotice(t *testing.T) {
 	assert.Contains(t, got, "11m")
 	assert.Contains(t, got, "Ping timeout: 240 seconds")
 }
+
+func TestParseJoinLine(t *testing.T) {
+	cases := []struct {
+		name     string
+		params   []string
+		trailing string
+		channels []string
+		keys     []string
+	}{
+		{
+			name:     "single channel no key",
+			params:   []string{"#a"},
+			channels: []string{"#a"},
+			keys:     []string{""},
+		},
+		{
+			name:     "single channel with key",
+			params:   []string{"#a", "secret"},
+			channels: []string{"#a"},
+			keys:     []string{"secret"},
+		},
+		{
+			name:     "comma-list with paired keys",
+			params:   []string{"#a,#b,#c", "k1,k2,k3"},
+			channels: []string{"#a", "#b", "#c"},
+			keys:     []string{"k1", "k2", "k3"},
+		},
+		{
+			name:     "comma-list with fewer keys padded",
+			params:   []string{"#a,#b,#c", "k1"},
+			channels: []string{"#a", "#b", "#c"},
+			keys:     []string{"k1", "", ""},
+		},
+		{
+			name:     "comma-list with empty middle key preserved",
+			params:   []string{"#a,#b,#c", "k1,,k3"},
+			channels: []string{"#a", "#b", "#c"},
+			keys:     []string{"k1", "", "k3"},
+		},
+		{
+			name:     "channel in trailing slot",
+			params:   nil,
+			trailing: "#a",
+			channels: []string{"#a"},
+			keys:     []string{""},
+		},
+		{
+			name: "empty surfaces no channels",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotCh, gotKeys := parseJoinLine(tc.params, tc.trailing)
+			assert.Equal(t, tc.channels, gotCh)
+			assert.Equal(t, tc.keys, gotKeys)
+		})
+	}
+}
