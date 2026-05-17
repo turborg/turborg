@@ -26,7 +26,10 @@ func noticeTarget(line string) string {
 // TestBouncerOutboundThrottleRejectionTargetsChannel covers scenario 1
 // from the rejection-feedback plan: when the outbound throttle kills a
 // client PRIVMSG, the resulting NOTICE must land in the same buffer
-// the user typed in (the channel target) — not the server status tab.
+// the user typed in (the channel target) — not the server status tab,
+// and not the *turborg service buffer. The user's attention is in the
+// channel they were just typing in; inline feedback is the right UX
+// for the throttle case (unlike policy denials, which use *turborg).
 func TestBouncerOutboundThrottleRejectionTargetsChannel(t *testing.T) {
 	throttle, err := irc.NewThrottle(1, 30*time.Second, nil)
 	require.NoError(t, err)
@@ -41,7 +44,7 @@ func TestBouncerOutboundThrottleRejectionTargetsChannel(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	writeLine(t, conn, "PRIVMSG #archlinux :hi again")
 
-	notice := readUntilContains(r, conn, "NOTICE", 500*time.Millisecond)
+	notice := readUntilContains(r, conn, "rate-limited", 500*time.Millisecond)
 	require.NotEmpty(t, notice, "throttle kill must produce a NOTICE")
 	assert.Equal(t, "#archlinux", noticeTarget(notice),
 		"throttle NOTICE must target the rejected PRIVMSG's channel, not the status tab")
@@ -68,18 +71,33 @@ func TestBouncerOutboundThrottleRejectionTargetsNick(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	writeLine(t, conn, "PRIVMSG alice :two")
 
-	notice := readUntilContains(r, conn, "NOTICE", 500*time.Millisecond)
+	notice := readUntilContains(r, conn, "rate-limited", 500*time.Millisecond)
 	require.NotEmpty(t, notice, "throttle kill must produce a NOTICE")
 	assert.Equal(t, "alice", noticeTarget(notice),
 		"nick-DM rejection NOTICE must target the recipient nick")
 }
 
-// TestBouncerNickLockedRejectionBroadcastsToJoinedChannels covers the
-// per-command routing for NICK policy denials: nick changes are global
-// so the NOTICE fans out to every joined channel — the user sees it
-// wherever they happen to be looking. Falls back to the status target
-// only when no channels are joined (covered by a sibling test).
-func TestBouncerNickLockedRejectionBroadcastsToJoinedChannels(t *testing.T) {
+// servicePrivmsgRe matches a `:*turborg!… PRIVMSG <target> :<body>`
+// line. Used by the service-buffer tests to assert both the source
+// (*turborg virtual nick) and the target (bot's own nick) in one
+// parse.
+var servicePrivmsgRe = regexp.MustCompile(`^:\*turborg![^ ]+ PRIVMSG (\S+) :`)
+
+func servicePrivmsgTarget(line string) string {
+	m := servicePrivmsgRe.FindStringSubmatch(strings.TrimRight(line, "\r\n"))
+	if len(m) != 2 {
+		return ""
+	}
+	return m[1]
+}
+
+// TestBouncerNickLockedRejectionRoutesToServiceBuffer verifies that
+// NICK policy denials surface as PRIVMSG from the *turborg virtual
+// service nick — most IRC clients open a dedicated query tab for it,
+// so meta-conversation accumulates in one predictable place rather
+// than spamming every joined channel buffer (the prior routing's
+// failure mode).
+func TestBouncerNickLockedRejectionRoutesToServiceBuffer(t *testing.T) {
 	b, addr := freshBouncer(t, "hunter2")
 	trackForwarded(b)
 	state := irc.NewChannelState()
@@ -91,54 +109,34 @@ func TestBouncerNickLockedRejectionBroadcastsToJoinedChannels(t *testing.T) {
 	conn, r := authBouncerClient(t, addr)
 	writeLine(t, conn, "NICK shinynewnick")
 
-	conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-	var sawA, sawB bool
+	line := readUntilContains(r, conn, "Nick change", 500*time.Millisecond)
+	require.NotEmpty(t, line, "NICK denial must produce a service PRIVMSG")
+	assert.Equal(t, "turborg", servicePrivmsgTarget(line),
+		"service PRIVMSG must target the bot's nick — that's where the IRC client opens the query buffer")
+	assert.Contains(t, line, "shinynewnick",
+		"service PRIVMSG body must echo the requested nick so the user knows what was rejected")
+
+	// No channel-targeted NOTICE may have leaked out — the broadcast-
+	// to-every-channel behavior the previous routing used is exactly
+	// what this commit removes.
+	conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
 	for {
-		line, err := r.ReadString('\n')
+		extra, err := r.ReadString('\n')
 		if err != nil {
 			break
 		}
-		if !strings.Contains(line, "Nick change") {
-			continue
-		}
-		assert.Contains(t, line, "shinynewnick",
-			"NOTICE body must echo the requested nick so the user knows what was rejected")
-		switch noticeTarget(line) {
-		case "#a":
-			sawA = true
-		case "#b":
-			sawB = true
-		}
+		assert.False(t, strings.Contains(extra, "NOTICE #a") ||
+			strings.Contains(extra, "NOTICE #b"),
+			"channel buffers must stay clean — NICK denials no longer broadcast: %s", extra)
 	}
-	assert.True(t, sawA, "#a buffer must receive the NICK denial NOTICE")
-	assert.True(t, sawB, "#b buffer must receive the NICK denial NOTICE")
 }
 
-// TestBouncerNickLockedRejectionFallsBackToStatusWhenNoChannels covers
-// the empty-joined-set branch of the NICK denial routing: with no
-// channels joined, the NOTICE goes to the bot's nick / `*` so it
-// lands in the client's server status tab.
-func TestBouncerNickLockedRejectionFallsBackToStatusWhenNoChannels(t *testing.T) {
-	b, addr := freshBouncer(t, "hunter2")
-	trackForwarded(b)
-	b.AttachState(irc.NewChannelState(), "turborg", "ident", "host")
-	b.AttachClientLimits(irc.ClientLimits{NickLocked: true})
-
-	conn, r := authBouncerClient(t, addr)
-	writeLine(t, conn, "NICK newnick")
-
-	notice := readUntilContains(r, conn, "Nick change", 500*time.Millisecond)
-	require.NotEmpty(t, notice)
-	assert.Equal(t, "turborg", noticeTarget(notice),
-		"NICK denial falls back to the bot's nick when no channels are joined")
-}
-
-// TestBouncerJoinOverCapRejectionTargetsAttemptedChannel verifies the
-// per-command routing for JOIN policy denials: the NOTICE targets the
-// channel the user tried to join, so their IRC client opens that tab
-// and renders the rejection inline rather than burying it in the
-// server status window the user wasn't looking at.
-func TestBouncerJoinOverCapRejectionTargetsAttemptedChannel(t *testing.T) {
+// TestBouncerJoinOverCapRejectionRoutesToServiceBuffer verifies that
+// JOIN policy denials surface as PRIVMSG from *turborg. The body
+// names the attempted channel (so the user knows what got rejected),
+// but the rejection does NOT open a #channel tab — fake-opening a
+// tab for a channel the user never made it into is wrong UX.
+func TestBouncerJoinOverCapRejectionRoutesToServiceBuffer(t *testing.T) {
 	b, addr := freshBouncer(t, "hunter2")
 	trackForwarded(b)
 	state := irc.NewChannelState()
@@ -150,21 +148,33 @@ func TestBouncerJoinOverCapRejectionTargetsAttemptedChannel(t *testing.T) {
 	conn, r := authBouncerClient(t, addr)
 	writeLine(t, conn, "JOIN #c")
 
-	notice := readUntilContains(r, conn, "Channel cap", 500*time.Millisecond)
-	require.NotEmpty(t, notice, "channel-cap policy must produce a NOTICE")
-	assert.Equal(t, "#c", noticeTarget(notice),
-		"channel-cap NOTICE must target the channel the user tried to join, not the status tab")
-	assert.Contains(t, notice, "#c",
-		"NOTICE body must name the attempted channel")
-	assert.Contains(t, notice, "/part",
-		"NOTICE body must hint at the recovery step")
+	line := readUntilContains(r, conn, "Channel cap", 500*time.Millisecond)
+	require.NotEmpty(t, line, "channel-cap policy must produce a service PRIVMSG")
+	assert.Equal(t, "turborg", servicePrivmsgTarget(line),
+		"JOIN denial must route to the bot's nick via *turborg, not the attempted channel")
+	assert.Contains(t, line, "#c",
+		"body must name the channel the user tried to join")
+	assert.Contains(t, line, "/part",
+		"body must hint at the recovery step")
+
+	// The previous routing emitted a NOTICE #c that opened a tab the
+	// user never wanted. Confirm no such line leaks now.
+	conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	for {
+		extra, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		assert.NotContains(t, extra, "NOTICE #c",
+			"#c tab must not be fake-opened by a rejected JOIN")
+	}
 }
 
-// TestBouncerJoinOverCapCommaListTargetsFirstChannel — when the user
-// JOINs a comma-list (`JOIN #a,#b`) and the cap rejects, target the
-// FIRST channel of the list so the NOTICE lands somewhere
-// deterministic.
-func TestBouncerJoinOverCapCommaListTargetsFirstChannel(t *testing.T) {
+// TestBouncerJoinOverCapCommaListMentionsFirstChannel — when the user
+// JOINs a comma-list (`JOIN #x,#y,#z`) and the cap rejects, the
+// service-buffer body names the first attempted channel so the user
+// knows what they tried to do.
+func TestBouncerJoinOverCapCommaListMentionsFirstChannel(t *testing.T) {
 	b, addr := freshBouncer(t, "hunter2")
 	trackForwarded(b)
 	state := irc.NewChannelState()
@@ -175,10 +185,12 @@ func TestBouncerJoinOverCapCommaListTargetsFirstChannel(t *testing.T) {
 	conn, r := authBouncerClient(t, addr)
 	writeLine(t, conn, "JOIN #x,#y,#z")
 
-	notice := readUntilContains(r, conn, "Channel cap", 500*time.Millisecond)
-	require.NotEmpty(t, notice)
-	assert.Equal(t, "#x", noticeTarget(notice),
-		"comma-list JOIN must surface the rejection on the first channel target")
+	line := readUntilContains(r, conn, "Channel cap", 500*time.Millisecond)
+	require.NotEmpty(t, line)
+	assert.Equal(t, "turborg", servicePrivmsgTarget(line),
+		"comma-list JOIN still routes to *turborg")
+	assert.Contains(t, line, "#x",
+		"body must name the first channel of the comma-list so the user knows what failed")
 }
 
 // TestBouncerPolicyRejectionFallsBackToStarBeforeUpstreamNick covers

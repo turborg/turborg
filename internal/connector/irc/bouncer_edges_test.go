@@ -1,8 +1,10 @@
 package irc_test
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -165,8 +167,16 @@ func TestBouncerMultiClientBroadcastReachesEveryAttachee(t *testing.T) {
 
 	c1, r1 := authBouncerClient(t, addr)
 	c2, r2 := authBouncerClient(t, addr)
-	_ = c1
-	_ = c2
+
+	// Drain everything the welcome flow buffered up to each client
+	// BEFORE flipping state. sendWelcome runs async on the bouncer's
+	// per-client handleClient goroutine; without an explicit drain
+	// surfaceStateToClient could race the upcoming Transition and
+	// fire its own NOTICE * with "Currently disconnected" body,
+	// which the readUntilContains scan below would then pick up
+	// instead of the broadcast NOTICE this test cares about.
+	drainBuffered(t, c1, r1)
+	drainBuffered(t, c2, r2)
 
 	machine.Transition(irc.UpstreamStateDisconnectedTransient,
 		irc.WithServerReason("EOF"))
@@ -177,6 +187,20 @@ func TestBouncerMultiClientBroadcastReachesEveryAttachee(t *testing.T) {
 	require.NotEmpty(t, n2, "client 2 must receive the broadcast")
 	assert.Equal(t, "#archlinux", noticeTarget(n1))
 	assert.Equal(t, "#archlinux", noticeTarget(n2))
+}
+
+// drainBuffered consumes everything currently readable on the
+// connection within a short deadline. Used by tests that need
+// sendWelcome (which the bouncer runs in a goroutine after auth) to
+// have fully completed before they assert about subsequent lines.
+func drainBuffered(t *testing.T, conn net.Conn, r *bufio.Reader) {
+	t.Helper()
+	conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	for {
+		if _, err := r.ReadString('\n'); err != nil {
+			return
+		}
+	}
 }
 
 // newRejectingTestServer extends reconnectTestServer with a map of

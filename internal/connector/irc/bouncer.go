@@ -869,6 +869,13 @@ func (b *Bouncer) sendWelcome(client *BouncerClient) {
 		target = "*"
 	}
 	_ = client.sendLine(fmt.Sprintf(":turborg-bouncer 001 %s :Welcome to the turborg bouncer", target))
+	// Discovery hint for the *turborg service buffer — most clients
+	// render this in the server status tab on attach. First-time
+	// users learn that policy denials + queued-action confirmations
+	// arrive in a query buffer from the virtual `*turborg` nick.
+	_ = client.sendLine(":turborg-bouncer NOTICE * :System messages from this bouncer arrive " +
+		"in the " + serviceNick + " query tab — open it for policy denials, queued actions, " +
+		"and similar meta-info.")
 	// Tell the client where upstream stands BEFORE the JOIN replay so
 	// a client attaching during a long outage sees an explanation
 	// instead of a silent gap. When upstream is registered this is a
@@ -1062,23 +1069,35 @@ func (b *Bouncer) notifyPolicyDenial(client *BouncerClient, target, reason strin
 	}
 }
 
-// notifyPolicyDenialForCommand routes a policy-denial NOTICE per the
-// command-specific rules documented in allowByPolicy. JOIN denials
-// target the attempted channel (first of any comma-list); NICK
-// denials broadcast across every joined channel so the user sees them
-// wherever they're looking; USER and anything else fall back to the
-// status placeholder.
+// notifyPolicyDenialForCommand routes a policy-denial NOTICE per
+// command. JOIN / NICK / USER all surface as PRIVMSGs from a virtual
+// *turborg service nick — IRC clients open a dedicated query buffer
+// for it, so every bouncer-meta message lives in one predictable tab
+// rather than spamming real channel buffers or fake-opening a tab
+// the user never wanted (the previous "JOIN denial → channel-targeted
+// NOTICE" pattern opened a #foo tab when the user's /join was
+// rejected, which is wrong UX).
+//
+// What stays channel-targeted (NOT routed through *turborg):
+//   - Rate-limited PRIVMSG → channel-targeted NOTICE inline with the
+//     user's attempt (allowByPolicy's throttle branch). Feedback at
+//     the typing site is the right UX here.
+//   - Per-channel rejoin failures → channel-targeted NOTICE
+//     (Bouncer.NotifyJoinFailure). Channel-scoped failure naturally
+//     belongs in the channel buffer.
+//   - Upstream state transitions → broadcast to every joined channel
+//     (onUpstreamStateChange). Outage signal is too important to bury
+//     in a tab the user might have closed.
 func (b *Bouncer) notifyPolicyDenialForCommand(client *BouncerClient, msg Message, baseReason string) {
 	switch msg.Command {
 	case CmdJoin:
 		target := firstJoinTarget(msg)
-		if target == "" {
-			b.notifyPolicyDenial(client, b.statusTarget(), baseReason)
-			return
+		body := "Channel cap reached — NOT joined."
+		if target != "" {
+			body = "Channel cap reached — NOT joined " + target +
+				". /part another channel first, or raise the operator policy limit."
 		}
-		body := "Channel cap reached — NOT joined " + target +
-			". /part another channel first, or raise the operator policy limit."
-		b.notifyPolicyDenial(client, target, body)
+		b.notifyService(client, body)
 	case CmdNick:
 		newNick := msg.Trailing
 		if newNick == "" && len(msg.Params) > 0 {
@@ -1089,19 +1108,9 @@ func (b *Bouncer) notifyPolicyDenialForCommand(client *BouncerClient, msg Messag
 		if newNick != "" {
 			body = "Nick change to " + newNick + " rejected — locked by operator policy."
 		}
-		channels := []*ChannelInfo(nil)
-		if b.state != nil {
-			channels = b.state.JoinedChannels()
-		}
-		if len(channels) == 0 {
-			b.notifyPolicyDenial(client, b.statusTarget(), body)
-			return
-		}
-		for _, info := range channels {
-			b.notifyPolicyDenial(client, info.Name, body)
-		}
+		b.notifyService(client, body)
 	default:
-		b.notifyPolicyDenial(client, b.statusTarget(), baseReason)
+		b.notifyService(client, baseReason)
 	}
 }
 
@@ -1122,6 +1131,38 @@ func firstJoinTarget(msg Message) string {
 		return ""
 	}
 	return channels[0]
+}
+
+// serviceNick is the virtual-user nickname the bouncer uses as the
+// source of meta-conversation PRIVMSGs (policy denials, queued-
+// action acknowledgements, future interactive commands). The
+// asterisk prefix is the well-established convention from ZNC's
+// `*status` and soju's `BouncerServ` for service-internal sources —
+// most IRC clients render the resulting query buffer as a "system"
+// tab and don't try to whois the sender.
+const serviceNick = "*turborg"
+
+// notifyService delivers a meta-conversation message to a single
+// attached client by wrapping it in a PRIVMSG from the *turborg
+// virtual user, addressed to the bot's own nick (which is also what
+// the attached client knows as its own nick). IRC clients open a
+// dedicated query buffer for *turborg the first time one of these
+// arrives — everything bouncer-meta then accumulates there instead
+// of polluting real channel buffers.
+//
+// Falls back to a NOTICE-to-status when the bouncer hasn't learned
+// the bot's nick yet (pre-Dial / mid-registration), since a PRIVMSG
+// with no resolvable target nick would be confusing to clients.
+func (b *Bouncer) notifyService(client *BouncerClient, body string) {
+	target := b.statusTarget()
+	if target == "" || target == "*" {
+		b.notifyPolicyDenial(client, "*", body)
+		return
+	}
+	line := ":" + serviceNick + "!turborg@bouncer PRIVMSG " + target + " :" + body
+	if err := client.sendLine(line); err != nil {
+		b.log.Debug("bouncer service notice", "err", err)
+	}
 }
 
 // rejectForDetached is the per-command handler the upstream-state

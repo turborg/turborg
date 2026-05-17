@@ -985,9 +985,15 @@ func TestBouncerNickLockedDropsNickUpstream(t *testing.T) {
 	conn, r := authBouncerClient(t, addr)
 	writeLine(t, conn, "NICK newnick")
 
-	notice := readUntilContains(r, conn, "NOTICE", 500*time.Millisecond)
-	assert.NotEmpty(t, notice, "client must receive a NOTICE explaining the rejection")
-	assert.Contains(t, notice, "nick")
+	// Policy denials now flow as PRIVMSG from the *turborg virtual
+	// service nick — IRC clients open a dedicated query buffer for it
+	// rather than spamming real channels.
+	notice := readUntilContains(r, conn, "Nick change", 500*time.Millisecond)
+	assert.NotEmpty(t, notice, "client must receive a service PRIVMSG explaining the rejection")
+	assert.Contains(t, notice, "*turborg",
+		"service messages must be sourced from the *turborg virtual nick")
+	assert.Contains(t, notice, "PRIVMSG",
+		"service messages route as PRIVMSG so clients open a query buffer")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -1037,12 +1043,12 @@ func TestBouncerMaxChannelsRejectsJoinAtCap(t *testing.T) {
 	conn, r := authBouncerClient(t, addr)
 	writeLine(t, conn, "JOIN #f")
 
-	notice := readUntilContains(r, conn, "NOTICE", 500*time.Millisecond)
-	assert.NotEmpty(t, notice, "client must receive a NOTICE when JOIN exceeds the channel cap")
-	assert.Contains(t, notice, "Channel cap reached",
-		"new wording must surface the cap-reached intent")
+	notice := readUntilContains(r, conn, "Channel cap reached", 500*time.Millisecond)
+	assert.NotEmpty(t, notice, "client must receive a service PRIVMSG when JOIN exceeds the channel cap")
 	assert.Contains(t, notice, "#f",
-		"NOTICE body must name the channel the user tried to join")
+		"body must name the channel the user tried to join")
+	assert.Contains(t, notice, "*turborg",
+		"channel-cap denials now flow through the *turborg service buffer")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -1095,9 +1101,8 @@ func TestBouncerPerTargetOutboundThrottleRejectsAfterCap(t *testing.T) {
 
 	// Third PRIVMSG hits the cap → NOTICE with retry-after, line dropped.
 	writeLine(t, conn, "PRIVMSG #x :three")
-	notice := readUntilContains(r, conn, "NOTICE", 500*time.Millisecond)
+	notice := readUntilContains(r, conn, "rate-limited", 500*time.Millisecond)
 	assert.NotEmpty(t, notice, "client must receive a NOTICE when outbound throttle fires")
-	assert.Contains(t, notice, "rate-limited")
 	assert.Contains(t, notice, "NOT sent")
 
 	mu.Lock()
