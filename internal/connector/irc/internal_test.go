@@ -980,3 +980,25 @@ func TestRecordForReplayBoundsRing(t *testing.T) {
 	b.logMu.Unlock()
 	assert.Equal(t, channelLogCap, got, "ring should cap at channelLogCap")
 }
+
+func TestWatchdogPollInterval(t *testing.T) {
+	cases := []struct {
+		name        string
+		warn, pause time.Duration
+		want        time.Duration
+	}{
+		{"both zero falls back to 1s default", 0, 0, time.Second},
+		{"warn only, picks smaller target", 4 * time.Second, 0, time.Second},
+		{"pause only, picks smaller target", 0, 4 * time.Second, time.Second},
+		{"pause smaller than warn wins", time.Minute, 4 * time.Second, time.Second},
+		{"warn smaller than pause wins", 4 * time.Second, time.Minute, time.Second},
+		{"floor at 10ms for tiny targets", 20 * time.Millisecond, 0, 10 * time.Millisecond},
+		{"clamped to 1s ceiling for hour-long", time.Hour, time.Hour, time.Second},
+		{"derived as quarter of target", 200 * time.Millisecond, 0, 50 * time.Millisecond},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, watchdogPollInterval(tc.warn, tc.pause))
+		})
+	}
+}

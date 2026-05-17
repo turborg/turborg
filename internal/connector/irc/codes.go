@@ -35,15 +35,17 @@ const (
 	ErrSaslAborted   = "906"
 	ErrSaslAlready   = "907"
 
-	ErrNoSuchNick      = "401"
-	ErrNoMOTD          = "422"
-	ErrNickNameInUse   = "433"
-	ErrNotRegistered   = "451"
-	ErrPasswdMismatch  = "464"
-	ErrChannelIsFull   = "471"
-	ErrInviteOnlyChan  = "473"
-	ErrBannedFromChan  = "474"
-	ErrBadChannelKey   = "475"
+	ErrNoSuchNick       = "401"
+	ErrNoMOTD           = "422"
+	ErrNickNameInUse    = "433"
+	ErrUnavailResource  = "437"
+	ErrNotRegistered    = "451"
+	ErrPasswdMismatch   = "464"
+	ErrYoureBannedCreep = "465"
+	ErrChannelIsFull    = "471"
+	ErrInviteOnlyChan   = "473"
+	ErrBannedFromChan   = "474"
+	ErrBadChannelKey    = "475"
 )
 
 // IRC commands turborg sends or recognizes on the wire.

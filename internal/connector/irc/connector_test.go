@@ -325,11 +325,14 @@ func TestConnectorClientPingFiresPeriodically(t *testing.T) {
 	}
 }
 
-func TestConnectorReadIdleTimeoutSurfaces(t *testing.T) {
+func TestConnectorReadIdleTimeoutSurfacesAsTransientState(t *testing.T) {
 	// ReadIdleTimeout=200ms, no ClientPingInterval — the read loop must
-	// surface a timeout error when the server goes silent after the
-	// handshake. ClientPingInterval is left zero so the ticker goroutine
-	// returns immediately and only the read side is in play.
+	// classify the silent-death as transient and the reconnect
+	// supervisor must publish that transition. Pre-supervisor this test
+	// asserted Run() exited with the read-idle error; the supervisor
+	// now treats read-idle as recoverable and keeps retrying, so the
+	// observable signal moved from Run's return value to the state
+	// machine.
 	fs := fakeirc.New(t)
 	defer fs.Close()
 
@@ -342,22 +345,37 @@ func TestConnectorReadIdleTimeoutSurfaces(t *testing.T) {
 		ClientPingInterval: 0,
 	}, nil, nil)
 
+	sawTransient := make(chan struct{}, 1)
+	sub := conn.UpstreamState().Subscribe(func(c irc.UpstreamStateChange) {
+		if c.To == irc.UpstreamStateDisconnectedTransient {
+			select {
+			case sawTransient <- struct{}{}:
+			default:
+			}
+		}
+	})
+	defer sub.Unsubscribe()
+
 	a := agent.New(nil)
 	a.AddConnector(conn)
+
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- a.Run(context.Background()) }()
+	go func() { done <- a.Run(ctx) }()
 
 	select {
-	case err := <-done:
-		// Either the read-idle path surfaced an explicit error, or the
-		// agent unwound cleanly when ctx was cancelled elsewhere. The
-		// read-idle branch surfaces "irc read idle: no data for X".
-		if err != nil {
-			assert.Contains(t, err.Error(), "irc read idle",
-				"silent-death timeout must surface as an explicit read idle error")
-		}
+	case <-sawTransient:
 	case <-time.After(3 * time.Second):
-		t.Fatal("read-idle timeout did not unwind Run within 3s")
+		cancel()
+		<-done
+		t.Fatal("read-idle timeout did not transition state to disconnected_transient")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent did not shut down within 2s of ctx cancel")
 	}
 }
 

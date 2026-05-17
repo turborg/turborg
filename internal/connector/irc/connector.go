@@ -31,8 +31,21 @@ type Connector struct {
 	settings *Settings
 	log      *slog.Logger
 	events   *agent.EventBus
-	client   *Client
 	inbox    chan *agent.InboundEnvelope
+
+	// clientMu guards client. The reconnect supervisor in Run swaps
+	// client across reconnect attempts, while the bouncer's
+	// AttachUpstream closure + Send / SendRaw / Stop callers read it
+	// from arbitrary goroutines. Read with getClient(); write with
+	// setClient().
+	clientMu sync.RWMutex
+	client   *Client
+
+	// machine is the per-connector upstream state machine. External
+	// surfaces (bouncer, web gateway) subscribe via UpstreamState() to
+	// learn when the connector is registered, reconnecting, banned, or
+	// paused. Initialised in New so callers can subscribe before Start.
+	machine *UpstreamStateMachine
 
 	state    *ChannelState
 	bouncer  *Bouncer
@@ -54,6 +67,12 @@ type Connector struct {
 	// during startBouncer. Held here so SetBouncerAttachHook can run
 	// before Start without depending on bouncer existence yet.
 	bouncerAttachHook func(reason string)
+
+	// onUpstreamWarn fires from the escalation watchdog once per
+	// transient-outage window when UpstreamWarnAfter elapses without
+	// a successful reconnect. Wired by the bouncer to broadcast a
+	// "still retrying" NOTICE to every joined channel; nil = disabled.
+	onUpstreamWarn func(serverReason string, dwell time.Duration)
 
 	// ownerNudge, when non-nil, emits a periodic usage-summary DM to
 	// the configured owner nick. nil = disabled.
@@ -93,9 +112,33 @@ func New(s *Settings, log *slog.Logger, events *agent.EventBus) *Connector {
 		events:      events,
 		inbox:       make(chan *agent.InboundEnvelope, 64),
 		state:       NewChannelState(),
+		machine:     NewUpstreamStateMachine(log),
 		currentNick: s.Nick,
 	}
 }
+
+// getClient returns the live upstream client pointer. nil before the
+// first Dial and during the gap between a session ending and the
+// supervisor re-Dialing.
+func (c *Connector) getClient() *Client {
+	c.clientMu.RLock()
+	defer c.clientMu.RUnlock()
+	return c.client
+}
+
+// setClient swaps the upstream client. Used by Start (initial dial) and
+// the reconnect supervisor (subsequent dials).
+func (c *Connector) setClient(cli *Client) {
+	c.clientMu.Lock()
+	defer c.clientMu.Unlock()
+	c.client = cli
+}
+
+// UpstreamState returns the per-connector upstream state machine.
+// Subscribers attach here to learn when the connector is registered,
+// reconnecting, banned, or paused. Returned pointer is stable for the
+// lifetime of the Connector.
+func (c *Connector) UpstreamState() *UpstreamStateMachine { return c.machine }
 
 func (c *Connector) Name() string                          { return "irc" }
 func (c *Connector) Inbound() <-chan *agent.InboundEnvelope { return c.inbox }
@@ -144,6 +187,16 @@ func (c *Connector) SetActivityHook(hook func(reason string)) { c.onBotSpoke = h
 // Start so the bouncer picks it up when it is constructed.
 func (c *Connector) SetBouncerAttachHook(hook func(reason string)) { c.bouncerAttachHook = hook }
 
+// SetUpstreamWarnHook installs the callback the escalation watchdog
+// fires when a transient outage persists past UpstreamWarnAfter. Pass
+// nil to disable. Typically wired by the bouncer to broadcast a "still
+// retrying" NOTICE into every joined channel buffer so attached
+// clients know the connector is in a long outage rather than a brief
+// blip.
+func (c *Connector) SetUpstreamWarnHook(hook func(serverReason string, dwell time.Duration)) {
+	c.onUpstreamWarn = hook
+}
+
 // CurrentNick returns the live nick the server confirmed for the bot.
 // Initially the requested TURBORG_IRC_NICK, then overwritten by the
 // 001 welcome's target field (the nick the server actually assigned)
@@ -175,29 +228,31 @@ func (c *Connector) setCurrentNick(nick string) {
 // web gateway uses this to forward client→server ops (JOIN, PART, NICK,
 // WHOIS, …) that don't fit the Envelope model.
 func (c *Connector) SendRaw(line string) error {
-	if c.client == nil {
+	cli := c.getClient()
+	if cli == nil {
 		return errors.New("irc: not connected")
 	}
-	return c.client.WriteLine(line)
+	return cli.WriteLine(line)
 }
 
 func (c *Connector) Send(env *agent.OutboundEnvelope) error {
-	if c.client == nil {
+	cli := c.getClient()
+	if cli == nil {
 		return errors.New("irc: not connected")
 	}
 	line := fmt.Sprintf("%s %s :%s", CmdPrivmsg, env.Channel, env.Text)
 	// "irc >>" log line fires from Client.WriteLine for every outbound
 	// write — no per-callsite duplication.
-	if err := c.client.WriteLine(line); err != nil {
+	if err := cli.WriteLine(line); err != nil {
 		return err
 	}
 	if c.bouncer != nil {
 		c.bouncer.BroadcastAsSelf(line, nil)
 	}
-	// Owner-nudge counter. Passing c.client.WriteLine directly (not
-	// c.Send) so the nudge DM doesn't recurse back through this method
-	// and double-count.
-	c.ownerNudge.Note(c.client.WriteLine)
+	// Owner-nudge counter. Passing cli.WriteLine directly (not c.Send)
+	// so the nudge DM doesn't recurse back through this method and
+	// double-count.
+	c.ownerNudge.Note(cli.WriteLine)
 	if c.onBotSpoke != nil {
 		c.onBotSpoke("bot_spoke")
 	}
@@ -223,43 +278,8 @@ func (c *Connector) Start(ctx context.Context) error {
 		}
 	}
 
-	c.log.Info("irc connecting",
-		"host", c.settings.Hostname,
-		"port", c.settings.Port,
-		"tls", c.settings.UseTLS,
-		"nick", c.settings.Nick,
-	)
-	cli, err := Dial(ctx, c.settings.Hostname, c.settings.Port, c.settings.UseTLS)
-	if err != nil {
+	if err := c.bringUp(ctx); err != nil {
 		return err
-	}
-	cli.SetLog(c.log)
-	c.client = cli
-
-	if err := c.register(ctx); err != nil {
-		_ = cli.Close()
-		return err
-	}
-	if err := c.awaitHandshake(ctx); err != nil {
-		_ = cli.Close()
-		return err
-	}
-	c.log.Info("irc handshake complete", "nick", c.settings.Nick)
-	for _, ch := range c.settings.NormalizedChannels() {
-		c.log.Info("irc joining channel", "channel", ch)
-		if err := c.client.WriteLine(CmdJoin + " " + ch); err != nil {
-			_ = cli.Close()
-			return fmt.Errorf("irc JOIN %s: %w", ch, err)
-		}
-	}
-	if c.settings.NickServPassword != "" {
-		c.log.Info("irc identifying with NickServ")
-		if err := c.client.WriteLine(
-			fmt.Sprintf("%s NickServ :IDENTIFY %s", CmdPrivmsg, c.settings.NickServPassword),
-		); err != nil {
-			_ = cli.Close()
-			return fmt.Errorf("irc NickServ IDENTIFY: %w", err)
-		}
 	}
 
 	if c.settings.CTCPMaxPerWindow > 0 && c.settings.CTCPWindowSeconds > 0 {
@@ -269,15 +289,19 @@ func (c *Connector) Start(ctx context.Context) error {
 			nil,
 		)
 		if err != nil {
-			_ = cli.Close()
+			if cli := c.getClient(); cli != nil {
+				_ = cli.Close()
+				c.setClient(nil)
+			}
 			return fmt.Errorf("irc CTCP throttle: %w", err)
 		}
 		c.ctcp = tr
 	}
 
 	// Bouncer was pre-bound at the top of Start; nothing to do here —
-	// its sendUpstream closure references c.client which is now set,
-	// so forwarded commands from clients work transparently.
+	// its sendUpstream closure resolves the live client through
+	// getClient(), so forwarded commands from clients work both on
+	// first connect and across reconnects.
 
 	c.publish(ctx, agent.Event{
 		Type: agent.EventReady,
@@ -287,6 +311,106 @@ func (c *Connector) Start(ctx context.Context) error {
 		},
 	})
 	return nil
+}
+
+// bringUp performs one upstream connect cycle: Dial → register → MOTD
+// → JOIN configured channels → NickServ IDENTIFY, publishing state
+// transitions through the state machine along the way. Used by Start
+// for the initial connect and by the reconnect supervisor for every
+// subsequent attempt.
+//
+// On failure, bringUp closes any opened client, clears c.client, and
+// transitions the state machine to the classified disconnected_* state
+// before returning the wrapped error. On success it leaves the new
+// client installed and transitions to registered.
+func (c *Connector) bringUp(ctx context.Context) error {
+	c.log.Info("irc connecting",
+		"host", c.settings.Hostname,
+		"port", c.settings.Port,
+		"tls", c.settings.UseTLS,
+		"nick", c.settings.Nick,
+	)
+	c.machine.Transition(UpstreamStateConnecting)
+
+	cli, err := Dial(ctx, c.settings.Hostname, c.settings.Port, c.settings.UseTLS)
+	if err != nil {
+		c.classifyFallback(err)
+		return err
+	}
+	cli.SetLog(c.log)
+	c.setClient(cli)
+
+	c.machine.Transition(UpstreamStateRegistering)
+	if err := c.register(ctx); err != nil {
+		_ = cli.Close()
+		c.setClient(nil)
+		c.classifyFallback(err)
+		return err
+	}
+	if err := c.awaitHandshake(ctx); err != nil {
+		_ = cli.Close()
+		c.setClient(nil)
+		c.classifyFallback(err)
+		return err
+	}
+	c.log.Info("irc handshake complete", "nick", c.settings.Nick)
+
+	for _, ch := range c.settings.NormalizedChannels() {
+		c.log.Info("irc joining channel", "channel", ch)
+		if err := cli.WriteLine(CmdJoin + " " + ch); err != nil {
+			_ = cli.Close()
+			c.setClient(nil)
+			c.classifyFallback(err)
+			return fmt.Errorf("irc JOIN %s: %w", ch, err)
+		}
+	}
+	if c.settings.NickServPassword != "" {
+		c.log.Info("irc identifying with NickServ")
+		if err := cli.WriteLine(
+			fmt.Sprintf("%s NickServ :IDENTIFY %s", CmdPrivmsg, c.settings.NickServPassword),
+		); err != nil {
+			_ = cli.Close()
+			c.setClient(nil)
+			c.classifyFallback(err)
+			return fmt.Errorf("irc NickServ IDENTIFY: %w", err)
+		}
+	}
+
+	// Re-pin the bouncer's view of the upstream identity. On first
+	// connect this is a no-op replay; on reconnect it picks up the
+	// fresh ident/host the network assigns.
+	if c.bouncer != nil {
+		c.bouncer.AttachState(c.state, c.CurrentNick(), c.settings.EffectiveUsername(), "turborg")
+	}
+
+	c.machine.Transition(UpstreamStateRegistered)
+	return nil
+}
+
+// transitionFromError classifies a transport-level Go error and publishes
+// the resulting state. ctx cancellation is mapped to stopped so the
+// supervisor distinguishes operator shutdown from network failure.
+func (c *Connector) transitionFromError(err error) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		c.machine.Transition(UpstreamStateStopped)
+		return
+	}
+	if state, ok := ClassifyError(err); ok {
+		c.machine.Transition(state, WithServerReason(err.Error()))
+	}
+}
+
+// classifyFallback publishes a transport-error-derived state only when
+// no upstream classifier has already moved the machine to a recoverable
+// or terminal state. The SASL / numeric / ERROR-line classifiers run
+// before the wrapping Go error returns up the call stack — their result
+// is more specific than the wrapped error's "broken pipe" or "EOF" and
+// must not be clobbered.
+func (c *Connector) classifyFallback(err error) {
+	if cur := c.machine.State(); cur.IsRecoverable() || cur.IsTerminal() {
+		return
+	}
+	c.transitionFromError(err)
 }
 
 func (c *Connector) startBouncer(ctx context.Context) error {
@@ -483,6 +607,9 @@ func (c *Connector) awaitSASLResult(ctx context.Context) error {
 			c.log.Info("irc: SASL authenticated", "user", c.settings.SASLUser)
 			return nil
 		case ErrSaslFail, ErrSaslAborted, ErrSaslAlready, ErrSaslTooLong:
+			if state, ok := ClassifyNumeric(msg.Command, msg.Params, msg.Trailing); ok {
+				c.machine.Transition(state, WithServerReason(msg.Trailing))
+			}
 			return fmt.Errorf("irc SASL failed: %s %s", msg.Command, msg.Trailing)
 		}
 	}
@@ -506,6 +633,15 @@ func (c *Connector) awaitHandshake(ctx context.Context) error {
 			c.respondPong(msg)
 			continue
 		}
+		// Classifier-driven state transitions: anything that signals
+		// nick-unavailable / auth-failed / banned during the pre-MOTD
+		// window must surface as the correct supervisor state so the
+		// reconnect loop knows whether to retry or give up.
+		if state, ok := ClassifyNumeric(msg.Command, msg.Params, msg.Trailing); ok {
+			c.machine.Transition(state, WithServerReason(msg.Trailing))
+		} else if state, reason, ok := ClassifyDisconnectMessage(line); ok {
+			c.machine.Transition(state, WithServerReason(reason))
+		}
 		// Surface the common pre-MOTD errors loudly. Without this the
 		// connector silently sits waiting for 376 until the handshake
 		// timeout fires — looks identical to "bot is dead" from the
@@ -513,8 +649,12 @@ func (c *Connector) awaitHandshake(ctx context.Context) error {
 		switch msg.Command {
 		case ErrNickNameInUse:
 			return fmt.Errorf("irc handshake: nickname %q already in use (433); set TURBORG_IRC_NICK to a free nick", c.settings.Nick)
+		case ErrUnavailResource:
+			return fmt.Errorf("irc handshake: nickname %q unavailable (437)", c.settings.Nick)
 		case ErrPasswdMismatch:
 			return fmt.Errorf("irc handshake: server password rejected (464)")
+		case ErrYoureBannedCreep:
+			return fmt.Errorf("irc handshake: banned from network (465): %s", msg.Trailing)
 		case ErrNotRegistered:
 			return fmt.Errorf("irc handshake: server rejected pre-registration command (451)")
 		}
@@ -529,7 +669,9 @@ func (c *Connector) respondPong(msg Message) {
 	if target == "" && len(msg.Params) > 0 {
 		target = msg.Params[0]
 	}
-	_ = c.client.WriteLine(CmdPong + " :" + target)
+	if cli := c.getClient(); cli != nil {
+		_ = cli.WriteLine(CmdPong + " :" + target)
+	}
 }
 
 // readLineRespectingCtx reads one line, honoring ctx via SetReadDeadline.
@@ -539,16 +681,129 @@ func (c *Connector) respondPong(msg Message) {
 // time, select would 50% of the time fire Unblock, setting a past
 // deadline and breaking every subsequent read in Run().)
 func (c *Connector) readLineRespectingCtx(ctx context.Context) (string, error) {
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = c.client.SetReadDeadline(deadline)
+	cli := c.getClient()
+	if cli == nil {
+		return "", errors.New("irc: no upstream client")
 	}
-	defer func() { _ = c.client.SetReadDeadline(time.Time{}) }()
-	return c.client.ReadLine()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = cli.SetReadDeadline(deadline)
+	}
+	defer func() { _ = cli.SetReadDeadline(time.Time{}) }()
+	return cli.ReadLine()
 }
 
+// Run is the reconnect supervisor. It loops over runSession, classifies
+// the exit reason, and decides whether to retry (recoverable states),
+// give up (terminal states), or unwind (ctx cancel). A parallel watchdog
+// goroutine escalates long-running transient outages — fires the warn
+// callback at UpstreamWarnAfter and transitions to paused_idle at
+// UpstreamPauseAfter.
+//
+// Returns:
+//   - nil when ctx is cancelled (state → stopped)
+//   - non-nil error when the connector reaches a terminal state
+//     (auth_failed / banned / paused_idle) — agent.Run treats that as
+//     fatal and unwinds the rest of the connectors via Stop.
 func (c *Connector) Run(ctx context.Context) error {
-	if c.client == nil {
+	if c.getClient() == nil {
 		return errors.New("irc: Run before Start")
+	}
+
+	backoff := NewBackoffSchedule()
+
+	watchdogCtx, cancelWatchdog := context.WithCancel(ctx)
+	defer cancelWatchdog()
+	watchdogDone := c.runEscalationWatchdog(watchdogCtx)
+
+	// runCtx cancels on either operator shutdown (parent ctx) OR the
+	// state machine reaching a terminal state. Passing it to runSession
+	// + bringUp means any blocking read / dial unblocks promptly when
+	// the watchdog escalates to paused_idle (or anything else trips
+	// terminal), so the supervisor doesn't continue iterating against
+	// a dead client.
+	runCtx, cancelRunCtx := context.WithCancel(ctx)
+	defer cancelRunCtx()
+	terminalSub := c.machine.Subscribe(func(change UpstreamStateChange) {
+		if change.To.IsTerminal() {
+			cancelRunCtx()
+		}
+	})
+	defer terminalSub.Unsubscribe()
+
+	exitTerminal := func(err error) error {
+		cancelWatchdog()
+		<-watchdogDone
+		state := c.machine.State()
+		if err != nil {
+			return fmt.Errorf("irc: terminal upstream state %s: %w", state, err)
+		}
+		return fmt.Errorf("irc: terminal upstream state %s", state)
+	}
+
+	for {
+		err := c.runSession(runCtx)
+
+		// Operator-initiated cancellation takes precedence over any
+		// terminal transition the supervisor itself published.
+		if ctx.Err() != nil {
+			c.machine.Transition(UpstreamStateStopped)
+			<-watchdogDone
+			return nil
+		}
+
+		// If the read/dispatch path observed a classified ERROR or
+		// numeric, the state machine is already in the right place.
+		// Otherwise, fall back to classifying the Go error.
+		if cur := c.machine.State(); !cur.IsRecoverable() && !cur.IsTerminal() {
+			c.transitionFromError(err)
+		}
+
+		if c.machine.State().IsTerminal() {
+			return exitTerminal(err)
+		}
+
+		// Recoverable: sleep with backoff, then bring upstream back up.
+		// runCtx cancels mid-sleep when the watchdog transitions to
+		// paused_idle — that surfaces as runCtx.Done.
+		delay := backoff.Next()
+		c.log.Info("irc reconnecting", "state", c.machine.State(), "after", delay, "err", err)
+		select {
+		case <-runCtx.Done():
+			if ctx.Err() != nil {
+				c.machine.Transition(UpstreamStateStopped)
+				<-watchdogDone
+				return nil
+			}
+			return exitTerminal(nil)
+		case <-time.After(delay):
+		}
+
+		if err := c.bringUp(runCtx); err != nil {
+			if c.machine.State().IsTerminal() {
+				return exitTerminal(err)
+			}
+			if ctx.Err() != nil {
+				c.machine.Transition(UpstreamStateStopped)
+				<-watchdogDone
+				return nil
+			}
+			c.log.Warn("irc reconnect failed", "err", err)
+			continue
+		}
+		backoff.Reset()
+	}
+}
+
+// runSession runs one upstream session: the reader / ping / dispatch
+// goroutines, all bound to the client snapshot taken at session start.
+// Returns when the session ends — either ctx cancel (nil) or upstream
+// failure (non-nil error). The supervisor loops on the return.
+//
+//nolint:gocyclo
+func (c *Connector) runSession(ctx context.Context) error {
+	cli := c.getClient()
+	if cli == nil {
+		return errors.New("irc: no upstream client")
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
@@ -556,23 +811,24 @@ func (c *Connector) Run(ctx context.Context) error {
 
 	g.Go(func() error {
 		<-gctx.Done()
-		_ = c.client.Unblock()
+		_ = cli.Unblock()
 		return nil
 	})
 
 	// Reader: enforces the silent-death idle timeout from settings.
 	// Each iteration resets the read deadline to now + idle; if no
 	// data arrives within the window, Go's net layer returns a
-	// timeout error and Run unwinds. Without this, a half-dead TLS
-	// socket (NAT idle, peer crashed) would park the bot indefinitely.
+	// timeout error and the session unwinds. Without this, a half-
+	// dead TLS socket (NAT idle, peer crashed) would park the bot
+	// indefinitely.
 	g.Go(func() error {
 		defer close(lines)
 		idle := c.settings.ReadIdleTimeout
 		for {
 			if idle > 0 {
-				_ = c.client.SetReadDeadline(time.Now().Add(idle))
+				_ = cli.SetReadDeadline(time.Now().Add(idle))
 			}
-			line, err := c.client.ReadLine()
+			line, err := cli.ReadLine()
 			if err != nil {
 				if gctx.Err() != nil {
 					return nil
@@ -616,7 +872,7 @@ func (c *Connector) Run(ctx context.Context) error {
 				return nil
 			case <-ticker.C:
 				token := strconv.FormatInt(time.Now().Unix(), 10)
-				if err := c.client.WriteLine(CmdPing + " :" + token); err != nil {
+				if err := cli.WriteLine(CmdPing + " :" + token); err != nil {
 					if gctx.Err() != nil {
 						return nil
 					}
@@ -629,6 +885,131 @@ func (c *Connector) Run(ctx context.Context) error {
 	g.Go(func() error { return c.dispatch(gctx, lines) })
 
 	return g.Wait()
+}
+
+// runEscalationWatchdog runs the long-outage escalation timers in
+// parallel with the reconnect loop. It measures outage duration as
+// "time since the connector was last in registered" — NOT dwell in a
+// single transient state — so the timer doesn't reset every time the
+// supervisor cycles transient → connecting → registering on a failing
+// reconnect attempt. When the outage exceeds UpstreamWarnAfter, the
+// warn callback fires once; when it exceeds UpstreamPauseAfter, the
+// supervisor transitions to UpstreamStatePausedIdle (terminal).
+//
+// Returns a channel that closes when the watchdog goroutine exits —
+// Run blocks on it during shutdown so the goroutine doesn't outlive
+// Run.
+func (c *Connector) runEscalationWatchdog(ctx context.Context) <-chan struct{} {
+	done := make(chan struct{})
+	warnAfter := c.settings.UpstreamWarnAfter
+	pauseAfter := c.settings.UpstreamPauseAfter
+	if warnAfter <= 0 && pauseAfter <= 0 {
+		// Nothing to watch — close immediately so callers don't block.
+		close(done)
+		return done
+	}
+
+	go func() {
+		defer close(done)
+
+		var (
+			outageMu    sync.Mutex
+			outageSince time.Time
+		)
+		startOutage := func() {
+			outageMu.Lock()
+			defer outageMu.Unlock()
+			if outageSince.IsZero() {
+				outageSince = time.Now()
+			}
+		}
+		endOutage := func() {
+			outageMu.Lock()
+			defer outageMu.Unlock()
+			outageSince = time.Time{}
+		}
+		outageDuration := func() time.Duration {
+			outageMu.Lock()
+			defer outageMu.Unlock()
+			if outageSince.IsZero() {
+				return 0
+			}
+			return time.Since(outageSince)
+		}
+
+		sub := c.machine.Subscribe(func(change UpstreamStateChange) {
+			if change.To == UpstreamStateRegistered {
+				endOutage()
+				return
+			}
+			startOutage()
+		})
+		defer sub.Unsubscribe()
+
+		// Seed in case the watchdog launched while the state was
+		// already non-registered (the supervisor in Run starts the
+		// watchdog AFTER bringUp; if bringUp moved through transient
+		// and recovered, state is registered — no outage. If bringUp
+		// is still mid-flight on first reconnect, state is connecting
+		// — count that as outage start).
+		if c.machine.State() != UpstreamStateRegistered {
+			startOutage()
+		}
+
+		interval := watchdogPollInterval(warnAfter, pauseAfter)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		warned := false
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if c.machine.State().IsTerminal() {
+				return
+			}
+			dwell := outageDuration()
+			if dwell == 0 {
+				warned = false
+				continue
+			}
+			if !warned && warnAfter > 0 && dwell >= warnAfter {
+				warned = true
+				if c.onUpstreamWarn != nil {
+					c.onUpstreamWarn(c.machine.ServerReason(), dwell)
+				}
+			}
+			if pauseAfter > 0 && dwell >= pauseAfter {
+				c.machine.Transition(UpstreamStatePausedIdle,
+					WithServerReason(c.machine.ServerReason()))
+				return
+			}
+		}
+	}()
+
+	return done
+}
+
+// watchdogPollInterval derives a poll cadence from the configured warn
+// and pause windows: aim for ~4 polls per warn window with a floor of
+// 10 ms (for fast tests) and a ceiling of 1 s (for hour-long pauses).
+func watchdogPollInterval(warn, pause time.Duration) time.Duration {
+	target := warn
+	if pause > 0 && (target == 0 || pause < target) {
+		target = pause
+	}
+	if target == 0 {
+		return time.Second
+	}
+	d := target / 4
+	if d < 10*time.Millisecond {
+		d = 10 * time.Millisecond
+	}
+	if d > time.Second {
+		d = time.Second
+	}
+	return d
 }
 
 func (c *Connector) dispatch(ctx context.Context, lines <-chan string) error {
@@ -651,6 +1032,18 @@ func (c *Connector) dispatch(ctx context.Context, lines <-chan string) error {
 func (c *Connector) dispatchLine(ctx context.Context, line string) {
 	c.log.Debug("irc <<", "line", line)
 	msg := Parse(line)
+
+	// Classifier-driven runtime state transitions: a server-initiated
+	// ERROR :Closing Link or a late-arriving 465 must move the state
+	// machine BEFORE the read loop unwinds, so the supervisor's
+	// terminal-vs-recoverable decision after session exit reads the
+	// correct state rather than falling back to ClassifyError of an
+	// EOF.
+	if state, reason, ok := ClassifyDisconnectMessage(line); ok {
+		c.machine.Transition(state, WithServerReason(reason))
+	} else if state, ok := ClassifyNumeric(msg.Command, msg.Params, msg.Trailing); ok {
+		c.machine.Transition(state, WithServerReason(msg.Trailing))
+	}
 
 	// Forward every observed upstream line to attached bouncer clients
 	// so they see the same wire view we do — modulo PING/PONG and the
@@ -946,13 +1339,17 @@ func (c *Connector) Stop(_ context.Context) error {
 	if c.bouncer != nil {
 		_ = c.bouncer.Stop()
 	}
-	if c.client == nil {
+	cli := c.getClient()
+	if cli == nil {
+		c.machine.Transition(UpstreamStateStopped)
 		return nil
 	}
 	var err error
 	c.stopOnce.Do(func() {
-		_ = c.client.WriteLine(CmdQuit + " :bye")
-		err = c.client.Close()
+		_ = cli.WriteLine(CmdQuit + " :bye")
+		err = cli.Close()
+		c.setClient(nil)
+		c.machine.Transition(UpstreamStateStopped)
 	})
 	return err
 }
