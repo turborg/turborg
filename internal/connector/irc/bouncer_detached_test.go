@@ -31,24 +31,30 @@ func freshBouncerDetached(t *testing.T, wanted *irc.WantedChannels, setNick func
 
 // TestDetachedJoinQueuesIntoWantedAndNotices covers the JOIN-during-
 // detached path: channels go into the wanted-set with their keys, the
-// client sees per-channel "queued" NOTICEs, and nothing is faked
-// upstream.
+// queued-action acknowledgement arrives via the *turborg service
+// buffer (NOT addressed to the about-to-be-joined channel — that
+// would fake-open a tab for a channel the user hasn't actually joined
+// yet), and nothing is faked upstream.
 func TestDetachedJoinQueuesIntoWantedAndNotices(t *testing.T) {
 	wanted := irc.NewWantedChannels(nil)
 	b, addr := freshBouncerDetached(t, wanted, nil)
 	forwarded, mu := trackForwarded(b)
 
 	conn, r := authBouncerClient(t, addr)
-	// Drain the state-surfacing NOTICE the attach fired.
+	// Drain the state-surfacing message the attach fired (now also
+	// routes to *turborg as the audit-log copy alongside the channel
+	// broadcast).
 	_ = readUntilContains(r, conn, "Currently disconnected", time.Second)
 
 	writeLine(t, conn, "JOIN #private hunter2")
-	notice := readUntilContains(r, conn, "Queued JOIN", time.Second)
-	require.NotEmpty(t, notice, "JOIN during detached must produce a queued-NOTICE")
-	assert.Equal(t, "#private", noticeTarget(notice),
-		"queued NOTICE targets the channel that will be joined on reconnect")
-	assert.Contains(t, notice, "reconnected",
-		"queued NOTICE explains the channel is pending reconnect")
+	line := readUntilContains(r, conn, "Queued JOIN", time.Second)
+	require.NotEmpty(t, line, "JOIN during detached must produce a queued-action acknowledgement")
+	assert.Equal(t, "turborg", servicePrivmsgTarget(line),
+		"queued JOIN ack routes through *turborg, not the about-to-be-joined channel")
+	assert.Contains(t, line, "#private",
+		"queued ack must name the channel that will be joined on reconnect")
+	assert.Contains(t, line, "reconnected",
+		"queued ack explains the channel is pending reconnect")
 
 	entry, ok := wanted.Get("#private")
 	require.True(t, ok, "JOIN must populate the wanted-set during detached")
@@ -66,7 +72,10 @@ func TestDetachedJoinQueuesIntoWantedAndNotices(t *testing.T) {
 
 // TestDetachedPartDropsFromWantedAndNotices covers the PART-during-
 // detached path: the channel is removed from the wanted-set so the
-// supervisor doesn't silently rejoin it on next reconnect.
+// supervisor doesn't silently rejoin it on next reconnect. The
+// acknowledgement surfaces via *turborg — sending a "you removed #x"
+// message to #x itself is confusing UX since the user is REMOVING
+// the channel, not engaging with it.
 func TestDetachedPartDropsFromWantedAndNotices(t *testing.T) {
 	wanted := irc.NewWantedChannels([]string{"#a", "#b"})
 	b, addr := freshBouncerDetached(t, wanted, nil)
@@ -76,10 +85,13 @@ func TestDetachedPartDropsFromWantedAndNotices(t *testing.T) {
 	_ = readUntilContains(r, conn, "Currently disconnected", time.Second)
 
 	writeLine(t, conn, "PART #a")
-	notice := readUntilContains(r, conn, "Removed", time.Second)
-	require.NotEmpty(t, notice)
-	assert.Equal(t, "#a", noticeTarget(notice))
-	assert.Contains(t, notice, "auto-join list")
+	line := readUntilContains(r, conn, "Removed", time.Second)
+	require.NotEmpty(t, line)
+	assert.Equal(t, "turborg", servicePrivmsgTarget(line),
+		"PART ack routes through *turborg, not the parted channel")
+	assert.Contains(t, line, "#a",
+		"PART ack body must name the channel being removed")
+	assert.Contains(t, line, "auto-join list")
 
 	_, stillThere := wanted.Get("#a")
 	assert.False(t, stillThere, "#a must be removed from the wanted-set")
@@ -98,7 +110,8 @@ func TestDetachedPartDropsFromWantedAndNotices(t *testing.T) {
 // TestDetachedNickQueuesPreferredNickAndNotices covers the NICK-
 // during-detached path: the new nick is stored via the preferred-nick
 // hook so the supervisor's next register() picks it up, and the
-// client sees a "queued" NOTICE — never a fake NICK echo.
+// queued-action ack arrives via the *turborg service buffer — never
+// a fake NICK echo.
 func TestDetachedNickQueuesPreferredNickAndNotices(t *testing.T) {
 	var queued string
 	wanted := irc.NewWantedChannels(nil)
@@ -109,10 +122,12 @@ func TestDetachedNickQueuesPreferredNickAndNotices(t *testing.T) {
 	_ = readUntilContains(r, conn, "Currently disconnected", time.Second)
 
 	writeLine(t, conn, "NICK shinynewnick")
-	notice := readUntilContains(r, conn, "Nick change queued", time.Second)
-	require.NotEmpty(t, notice, "NICK during detached must produce a queued NOTICE")
-	assert.Contains(t, notice, "shinynewnick",
-		"queued NOTICE must echo the requested nick so the user knows what's pending")
+	line := readUntilContains(r, conn, "Nick change queued", time.Second)
+	require.NotEmpty(t, line, "NICK during detached must produce a queued ack")
+	assert.Equal(t, "turborg", servicePrivmsgTarget(line),
+		"NICK ack routes through *turborg")
+	assert.Contains(t, line, "shinynewnick",
+		"ack body must echo the requested nick so the user knows what's pending")
 	assert.Equal(t, "shinynewnick", queued,
 		"preferred-nick hook must receive the requested nick for next register()")
 
@@ -127,8 +142,8 @@ func TestDetachedNickQueuesPreferredNickAndNotices(t *testing.T) {
 
 // TestDetachedNickWithoutHookStillNotices covers the bouncer's
 // degraded mode: when no preferred-nick hook is wired (e.g. a
-// standalone-bouncer test), the NICK is still acknowledged with a
-// queued NOTICE so the client doesn't see silent acceptance.
+// standalone-bouncer test), the NICK is still acknowledged via
+// *turborg so the client doesn't see silent acceptance.
 func TestDetachedNickWithoutHookStillNotices(t *testing.T) {
 	wanted := irc.NewWantedChannels(nil)
 	_, addr := freshBouncerDetached(t, wanted, nil)
@@ -137,14 +152,17 @@ func TestDetachedNickWithoutHookStillNotices(t *testing.T) {
 	_ = readUntilContains(r, conn, "Currently disconnected", time.Second)
 
 	writeLine(t, conn, "NICK whatever")
-	notice := readUntilContains(r, conn, "Nick change queued", time.Second)
-	require.NotEmpty(t, notice)
+	line := readUntilContains(r, conn, "Nick change queued", time.Second)
+	require.NotEmpty(t, line)
+	assert.Equal(t, "turborg", servicePrivmsgTarget(line),
+		"NICK ack routes through *turborg even without the preferred-nick hook")
 }
 
 // TestDetachedRefusalForChannelOpCommands covers MODE / TOPIC / KICK /
-// NAMES during detached — the user gets a channel-targeted NOTICE
-// explaining the operation wasn't performed, and nothing flows
-// upstream.
+// NAMES during detached. These admin-style commands route through the
+// *turborg service buffer (no inline-with-attempt UX win that would
+// justify channel-targeting). The user typed somewhere; the rejection
+// appears in *turborg.
 func TestDetachedRefusalForChannelOpCommands(t *testing.T) {
 	cases := []struct {
 		name string
@@ -164,10 +182,10 @@ func TestDetachedRefusalForChannelOpCommands(t *testing.T) {
 			_ = readUntilContains(r, conn, "Currently disconnected", time.Second)
 
 			writeLine(t, conn, tc.line)
-			notice := readUntilContains(r, conn, "NOT performed", time.Second)
-			require.NotEmpty(t, notice, "%s must produce a NOT-performed NOTICE", tc.name)
-			assert.Equal(t, "#archlinux", noticeTarget(notice),
-				"%s rejection NOTICE must target the channel argument", tc.name)
+			line := readUntilContains(r, conn, "NOT performed", time.Second)
+			require.NotEmpty(t, line, "%s must produce a NOT-performed ack", tc.name)
+			assert.Equal(t, "turborg", servicePrivmsgTarget(line),
+				"%s rejection routes through *turborg, not the channel argument", tc.name)
 
 			mu.Lock()
 			defer mu.Unlock()

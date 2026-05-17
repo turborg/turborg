@@ -1193,9 +1193,14 @@ func (b *Bouncer) rejectForDetached(client *BouncerClient, msg Message) {
 }
 
 // handleDetachedJoin queues the channel(s) into the wanted-set so the
-// supervisor's next reconnect rejoins them, then NOTICEs the client
-// per channel with what was queued. Channel keys from the JOIN line
-// are preserved.
+// supervisor's next reconnect rejoins them, then surfaces one service-
+// buffer line per channel with what was queued. Channel keys from the
+// JOIN line are preserved.
+//
+// Routes through *turborg rather than addressing the about-to-be-
+// joined channel directly: opening a #foo tab before the JOIN has
+// actually succeeded is the same fake-tab UX bug that the policy-
+// denial routing already rejects.
 func (b *Bouncer) handleDetachedJoin(client *BouncerClient, msg Message) {
 	b.mu.Lock()
 	wanted := b.wanted
@@ -1210,13 +1215,16 @@ func (b *Bouncer) handleDetachedJoin(client *BouncerClient, msg Message) {
 		}
 		body := "Queued JOIN " + ch + " — channel will be available when reconnected to " +
 			b.network() + "."
-		_ = client.sendLine(":turborg-bouncer NOTICE " + ch + " :" + body)
+		b.notifyService(client, body)
 	}
 }
 
 // handleDetachedPart removes the channel(s) from the wanted-set so
 // the supervisor doesn't silently rejoin them on the next reconnect,
-// then NOTICEs the client per channel.
+// then surfaces one service-buffer line per channel. Routes through
+// *turborg rather than the parted channel itself — a "you removed
+// this" message addressed to the channel the user is REMOVING is
+// confusing UX.
 func (b *Bouncer) handleDetachedPart(client *BouncerClient, msg Message) {
 	b.mu.Lock()
 	wanted := b.wanted
@@ -1229,14 +1237,14 @@ func (b *Bouncer) handleDetachedPart(client *BouncerClient, msg Message) {
 			wanted.Remove(ch)
 		}
 		body := "Removed " + ch + " from the auto-join list. Will not rejoin on next reconnect."
-		_ = client.sendLine(":turborg-bouncer NOTICE " + ch + " :" + body)
+		b.notifyService(client, body)
 	}
 }
 
 // handleDetachedNick queues the requested nick for the next
 // registration via the connector's preferred-nick hook (when wired)
-// and NOTICEs the client. Doesn't fake a NICK echo — that would lie
-// about the bot's identity during the outage.
+// and surfaces a service-buffer line. Doesn't fake a NICK echo —
+// that would lie about the bot's identity during the outage.
 func (b *Bouncer) handleDetachedNick(client *BouncerClient, msg Message) {
 	newNick := msg.Trailing
 	if newNick == "" && len(msg.Params) > 0 {
@@ -1254,30 +1262,35 @@ func (b *Bouncer) handleDetachedNick(client *BouncerClient, msg Message) {
 	}
 	body := "Nick change queued — " + newNick + " will be used on next reconnect to " +
 		b.network() + "."
-	_ = client.sendLine(":turborg-bouncer NOTICE " + b.statusTarget() + " :" + body)
+	b.notifyService(client, body)
 }
 
 // handleDetachedRefusal handles every forwardable command that can't
 // be queued and replayed: PRIVMSG / NOTICE / MODE / TOPIC / KICK /
-// NAMES. PRIVMSG and NOTICE rejections target the channel/nick the
-// message was destined for (the buffer where the user typed). Others
-// target the status placeholder.
+// NAMES.
+//
+// PRIVMSG and NOTICE keep their channel-targeted NOTICE — same logic
+// as the rate-limited-PRIVMSG path: the user typed in that channel
+// buffer, so the rejection lands inline with the attempt where
+// they're already looking.
+//
+// MODE / TOPIC / KICK / NAMES route through *turborg. They're admin-
+// style commands with no inline-with-attempt UX win, and grouping
+// them in the service buffer keeps real channel logs clean.
 func (b *Bouncer) handleDetachedRefusal(client *BouncerClient, msg Message) {
 	state := b.upstreamState()
 	body := b.detachedRejectBody(state, msg.Command)
-	target := b.statusTarget()
 	switch msg.Command {
 	case CmdPrivmsg, CmdNotice:
+		target := b.statusTarget()
 		if len(msg.Params) > 0 {
 			target = msg.Params[0]
 		}
-	case CmdMode, CmdTopic, CmdKick, CmdNames:
-		if len(msg.Params) > 0 {
-			target = msg.Params[0]
+		if err := client.sendLine(":turborg-bouncer NOTICE " + target + " :" + body); err != nil {
+			b.log.Debug("bouncer detached reject", "err", err)
 		}
-	}
-	if err := client.sendLine(":turborg-bouncer NOTICE " + target + " :" + body); err != nil {
-		b.log.Debug("bouncer detached reject", "err", err)
+	default:
+		b.notifyService(client, body)
 	}
 }
 
@@ -1397,19 +1410,58 @@ func (b *Bouncer) onUpstreamWarn(serverReason string, dwell time.Duration) {
 }
 
 // broadcastChannelNotice fans the same service NOTICE into every
-// joined channel × every attached client. The double iteration is the
-// shape of "tell everyone who's watching every channel they're
+// joined channel × every attached client. The double iteration is
+// the shape of "tell everyone who's watching every channel they're
 // watching it." Single-attached-client clients get one NOTICE per
-// channel; multi-attached deployments get the same NOTICE per channel
-// per client.
+// channel; multi-attached deployments get the same NOTICE per
+// channel per client.
+//
+// Two additional surfaces:
+//   - When no channels are joined (fresh container, all-PART'd
+//     session), the channel-broadcast loop is a silent no-op and the
+//     attached client would miss the state change entirely. Fall back
+//     to a service-buffer message per attached client so the
+//     disconnect/reconnect/banned signal still reaches them.
+//   - Whether or not channels were broadcast to, also write one copy
+//     to each attached client's service buffer. That gives users a
+//     chronological log of state transitions in *turborg ("09:15
+//     disconnected; 09:16 reconnected") — useful for "did I miss
+//     anything?" debugging without scrolling through channel buffers.
 func (b *Bouncer) broadcastChannelNotice(body string) {
-	if body == "" || b.state == nil {
+	if body == "" {
 		return
 	}
-	channels := b.state.JoinedChannels()
+	channels := []*ChannelInfo(nil)
+	if b.state != nil {
+		channels = b.state.JoinedChannels()
+	}
 	for _, info := range channels {
 		line := ":turborg-bouncer NOTICE " + info.Name + " :" + body
 		b.Broadcast(line, nil)
+	}
+	b.broadcastServiceAudit(body)
+}
+
+// broadcastServiceAudit writes one *turborg service-buffer line per
+// attached authenticated client. Used by the upstream-state
+// broadcaster as the always-reaches-the-user fallback (when no
+// channels are joined) and as an audit-log copy alongside the
+// channel broadcast.
+func (b *Bouncer) broadcastServiceAudit(body string) {
+	if body == "" {
+		return
+	}
+	b.mu.Lock()
+	clients := make([]*BouncerClient, 0, len(b.clients))
+	for c := range b.clients {
+		clients = append(clients, c)
+	}
+	b.mu.Unlock()
+	for _, c := range clients {
+		if !c.Authenticated() {
+			continue
+		}
+		b.notifyService(c, body)
 	}
 }
 

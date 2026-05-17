@@ -180,6 +180,70 @@ func TestBouncerBroadcastsOnTransition(t *testing.T) {
 	assert.True(t, sawB, "#b buffer must receive the transition NOTICE")
 }
 
+// TestBouncerStateBroadcastFallsBackToServiceWhenNoChannels covers
+// the zero-channel case: an attached client in no channels still
+// needs to learn about upstream state transitions (disconnect,
+// reconnect, banned, paused). Without the *turborg service-buffer
+// fallback the channel-broadcast loop is a silent no-op and the
+// user misses the signal entirely.
+func TestBouncerStateBroadcastFallsBackToServiceWhenNoChannels(t *testing.T) {
+	_, addr, machine := freshBouncerWithState(t, "Libera Chat")
+	machine.Transition(irc.UpstreamStateRegistered)
+
+	conn, r := authBouncerClient(t, addr)
+	// sendWelcome runs async on the bouncer's handleClient goroutine —
+	// drain it before transitioning so surfaceStateToClient can't race
+	// the upcoming Transition and inject a NOTICE * with the same
+	// "Currently disconnected" body that would confuse the read scan.
+	drainBuffered(t, conn, r)
+	machine.Transition(irc.UpstreamStateDisconnectedTransient,
+		irc.WithServerReason("EOF"))
+
+	// Service buffer must carry the state-change body even with zero
+	// joined channels — that's the audit-and-fallback path.
+	line := readUntilContains(r, conn, "Currently disconnected", time.Second)
+	require.NotEmpty(t, line,
+		"zero-channel state transition must reach the client via *turborg")
+	assert.Equal(t, "turborg", servicePrivmsgTarget(line),
+		"zero-channel broadcast routes through *turborg, not the channel loop")
+}
+
+// TestBouncerStateBroadcastAuditCopyAlongsideChannelBroadcast covers
+// the audit-log copy: when channels ARE joined the broadcast goes to
+// each, but the user also gets one *turborg copy so opening the
+// service tab reads as a chronological log of transitions.
+func TestBouncerStateBroadcastAuditCopyAlongsideChannelBroadcast(t *testing.T) {
+	_, addr, machine := freshBouncerWithState(t, "Libera Chat", "#a")
+	machine.Transition(irc.UpstreamStateRegistered)
+
+	conn, r := authBouncerClient(t, addr)
+	drainBuffered(t, conn, r)
+	machine.Transition(irc.UpstreamStateDisconnectedTransient,
+		irc.WithServerReason("EOF"))
+
+	// Collect every line for a short window and confirm BOTH the
+	// channel NOTICE and the *turborg PRIVMSG arrive.
+	conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	var sawChannel, sawService bool
+	for {
+		l, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		if !strings.Contains(l, "Currently disconnected") {
+			continue
+		}
+		if noticeTarget(l) == "#a" {
+			sawChannel = true
+		}
+		if servicePrivmsgTarget(l) == "turborg" {
+			sawService = true
+		}
+	}
+	assert.True(t, sawChannel, "channel #a must receive the broadcast NOTICE")
+	assert.True(t, sawService, "*turborg must receive the audit-log PRIVMSG copy")
+}
+
 // TestBouncerBroadcastsReconnectedOnReturnToRegistered checks the
 // recovery message: when the supervisor brings upstream back online,
 // every joined channel gets a "back live" broadcast so the user
