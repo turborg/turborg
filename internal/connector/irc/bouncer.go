@@ -974,12 +974,26 @@ func (b *Bouncer) allowByPolicy(client *BouncerClient, msg Message) bool {
 		currentChannels = b.state.Count()
 	}
 	if allow, reason := limits.AllowCommand(msg.Command, currentChannels); !allow {
-		// AllowCommand currently gates NICK / USER / JOIN — none of
-		// which carry channel context the user has open in their
-		// client (a JOIN over-cap means the user never made it into
-		// the target channel). Route the NOTICE to the bot's nick so
-		// it lands in the client's server status tab.
-		b.notifyPolicyDenial(client, b.statusTarget(), reason)
+		// Per-command NOTICE routing — the goal is to put the
+		// rejection in the buffer the user was looking at when they
+		// typed the command, not the server status tab they aren't.
+		//
+		//   - JOIN denial: the user typed /join #foo from somewhere
+		//     (an existing channel, the server tab, wherever). The
+		//     target channel is where their attention will land once
+		//     their client opens that tab on receiving any NOTICE
+		//     addressed to it. Route the NOTICE to msg.Params[0]
+		//     (first of any comma-list) so the JOIN-attempt tab
+		//     surfaces the rejection inline.
+		//
+		//   - NICK denial: nick changes are global, with no channel
+		//     context. Broadcast the NOTICE to every joined channel
+		//     so the user sees it wherever they happen to be looking.
+		//     Fall back to statusTarget when no channels are joined.
+		//
+		//   - USER denial: this only fires during pre-registration
+		//     /USER which has no channel context. Keep statusTarget.
+		b.notifyPolicyDenialForCommand(client, msg, reason)
 		b.log.Info("cap_hit",
 			"surface", "bouncer",
 			"kind", CapHitKind(msg.Command),
@@ -1046,6 +1060,68 @@ func (b *Bouncer) notifyPolicyDenial(client *BouncerClient, target, reason strin
 	if err := client.sendLine(line); err != nil {
 		b.log.Debug("bouncer policy notice", "err", err)
 	}
+}
+
+// notifyPolicyDenialForCommand routes a policy-denial NOTICE per the
+// command-specific rules documented in allowByPolicy. JOIN denials
+// target the attempted channel (first of any comma-list); NICK
+// denials broadcast across every joined channel so the user sees them
+// wherever they're looking; USER and anything else fall back to the
+// status placeholder.
+func (b *Bouncer) notifyPolicyDenialForCommand(client *BouncerClient, msg Message, baseReason string) {
+	switch msg.Command {
+	case CmdJoin:
+		target := firstJoinTarget(msg)
+		if target == "" {
+			b.notifyPolicyDenial(client, b.statusTarget(), baseReason)
+			return
+		}
+		body := "Channel cap reached — NOT joined " + target +
+			". /part another channel first, or raise the operator policy limit."
+		b.notifyPolicyDenial(client, target, body)
+	case CmdNick:
+		newNick := msg.Trailing
+		if newNick == "" && len(msg.Params) > 0 {
+			newNick = msg.Params[0]
+		}
+		newNick = strings.TrimSpace(newNick)
+		body := "Nick change rejected — locked by operator policy."
+		if newNick != "" {
+			body = "Nick change to " + newNick + " rejected — locked by operator policy."
+		}
+		channels := []*ChannelInfo(nil)
+		if b.state != nil {
+			channels = b.state.JoinedChannels()
+		}
+		if len(channels) == 0 {
+			b.notifyPolicyDenial(client, b.statusTarget(), body)
+			return
+		}
+		for _, info := range channels {
+			b.notifyPolicyDenial(client, info.Name, body)
+		}
+	default:
+		b.notifyPolicyDenial(client, b.statusTarget(), baseReason)
+	}
+}
+
+// firstJoinTarget pulls the first channel name out of a JOIN line —
+// handles both the comma-list form (`JOIN #a,#b key1,key2`) and the
+// single-target form. Returns "" when the message carries no channel
+// param at all.
+func firstJoinTarget(msg Message) string {
+	target := ""
+	if len(msg.Params) > 0 {
+		target = msg.Params[0]
+	}
+	if target == "" {
+		target = msg.Trailing
+	}
+	channels := splitAndTrim(target, ",")
+	if len(channels) == 0 {
+		return ""
+	}
+	return channels[0]
 }
 
 // rejectForDetached is the per-command handler the upstream-state

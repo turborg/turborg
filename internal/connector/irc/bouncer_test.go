@@ -1039,7 +1039,10 @@ func TestBouncerMaxChannelsRejectsJoinAtCap(t *testing.T) {
 
 	notice := readUntilContains(r, conn, "NOTICE", 500*time.Millisecond)
 	assert.NotEmpty(t, notice, "client must receive a NOTICE when JOIN exceeds the channel cap")
-	assert.Contains(t, notice, "5")
+	assert.Contains(t, notice, "Channel cap reached",
+		"new wording must surface the cap-reached intent")
+	assert.Contains(t, notice, "#f",
+		"NOTICE body must name the channel the user tried to join")
 
 	mu.Lock()
 	defer mu.Unlock()

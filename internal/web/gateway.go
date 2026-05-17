@@ -475,12 +475,19 @@ func (g *Gateway) allowByPolicy(ircCmd string) (allow bool, reason string, kind 
 // line is the canonical signal a sidecar log-watcher (or any future
 // metrics scraper) consumes — never log the user-facing reason from any
 // other path, so cap_hit stays the single source of truth.
-func (g *Gateway) denyAction(ctx context.Context, c *client, sourceOp, kind, reason string) {
+//
+// sourceTarget carries the user's intent so the test UI (and any
+// downstream consumer) can render the rejection in the originating
+// context: the channel they were trying to join, the new nick they
+// were trying to change to. Empty when the source op has no inherent
+// target (e.g. a malformed frame).
+func (g *Gateway) denyAction(ctx context.Context, c *client, sourceOp, sourceTarget, kind, reason string) {
 	g.sendTo(ctx, c, map[string]any{
-		"op":        "policy_denied",
-		"source_op": sourceOp,
-		"kind":      kind,
-		"reason":    reason,
+		"op":            "policy_denied",
+		"source_op":     sourceOp,
+		"source_target": sourceTarget,
+		"kind":          kind,
+		"reason":        reason,
 	})
 	g.log.Info("cap_hit", "surface", "ws_gateway", "kind", kind, "source_op", sourceOp)
 }
@@ -589,7 +596,7 @@ func (g *Gateway) dispatchInbound(ctx context.Context, c *client, p map[string]a
 	case "join":
 		if ch, _ := p["channel"].(string); ch != "" {
 			if allow, reason, kind := g.allowByPolicy(irc.CmdJoin); !allow {
-				g.denyAction(ctx, c, op, kind, reason)
+				g.denyAction(ctx, c, op, ch, kind, reason)
 				return
 			}
 			_ = g.bridge.SendRaw(irc.CmdJoin + " " + ch)
@@ -601,7 +608,7 @@ func (g *Gateway) dispatchInbound(ctx context.Context, c *client, p map[string]a
 	case "nick":
 		if n, _ := p["nick"].(string); n != "" {
 			if allow, reason, kind := g.allowByPolicy(irc.CmdNick); !allow {
-				g.denyAction(ctx, c, op, kind, reason)
+				g.denyAction(ctx, c, op, n, kind, reason)
 				return
 			}
 			_ = g.bridge.SendRaw(irc.CmdNick + " " + n)

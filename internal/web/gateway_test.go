@@ -1072,6 +1072,8 @@ func TestInboundNickDeniedWhenLocked(t *testing.T) {
 	got := readJSON(t, conn)
 	assert.Equal(t, "policy_denied", got["op"])
 	assert.Equal(t, "nick", got["source_op"])
+	assert.Equal(t, "newnick", got["source_target"],
+		"policy_denied must echo the requested nick so the UI can render the rejection where the user typed it")
 	assert.Equal(t, "nick_locked", got["kind"])
 	assert.Contains(t, got["reason"].(string), "nick")
 
@@ -1098,6 +1100,9 @@ func TestInboundJoinDeniedAtChannelCap(t *testing.T) {
 	got := readJSON(t, conn)
 	assert.Equal(t, "policy_denied", got["op"])
 	assert.Equal(t, "channels", got["kind"])
+	assert.Equal(t, "join", got["source_op"])
+	assert.Equal(t, "#c", got["source_target"],
+		"policy_denied must echo the attempted channel so the UI can render the rejection in that tab")
 	assert.Contains(t, got["reason"].(string), "2")
 
 	assert.Empty(t, bridge.Sent(),
