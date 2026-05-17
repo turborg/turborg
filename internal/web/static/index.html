@@ -474,6 +474,14 @@
   let connectorStateMessage = "";
   let connectorStateSeverity = "info";
 
+  // pendingRequestContext records which tab a command was issued from
+  // so the gateway's policy_denied event can be rendered in that
+  // originating buffer. /nick has no implicit channel context to fall
+  // back on; /join has the attempted channel via source_target but we
+  // capture activeChannel too so we can also surface a hint in the
+  // tab the user typed from. Keyed by source_op (e.g. "join", "nick").
+  const pendingRequestContext = new Map();
+
   ensureServerTab();
   applyPaneWidths();
 
@@ -1087,6 +1095,7 @@
       case "join": {
         if (!arg) return systemHint("usage: /join #channel");
         const ch = arg.startsWith("#") || arg.startsWith("&") ? arg : "#" + arg;
+        pendingRequestContext.set("join", activeChannel || SERVER_TAB);
         send({ op: "join", channel: ch });
         return true;
       }
@@ -1099,6 +1108,7 @@
       }
       case "nick": {
         if (!arg) return systemHint("usage: /nick <newnick>");
+        pendingRequestContext.set("nick", activeChannel || SERVER_TAB);
         send({ op: "nick", nick: arg });
         return true;
       }
@@ -1302,7 +1312,15 @@
           if (activeChannel === ev.channel) updateComposeForChannel(ev.channel);
         }
         appendSystem(ev.channel, ev.nick, "joined");
-        if (ev.nick === myNick) selectChannel(ev.channel);
+        if (ev.nick === myNick) {
+          // Echo the success to the server tab so /notice + /ctcp +
+          // /join + /nick all surface their outcome in one consistent
+          // place. Clears any pending /join context since the action
+          // succeeded.
+          appendSystem(SERVER_TAB, "→ /join", `joined ${ev.channel}`);
+          pendingRequestContext.delete("join");
+          selectChannel(ev.channel);
+        }
         else if (ev.channel === activeChannel) renderMembers();
         break;
       }
@@ -1385,6 +1403,25 @@
           { rejected: true });
         break;
       }
+      case "policy_denied": {
+        // Operator policy refused a client-originated action. Route
+        // the rejection back to where the user typed it: for /join
+        // that's the attempted channel (source_target), for /nick
+        // that's the tab they typed from (recorded in
+        // pendingRequestContext at send-time, fallback to server tab).
+        const sourceOp = ev.source_op || "";
+        const target = sourceOp === "join"
+          ? ev.source_target || pendingRequestContext.get("join") || SERVER_TAB
+          : pendingRequestContext.get(sourceOp) || SERVER_TAB;
+        if (sourceOp === "join" && ev.source_target) {
+          ensureChannel(ev.source_target);
+        }
+        const reason = ev.reason || ev.message || "rejected by operator policy";
+        appendSystem(target, "→ /" + (sourceOp || "policy"), reason,
+          { rejected: true });
+        pendingRequestContext.delete(sourceOp);
+        break;
+      }
       case "nick":
         for (const ch of channels.values()) {
           if (ch.members?.has(ev.old)) {
@@ -1395,6 +1432,12 @@
         if (ev.old === myNick) {
           myNick = ev.new;
           nickEl.textContent = myNick;
+          // Server-tab echo for /nick success — same consistency rule
+          // as the /join handler above. Clears any pending /nick
+          // context so a later policy_denied (unlikely after success
+          // but defensive) doesn't render against this same tab.
+          appendSystem(SERVER_TAB, "→ /nick", `accepted: now ${ev.new}`);
+          pendingRequestContext.delete("nick");
         }
         for (const name of channels.keys()) {
           if (name === SERVER_TAB) continue;
