@@ -46,6 +46,17 @@ type Settings struct {
 	CTCPAutoReply     bool `env:"CTCP_AUTO_REPLY" envDefault:"true"`
 	CTCPMaxPerWindow  int  `env:"CTCP_MAX_PER_WINDOW" envDefault:"3"`
 	CTCPWindowSeconds int  `env:"CTCP_WINDOW_SECONDS" envDefault:"30"`
+
+	// UpstreamWarnAfter is the dwell time in disconnected_transient
+	// before the reconnect supervisor fires its operator-visible warn
+	// hook. 0 disables the warn step.
+	UpstreamWarnAfter time.Duration `env:"UPSTREAM_WARN_AFTER" envDefault:"10m"`
+
+	// UpstreamPauseAfter is the dwell time in disconnected_transient
+	// before the supervisor escalates to paused_idle and halts the
+	// reconnect loop, requiring operator intervention to resume. 0
+	// disables escalation (the supervisor retries indefinitely).
+	UpstreamPauseAfter time.Duration `env:"UPSTREAM_PAUSE_AFTER" envDefault:"1h"`
 }
 
 // LoadSettings parses the TURBORG_IRC_* environment into a Settings.

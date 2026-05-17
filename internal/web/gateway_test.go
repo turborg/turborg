@@ -25,6 +25,7 @@ import (
 type fakeBridge struct {
 	nick     string
 	state    *irc.ChannelState
+	machine  *irc.UpstreamStateMachine
 	sentMu   sync.Mutex
 	sent     []string
 	limits   irc.ClientLimits
@@ -32,12 +33,20 @@ type fakeBridge struct {
 }
 
 func newFakeBridge(nick string) *fakeBridge {
-	return &fakeBridge{nick: nick, state: irc.NewChannelState()}
+	m := irc.NewUpstreamStateMachine(nil)
+	// Default to registered so existing tests that don't care about
+	// state machine behavior still pass — they implicitly assume the
+	// gateway lets `say` ops through.
+	m.Transition(irc.UpstreamStateConnecting)
+	m.Transition(irc.UpstreamStateRegistering)
+	m.Transition(irc.UpstreamStateRegistered)
+	return &fakeBridge{nick: nick, state: irc.NewChannelState(), machine: m}
 }
-func (f *fakeBridge) CurrentNick() string            { return f.nick }
-func (f *fakeBridge) State() *irc.ChannelState       { return f.state }
-func (f *fakeBridge) ClientLimits() irc.ClientLimits { return f.limits }
-func (f *fakeBridge) OutboundThrottle() *irc.Throttle { return f.throttle }
+func (f *fakeBridge) CurrentNick() string                 { return f.nick }
+func (f *fakeBridge) State() *irc.ChannelState            { return f.state }
+func (f *fakeBridge) ClientLimits() irc.ClientLimits      { return f.limits }
+func (f *fakeBridge) OutboundThrottle() *irc.Throttle     { return f.throttle }
+func (f *fakeBridge) UpstreamState() *irc.UpstreamStateMachine { return f.machine }
 func (f *fakeBridge) SendRaw(line string) error {
 	f.sentMu.Lock()
 	defer f.sentMu.Unlock()
@@ -53,13 +62,17 @@ func (f *fakeBridge) Sent() []string {
 }
 
 type fakeSender struct {
-	mu   sync.Mutex
-	sent []*agent.OutboundEnvelope
+	mu      sync.Mutex
+	sent    []*agent.OutboundEnvelope
+	sendErr error // non-nil = every Send call returns this
 }
 
 func (s *fakeSender) Send(env *agent.OutboundEnvelope) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.sendErr != nil {
+		return s.sendErr
+	}
 	s.sent = append(s.sent, env)
 	return nil
 }
@@ -333,9 +346,9 @@ func TestEveryEventBusHandlerBroadcastsAnOp(t *testing.T) {
 			"who_result",
 			func(t *testing.T, got map[string]any) { assert.Equal(t, "#x", got["target"]) },
 		},
-		{"JOIN_FAILED → join_failed",
+		{"JOIN_FAILED → channel.rejoin_failed",
 			agent.Event{Type: agent.EventJoinFailed, Fields: map[string]any{"channel": "#x", "code": "474", "reason": "banned"}},
-			"join_failed",
+			"channel.rejoin_failed",
 			func(t *testing.T, got map[string]any) { assert.Equal(t, "banned", got["reason"]) },
 		},
 		{"MESSAGE_SENT → message",
@@ -1059,6 +1072,8 @@ func TestInboundNickDeniedWhenLocked(t *testing.T) {
 	got := readJSON(t, conn)
 	assert.Equal(t, "policy_denied", got["op"])
 	assert.Equal(t, "nick", got["source_op"])
+	assert.Equal(t, "newnick", got["source_target"],
+		"policy_denied must echo the requested nick so the UI can render the rejection where the user typed it")
 	assert.Equal(t, "nick_locked", got["kind"])
 	assert.Contains(t, got["reason"].(string), "nick")
 
@@ -1085,6 +1100,9 @@ func TestInboundJoinDeniedAtChannelCap(t *testing.T) {
 	got := readJSON(t, conn)
 	assert.Equal(t, "policy_denied", got["op"])
 	assert.Equal(t, "channels", got["kind"])
+	assert.Equal(t, "join", got["source_op"])
+	assert.Equal(t, "#c", got["source_target"],
+		"policy_denied must echo the attempted channel so the UI can render the rejection in that tab")
 	assert.Contains(t, got["reason"].(string), "2")
 
 	assert.Empty(t, bridge.Sent(),

@@ -300,6 +300,19 @@
   @media (min-width: 761px) {
     #userbar .mobile-only { display: none; }
   }
+  /* Per-connector upstream state banner — surfaces connector.state_changed
+     events from the gateway so the user sees when their bot has lost
+     upstream connectivity, is reconnecting, or has been kicked into a
+     terminal state (banned, auth-failed, paused). */
+  .connector-banner { display: block; padding: 6px 14px; font-size: 12px;
+    line-height: 1.4; border-bottom: 1px solid var(--border);
+    background: var(--accent-soft); color: var(--fg); }
+  .connector-banner.warning { background: rgba(255,184,108,0.18); color: var(--warn); }
+  .connector-banner.error { background: rgba(255,126,126,0.18); color: var(--error); }
+  .connector-banner[hidden] { display: none; }
+  /* send_message.rejected marker rendered inline in the channel feed. */
+  .msg.rejected { border-left: 3px solid var(--error); padding-left: 8px;
+    color: var(--error); }
 </style>
 </head>
 <body>
@@ -352,6 +365,7 @@
   <aside id="channels"></aside>
   <div class="resizer" id="resizer-left" data-pane="left"></div>
   <main id="chat">
+    <div id="connectorBanner" class="connector-banner" hidden></div>
     <div id="topic"></div>
     <div id="messages"></div>
     <form id="compose" autocomplete="off">
@@ -452,6 +466,21 @@
   let reconnectAttempt = 0;
   let reconnectTimer = null;
   let everConnected = false;  // toggled true on first ws.onopen — gates auto-reconnect
+
+  // Per-connector upstream state from connector.state_changed events.
+  // Empty means we haven't received a state event yet (assumed live).
+  // Terminal states (severity=error) disable the send input.
+  let connectorState = "";
+  let connectorStateMessage = "";
+  let connectorStateSeverity = "info";
+
+  // pendingRequestContext records which tab a command was issued from
+  // so the gateway's policy_denied event can be rendered in that
+  // originating buffer. /nick has no implicit channel context to fall
+  // back on; /join has the attempted channel via source_target but we
+  // capture activeChannel too so we can also surface a hint in the
+  // tab the user typed from. Keyed by source_op (e.g. "join", "nick").
+  const pendingRequestContext = new Map();
 
   ensureServerTab();
   applyPaneWidths();
@@ -1066,6 +1095,7 @@
       case "join": {
         if (!arg) return systemHint("usage: /join #channel");
         const ch = arg.startsWith("#") || arg.startsWith("&") ? arg : "#" + arg;
+        pendingRequestContext.set("join", activeChannel || SERVER_TAB);
         send({ op: "join", channel: ch });
         return true;
       }
@@ -1078,6 +1108,7 @@
       }
       case "nick": {
         if (!arg) return systemHint("usage: /nick <newnick>");
+        pendingRequestContext.set("nick", activeChannel || SERVER_TAB);
         send({ op: "nick", nick: arg });
         return true;
       }
@@ -1281,7 +1312,15 @@
           if (activeChannel === ev.channel) updateComposeForChannel(ev.channel);
         }
         appendSystem(ev.channel, ev.nick, "joined");
-        if (ev.nick === myNick) selectChannel(ev.channel);
+        if (ev.nick === myNick) {
+          // Echo the success to the server tab so /notice + /ctcp +
+          // /join + /nick all surface their outcome in one consistent
+          // place. Clears any pending /join context since the action
+          // succeeded.
+          appendSystem(SERVER_TAB, "→ /join", `joined ${ev.channel}`);
+          pendingRequestContext.delete("join");
+          selectChannel(ev.channel);
+        }
         else if (ev.channel === activeChannel) renderMembers();
         break;
       }
@@ -1318,7 +1357,7 @@
         }
         break;
       }
-      case "join_failed": {
+      case "channel.rejoin_failed": {
         // Server rejected our JOIN. Open a tab with the error so the
         // user sees what happened instead of a silent no-op.
         const ch = ensureChannel(ev.channel);
@@ -1339,6 +1378,50 @@
         if (activeChannel === ev.channel) updateComposeForChannel(ev.channel);
         break;
       }
+      case "connector.state_changed":
+        // Per-connector upstream state surfacing. Banner severity tracks
+        // recoverable (warning) vs terminal (error) so the user can tell
+        // "wait for reconnect" from "manual intervention required".
+        connectorState = ev.state || "";
+        connectorStateMessage = ev.message || "";
+        connectorStateSeverity = ev.severity || "info";
+        applyConnectorBanner();
+        if (ev.message) {
+          appendServer(connectorStateSeverity || "info",
+            `connector → ${ev.state}: ${ev.message}`);
+        }
+        break;
+      case "send_message.rejected": {
+        // Gateway refused a `say` op — either state wasn't registered
+        // or the upstream write failed mid-flight. Render an inline
+        // system message in the target channel that echoes the body
+        // we tried to send so the user can copy + retry.
+        const target = ev.target || activeChannel;
+        const body = ev.body ? `"${ev.body}"` : "(empty)";
+        const reason = ev.message || ev.reason || "not delivered";
+        appendSystem(target, "*", `message NOT sent — ${reason} • ${body}`,
+          { rejected: true });
+        break;
+      }
+      case "policy_denied": {
+        // Operator policy refused a client-originated action. Route
+        // the rejection back to where the user typed it: for /join
+        // that's the attempted channel (source_target), for /nick
+        // that's the tab they typed from (recorded in
+        // pendingRequestContext at send-time, fallback to server tab).
+        const sourceOp = ev.source_op || "";
+        const target = sourceOp === "join"
+          ? ev.source_target || pendingRequestContext.get("join") || SERVER_TAB
+          : pendingRequestContext.get(sourceOp) || SERVER_TAB;
+        if (sourceOp === "join" && ev.source_target) {
+          ensureChannel(ev.source_target);
+        }
+        const reason = ev.reason || ev.message || "rejected by operator policy";
+        appendSystem(target, "→ /" + (sourceOp || "policy"), reason,
+          { rejected: true });
+        pendingRequestContext.delete(sourceOp);
+        break;
+      }
       case "nick":
         for (const ch of channels.values()) {
           if (ch.members?.has(ev.old)) {
@@ -1349,6 +1432,12 @@
         if (ev.old === myNick) {
           myNick = ev.new;
           nickEl.textContent = myNick;
+          // Server-tab echo for /nick success — same consistency rule
+          // as the /join handler above. Clears any pending /nick
+          // context so a later policy_denied (unlikely after success
+          // but defensive) doesn't render against this same tab.
+          appendSystem(SERVER_TAB, "→ /nick", `accepted: now ${ev.new}`);
+          pendingRequestContext.delete("nick");
         }
         for (const name of channels.keys()) {
           if (name === SERVER_TAB) continue;
@@ -1608,8 +1697,38 @@
     }
   }
 
-  function appendSystem(name, nick, what) {
-    appendMessage(name, { ts: Date.now() / 1000, nick, text: what, system: true });
+  function appendSystem(name, nick, what, opts) {
+    appendMessage(name, {
+      ts: Date.now() / 1000,
+      nick,
+      text: what,
+      system: true,
+      rejected: !!(opts && opts.rejected),
+    });
+  }
+
+  // applyConnectorBanner reflects connectorState* into the chat banner +
+  // recomputes whether the send input should be disabled. Called from
+  // the connector.state_changed handler and from selectChannel so the
+  // input stays consistent as the active channel changes.
+  function applyConnectorBanner() {
+    const banner = $("connectorBanner");
+    if (!banner) return;
+    if (!connectorStateMessage) {
+      banner.hidden = true;
+      banner.className = "connector-banner";
+      banner.textContent = "";
+    } else {
+      banner.hidden = false;
+      banner.className = "connector-banner " + (connectorStateSeverity || "info");
+      banner.textContent = connectorStateMessage;
+    }
+    if (connectorStateSeverity === "error") {
+      inputEl.disabled = true;
+    } else if (ws && ws.readyState === WebSocket.OPEN &&
+               activeChannel && activeChannel !== SERVER_TAB) {
+      inputEl.disabled = false;
+    }
   }
 
   function appendServer(kind, text, ts) {
@@ -1790,7 +1909,8 @@
       + (msg.system ? " system" : "")
       + (msg.help ? " help" : "")
       + (msg.server ? " server " + (msg.kind || "") : "")
-      + (msg.mention ? " mention" : "");
+      + (msg.mention ? " mention" : "")
+      + (msg.rejected ? " rejected" : "");
     const ts = new Date((msg.ts || 0) * 1000)
       .toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     let nickHtml = msg.system
@@ -1866,6 +1986,10 @@
         ? "(server tab — only / commands here)"
         : "message — type / for commands…";
     }
+    // Terminal connector state (banned / auth-failed / paused) takes
+    // precedence over the per-channel input enable — surface it via
+    // the banner's input-disable rule.
+    if (connectorStateSeverity === "error") inputEl.disabled = true;
   }
 
   function selectChannel(name) {

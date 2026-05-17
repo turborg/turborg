@@ -980,3 +980,237 @@ func TestRecordForReplayBoundsRing(t *testing.T) {
 	b.logMu.Unlock()
 	assert.Equal(t, channelLogCap, got, "ring should cap at channelLogCap")
 }
+
+func TestWatchdogPollInterval(t *testing.T) {
+	cases := []struct {
+		name        string
+		warn, pause time.Duration
+		want        time.Duration
+	}{
+		{"both zero falls back to 1s default", 0, 0, time.Second},
+		{"warn only, picks smaller target", 4 * time.Second, 0, time.Second},
+		{"pause only, picks smaller target", 0, 4 * time.Second, time.Second},
+		{"pause smaller than warn wins", time.Minute, 4 * time.Second, time.Second},
+		{"warn smaller than pause wins", 4 * time.Second, time.Minute, time.Second},
+		{"floor at 10ms for tiny targets", 20 * time.Millisecond, 0, 10 * time.Millisecond},
+		{"clamped to 1s ceiling for hour-long", time.Hour, time.Hour, time.Second},
+		{"derived as quarter of target", 200 * time.Millisecond, 0, 50 * time.Millisecond},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, watchdogPollInterval(tc.warn, tc.pause))
+		})
+	}
+}
+
+func TestBouncerWarnHookBroadcastsStrongerNotice(t *testing.T) {
+	machine := NewUpstreamStateMachine(nil)
+	state := NewChannelState()
+	state.OnSelfJoin("#a")
+
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	b.AttachState(state, "turborg", "ident", "host")
+	b.AttachUpstreamState(machine, "Libera Chat")
+	b.AttachUpstream(func(string) error { return nil })
+
+	require.NoError(t, b.Start(context.Background()))
+	t.Cleanup(func() { _ = b.Stop() })
+
+	addr := b.Addr()
+	conn, err := net.DialTimeout("tcp", addr, time.Second)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	r := bufio.NewReader(conn)
+	_, _ = r.ReadString('\n')
+	_, err = conn.Write([]byte("PASS p\r\n"))
+	require.NoError(t, err)
+	for {
+		conn.SetReadDeadline(time.Now().Add(time.Second))
+		line, err := r.ReadString('\n')
+		if err != nil || strings.Contains(line, " 001 ") {
+			break
+		}
+	}
+
+	// Simulate the supervisor's escalation watchdog firing — unexported
+	// method, so this test lives next to the implementation rather than
+	// in the external _test package.
+	b.onUpstreamWarn("Ping timeout: 240 seconds", 11*time.Minute)
+
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	var got string
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		if strings.Contains(line, "still retrying") {
+			got = line
+			break
+		}
+	}
+	require.NotEmpty(t, got, "warn hook must broadcast a stronger NOTICE")
+	assert.Contains(t, got, "#a")
+	assert.Contains(t, got, "11m")
+	assert.Contains(t, got, "Ping timeout: 240 seconds")
+}
+
+func TestParseJoinLine(t *testing.T) {
+	cases := []struct {
+		name     string
+		params   []string
+		trailing string
+		channels []string
+		keys     []string
+	}{
+		{
+			name:     "single channel no key",
+			params:   []string{"#a"},
+			channels: []string{"#a"},
+			keys:     []string{""},
+		},
+		{
+			name:     "single channel with key",
+			params:   []string{"#a", "secret"},
+			channels: []string{"#a"},
+			keys:     []string{"secret"},
+		},
+		{
+			name:     "comma-list with paired keys",
+			params:   []string{"#a,#b,#c", "k1,k2,k3"},
+			channels: []string{"#a", "#b", "#c"},
+			keys:     []string{"k1", "k2", "k3"},
+		},
+		{
+			name:     "comma-list with fewer keys padded",
+			params:   []string{"#a,#b,#c", "k1"},
+			channels: []string{"#a", "#b", "#c"},
+			keys:     []string{"k1", "", ""},
+		},
+		{
+			name:     "comma-list with empty middle key preserved",
+			params:   []string{"#a,#b,#c", "k1,,k3"},
+			channels: []string{"#a", "#b", "#c"},
+			keys:     []string{"k1", "", "k3"},
+		},
+		{
+			name:     "channel in trailing slot",
+			params:   nil,
+			trailing: "#a",
+			channels: []string{"#a"},
+			keys:     []string{""},
+		},
+		{
+			name: "empty surfaces no channels",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotCh, gotKeys := parseJoinLine(tc.params, tc.trailing)
+			assert.Equal(t, tc.channels, gotCh)
+			assert.Equal(t, tc.keys, gotKeys)
+		})
+	}
+}
+
+func TestDetachedRejectBodyCoversEveryState(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	b.AttachUpstreamState(NewUpstreamStateMachine(nil), "Libera Chat")
+
+	cases := []struct {
+		state    UpstreamState
+		cmd      string
+		contains string
+	}{
+		{UpstreamStateDisconnectedTransient, CmdPrivmsg, "message NOT sent"},
+		{UpstreamStateDisconnectedTransient, CmdMode, "operation NOT performed"},
+		{UpstreamStateDisconnectedNickUnavailable, CmdPrivmsg, "Nickname unavailable"},
+		{UpstreamStateDisconnectedAuthFailed, CmdPrivmsg, "Authentication failed"},
+		{UpstreamStateDisconnectedBanned, CmdPrivmsg, "Banned from"},
+		{UpstreamStatePausedIdle, CmdPrivmsg, "Connector paused"},
+		{UpstreamStateStopped, CmdPrivmsg, "Connector stopped"},
+		{UpstreamStateIdle, CmdPrivmsg, "Not yet connected"},
+		{UpstreamStateConnecting, CmdPrivmsg, "Not yet connected"},
+		{UpstreamStateRegistering, CmdPrivmsg, "Not yet connected"},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.state)+"_"+tc.cmd, func(t *testing.T) {
+			body := b.detachedRejectBody(tc.state, tc.cmd)
+			assert.Contains(t, body, tc.contains)
+		})
+	}
+}
+
+func TestNotifyJoinFailureFallbackReason(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	// Empty channel = no-op (no panic).
+	assert.NotPanics(t, func() { b.NotifyJoinFailure("", "anything") })
+	// Empty reason falls back to a generic body; verify by capturing
+	// what gets broadcast (no clients attached so Broadcast just no-
+	// ops, but the helper still runs through its body construction).
+	assert.NotPanics(t, func() { b.NotifyJoinFailure("#x", "") })
+}
+
+func TestNotifyPolicyDenialEmptyTargetFallsBackToStar(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	// Test the helper directly with a stubbed client. The send is via
+	// the BouncerClient's sendLine which writes to conn; we use a
+	// disconnected pipe so the write returns an error and exercises
+	// the log-and-continue path. The test confirms the helper doesn't
+	// panic on either an empty target (falls back to "*") or a
+	// failing send.
+	srv, cli := net.Pipe()
+	_ = srv.Close()
+	bc := newBouncerClient(cli, slog.Default())
+	defer func() { _ = bc.close() }()
+	assert.NotPanics(t, func() {
+		b.notifyPolicyDenial(bc, "", "no target")
+		b.notifyPolicyDenial(bc, "*", "explicit star")
+		b.notifyPolicyDenial(bc, "#x", "channel target")
+	})
+}
+
+func TestHandleDetachedJoinEmptyParamsNoop(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+	b.AttachWantedChannels(NewWantedChannels(nil))
+	b.AttachUpstreamState(NewUpstreamStateMachine(nil), "Libera")
+
+	srv, cli := net.Pipe()
+	_ = srv.Close()
+	bc := newBouncerClient(cli, slog.Default())
+	defer func() { _ = bc.close() }()
+
+	// Empty JOIN — no channels parsed, must return without writing or
+	// touching the wanted-set.
+	assert.NotPanics(t, func() { b.handleDetachedJoin(bc, Message{Command: CmdJoin}) })
+}
+
+func TestHandleDetachedNickEmptyNoop(t *testing.T) {
+	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
+	require.NoError(t, err)
+
+	srv, cli := net.Pipe()
+	_ = srv.Close()
+	bc := newBouncerClient(cli, slog.Default())
+	defer func() { _ = bc.close() }()
+
+	// Empty NICK — no new nick to queue, must return without firing
+	// the preferred-nick hook.
+	called := false
+	b.AttachPreferredNickHook(func(string) { called = true })
+	b.handleDetachedNick(bc, Message{Command: CmdNick})
+	assert.False(t, called, "empty NICK must not fire the preferred-nick hook")
+}
+
+func TestStartListenErrorSurfaces(t *testing.T) {
+	// Pick a known-bad listen address to drive the listen-error branch.
+	b, err := NewBouncer("p", "0.0.0.0", -1, nil, nil)
+	require.NoError(t, err)
+	err = b.Start(context.Background())
+	require.Error(t, err, "negative port must surface a listen error")
+}
