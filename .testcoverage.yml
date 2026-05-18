@@ -48,6 +48,8 @@ override:
     threshold: 95
   - path: ^internal/runtime$
     threshold: 92
+  - path: ^internal/messagesink$
+    threshold: 95
 
 # cmd/turborg + internal/version + tests/fixtures contain only thin
 # wiring or test infrastructure. CI excludes them from the package

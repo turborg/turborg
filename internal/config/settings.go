@@ -152,6 +152,20 @@ type Settings struct {
 	// bound keeps a misconfigured value from making a dashboard
 	// view feel laggy.
 	StateWebhookDebounceMs int `env:"STATE_WEBHOOK_DEBOUNCE_MS" envDefault:"250"`
+
+	// MessageSinkURL is the endpoint the gateway POSTs durable
+	// message batches to. SaaS deployments point this at the
+	// sidecar's per-container /messages handler (the sidecar then
+	// forwards upstream to accounts-api). Empty = self-host: no
+	// durable mirror, the gateway's in-memory ring is still the
+	// only history (already replayed on (re)connect).
+	MessageSinkURL string `env:"MESSAGE_SINK_URL"`
+
+	// MessageSinkToken is sent as a bearer Authorization header on
+	// every message-sink POST. Mirrors StateWebhookToken — same
+	// per-container token reused, since both endpoints terminate at
+	// the same sidecar gating on the same ActivityTracker.
+	MessageSinkToken string `env:"MESSAGE_SINK_TOKEN"`
 }
 
 // Load parses TURBORG_* env vars into a Settings, normalizing the
