@@ -46,6 +46,15 @@ type Settings struct {
 	// the probe is also functionally disabled (no PINGs to time out).
 	PongTimeout time.Duration `env:"PONG_TIMEOUT" envDefault:"30s"`
 
+	// QuitMessage is the body sent on the IRC QUIT command during a
+	// graceful shutdown. Renders inside parentheses on every channel
+	// the agent was in (`* nick has quit (<reason>)`). Operators running
+	// a hosted turborg fleet usually set this to a service-identifying
+	// string so observers can tell which host / platform the bot was
+	// running on; the default keeps it project-attributed for self-
+	// hosted users.
+	QuitMessage string `env:"QUIT_MESSAGE" envDefault:"bye from turborg"`
+
 	BouncerPassword              string        `env:"BOUNCER_PASSWORD"`
 	BouncerHost                  string        `env:"BOUNCER_HOST" envDefault:"127.0.0.1"`
 	BouncerPort                  int           `env:"BOUNCER_PORT" envDefault:"31337"`
@@ -137,6 +146,17 @@ func (s *Settings) EffectiveUsername() string {
 		return s.Username
 	}
 	return s.Nick
+}
+
+// EffectiveQuitMessage returns QuitMessage if set, otherwise the
+// project-attributed fallback. Used so tests that build Settings by
+// hand (bypassing LoadSettings + envDefault) still emit a sensible
+// QUIT body instead of `QUIT :` with an empty trailing parameter.
+func (s *Settings) EffectiveQuitMessage() string {
+	if s.QuitMessage != "" {
+		return s.QuitMessage
+	}
+	return "bye from turborg"
 }
 
 // SASLEnabled is true when both credentials are present.
