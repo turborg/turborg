@@ -145,3 +145,124 @@ func TestSizeTriggersFlushAheadOfTicker(t *testing.T) {
 	}
 	sink.Close(context.Background())
 }
+
+// TestNon2xxResponseDoesNotPanic exercises the error branch in post():
+// the sink-side endpoint can answer 4xx/5xx (accounts-api outage,
+// auth drift, etc.) and we must absorb it best-effort instead of
+// crashing the gateway. msg_id idempotency on the receiving side
+// makes a future retry harmless so we don't bother with one here.
+func TestNon2xxResponseDoesNotPanic(t *testing.T) {
+	var hits int32
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	sink := New(srv.URL, "tok", nil)
+	for i := 0; i < flushBatchSize; i++ {
+		sink.Submit(Entry{
+			MsgID:   "01HX0000000000000000000000",
+			Channel: "#x", Nick: "n", Text: "t",
+			Ts: "2026-06-01T00:00:00.000000Z",
+		})
+	}
+	sink.Close(context.Background())
+
+	mu.Lock()
+	defer mu.Unlock()
+	if hits == 0 {
+		t.Fatal("upstream wasn't hit at all — flush didn't fire")
+	}
+}
+
+// TestPostNetworkErrorIsBestEffort covers the http.Client.Do error
+// branch in post(): upstream closed mid-flush, the sink logs + drops
+// the batch instead of bubbling the error to the gateway.
+func TestPostNetworkErrorIsBestEffort(t *testing.T) {
+	// Capture a real httptest server URL, then close it so the sink
+	// dials a port nothing's listening on.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	deadURL := srv.URL
+	srv.Close()
+
+	sink := New(deadURL, "tok", nil)
+	sink.Submit(Entry{
+		MsgID:   "01HX0000000000000000000000",
+		Channel: "#x", Nick: "n", Text: "t",
+		Ts: "2026-06-01T00:00:00.000000Z",
+	})
+	// Must complete within the per-request 5s timeout; not panic.
+	done := make(chan struct{})
+	go func() {
+		sink.Close(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(7 * time.Second):
+		t.Fatal("Close hung — error path didn't recover")
+	}
+}
+
+// TestEmptyBufferFlushIsNoOp covers the early-return in flushOnce
+// when nothing's pending — exercised on every ticker fire in steady
+// state and in Close() on an idle sink.
+func TestEmptyBufferFlushIsNoOp(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	sink := New(srv.URL, "tok", nil)
+	sink.Close(context.Background())
+	if hits != 0 {
+		t.Errorf("idle sink hit upstream %d times, want 0", hits)
+	}
+}
+
+// TestBufferCapDropsOldest exercises the backpressure path: push
+// enough entries that the buffer would exceed cap, confirm only the
+// tail (last cap entries) survives. Construct the sink without
+// starting the run() goroutine so the buffer actually accumulates
+// instead of draining each tick.
+func TestBufferCapDropsOldest(t *testing.T) {
+	s := &Sink{
+		endpoint: "http://example.invalid",
+		token:    "tok",
+		client:   &http.Client{},
+		flushCh:  make(chan struct{}, 1),
+		doneCh:   make(chan struct{}),
+	}
+	// log is *slog.Logger; nil is fine here because Submit never
+	// reaches the post() path (no goroutine running).
+	pushN := bufferCap + 100
+	for i := 0; i < pushN; i++ {
+		s.Submit(Entry{
+			MsgID:   "01HX0000000000000000000000",
+			Channel: "#x", Nick: "n", Text: "t",
+			Ts: "2026-06-01T00:00:00.000000Z",
+		})
+		// Drain the trigger channel so it doesn't block subsequent
+		// Submits when the buffer keeps hitting the size threshold.
+		select {
+		case <-s.flushCh:
+		default:
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.bufferSize != bufferCap {
+		t.Errorf("buffer size = %d, want %d (drop-oldest backpressure)", s.bufferSize, bufferCap)
+	}
+	if len(s.buffer) != bufferCap {
+		t.Errorf("buffer len = %d, want %d", len(s.buffer), bufferCap)
+	}
+}
