@@ -1633,7 +1633,7 @@ func (c *Connector) Stop(_ context.Context) error {
 	}
 	var err error
 	c.stopOnce.Do(func() {
-		_ = cli.WriteLine(CmdQuit + " :bye")
+		_ = cli.WriteLine(CmdQuit + " :" + c.settings.EffectiveQuitMessage())
 		err = cli.Close()
 		c.setClient(nil)
 		c.machine.Transition(UpstreamStateStopped)

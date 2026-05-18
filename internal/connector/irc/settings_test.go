@@ -20,6 +20,7 @@ func TestLoadSettingsFromEnv(t *testing.T) {
 	t.Setenv("TURBORG_IRC_PORT", "6667")
 	t.Setenv("TURBORG_IRC_READ_IDLE_TIMEOUT", "60s")
 	t.Setenv("TURBORG_IRC_CLIENT_PING_INTERVAL", "30s")
+	t.Setenv("TURBORG_IRC_QUIT_MESSAGE", "see ya")
 
 	s, err := irc.LoadSettings()
 	require.NoError(t, err)
@@ -36,6 +37,8 @@ func TestLoadSettingsFromEnv(t *testing.T) {
 	assert.Equal(t, 30*time.Second, s.ClientPingInterval)
 	assert.Equal(t, 30*time.Second, s.PongTimeout,
 		"PongTimeout defaults to 30s when no env override is supplied")
+	assert.Equal(t, "see ya", s.QuitMessage)
+	assert.Equal(t, "see ya", s.EffectiveQuitMessage())
 }
 
 func TestLoadSettingsDefaults(t *testing.T) {
@@ -54,6 +57,21 @@ func TestLoadSettingsDefaults(t *testing.T) {
 	assert.Equal(t, 120*time.Second, s.ClientPingInterval)
 	assert.True(t, s.CTCPAutoReply)
 	assert.Equal(t, 3, s.CTCPMaxPerWindow)
+	assert.Equal(t, "bye from turborg", s.QuitMessage,
+		"default QUIT body is project-attributed for self-hosted users")
+	assert.Equal(t, "bye from turborg", s.EffectiveQuitMessage())
+}
+
+func TestEffectiveQuitMessageFallsBackWhenEmpty(t *testing.T) {
+	// Tests that build Settings by hand (bypassing LoadSettings + envDefault)
+	// still get a sensible fallback rather than an empty trailing parameter.
+	s := &irc.Settings{}
+	assert.Equal(t, "bye from turborg", s.EffectiveQuitMessage())
+}
+
+func TestEffectiveQuitMessageOverride(t *testing.T) {
+	s := &irc.Settings{QuitMessage: "turborg @ www.xshellz.com"}
+	assert.Equal(t, "turborg @ www.xshellz.com", s.EffectiveQuitMessage())
 }
 
 func TestLoadSettingsRejectsBadInt(t *testing.T) {
