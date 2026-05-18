@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,11 @@ import (
 	"testing"
 	"time"
 )
+
+// quietLogger drops logs so error-path tests don't spam test output.
+func quietLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 // TestSinkWireShape pins the contract with sidecar:
 //   - POST to the configured endpoint, no path mutation
@@ -238,11 +244,10 @@ func TestBufferCapDropsOldest(t *testing.T) {
 		endpoint: "http://example.invalid",
 		token:    "tok",
 		client:   &http.Client{},
+		log:      quietLogger(),
 		flushCh:  make(chan struct{}, 1),
 		doneCh:   make(chan struct{}),
 	}
-	// log is *slog.Logger; nil is fine here because Submit never
-	// reaches the post() path (no goroutine running).
 	pushN := bufferCap + 100
 	for i := 0; i < pushN; i++ {
 		s.Submit(Entry{
@@ -264,5 +269,53 @@ func TestBufferCapDropsOldest(t *testing.T) {
 	}
 	if len(s.buffer) != bufferCap {
 		t.Errorf("buffer len = %d, want %d", len(s.buffer), bufferCap)
+	}
+}
+
+// TestSubmitOnNilSinkIsNoOp covers the typed-nil-receiver branch of
+// Sink.Submit. Lets the gateway hold a nil *Sink in its Options
+// without a guard at the call site.
+func TestSubmitOnNilSinkIsNoOp(t *testing.T) {
+	var s *Sink
+	s.Submit(Entry{
+		MsgID:   "01HX0000000000000000000000",
+		Channel: "#x", Nick: "n", Text: "t",
+		Ts: "2026-06-01T00:00:00.000000Z",
+	})
+}
+
+// TestCloseOnNilSinkIsNoOp covers the matching typed-nil branch in
+// Close. The runtime guards New() returning nil but a future caller
+// holding the result by interface could still hit this.
+func TestCloseOnNilSinkIsNoOp(t *testing.T) {
+	var s *Sink
+	s.Close(context.Background())
+}
+
+// TestRequestBuildErrorIsAbsorbed exercises post()'s
+// http.NewRequestWithContext error branch via a URL with control
+// characters that the stdlib rejects before any network I/O.
+func TestRequestBuildErrorIsAbsorbed(t *testing.T) {
+	s := &Sink{
+		endpoint: "http://example.com/\x7f\x00bad",
+		token:    "tok",
+		client:   &http.Client{},
+		log:      quietLogger(),
+		flushCh:  make(chan struct{}, 1),
+		doneCh:   make(chan struct{}),
+	}
+	// Push directly into the buffer and call flushOnce — bypasses the
+	// goroutine so the test stays deterministic.
+	s.buffer = []Entry{{
+		MsgID: "01HX0000000000000000000000",
+		Channel: "#x", Nick: "n", Text: "t",
+		Ts: "2026-06-01T00:00:00.000000Z",
+	}}
+	s.bufferSize = 1
+	s.flushOnce(context.Background())
+	// flushOnce always clears the buffer (the entries are "spent"
+	// either way — best-effort delivery).
+	if s.bufferSize != 0 {
+		t.Errorf("buffer size after flush = %d, want 0", s.bufferSize)
 	}
 }
