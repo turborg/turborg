@@ -300,12 +300,15 @@ func TestLoadIRCSettingsHappyPath(t *testing.T) {
 	t.Setenv("TURBORG_IRC_NICK", "turborg")
 	t.Setenv("TURBORG_IRC_READ_IDLE_TIMEOUT", "300s")
 	t.Setenv("TURBORG_IRC_CLIENT_PING_INTERVAL", "120s")
+	t.Setenv("TURBORG_IRC_PONG_TIMEOUT", "15s")
 
 	s, err := runtime.LoadIRCSettings()
 	require.NoError(t, err)
 	require.NotNil(t, s)
 	assert.Equal(t, "fake", s.Hostname)
 	assert.Equal(t, "turborg", s.Nick)
+	assert.Equal(t, 15*time.Second, s.PongTimeout,
+		"TURBORG_IRC_PONG_TIMEOUT must be parsed off the env")
 }
 
 func TestLoadIRCSettingsMissingRequiredFields(t *testing.T) {

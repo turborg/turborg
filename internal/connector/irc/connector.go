@@ -10,12 +10,26 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/version"
 	"golang.org/x/sync/errgroup"
 )
+
+// pongTimeoutError is the sentinel returned from the pong-watchdog when
+// no PONG arrived within Settings.PongTimeout. Implements net.Error so
+// the supervisor's ClassifyError path maps it to DisconnectedTransient
+// even when the eager state transition loses a race.
+type pongTimeoutError struct{ age time.Duration }
+
+func (e *pongTimeoutError) Error() string {
+	return fmt.Sprintf("irc pong timeout: outstanding for %s", e.age)
+}
+
+func (e *pongTimeoutError) Timeout() bool   { return true }
+func (e *pongTimeoutError) Temporary() bool { return true }
 
 // Connector is the IRC adapter: TLS dial + IRCv3 CAP / SASL handshake,
 // supervised read+ping loop, channel-state cache, optional bouncer.
@@ -110,6 +124,13 @@ type Connector struct {
 	preferredNickMu       sync.RWMutex
 	preferredNick         string
 	preferredNickChangeCB func()
+
+	// pingLedgerRef is the per-session outstanding-PING ledger,
+	// installed by runSession at session start and cleared on session
+	// exit. dispatchLine reads it on each inbound PONG to record the
+	// roundtrip; a nil value (between sessions, or under test fixtures
+	// that bypass runSession) makes the ack a no-op.
+	pingLedgerRef atomic.Pointer[pingLedger]
 
 	stopOnce sync.Once
 }
@@ -255,6 +276,18 @@ func (c *Connector) PreferredNick() string {
 	c.preferredNickMu.RLock()
 	defer c.preferredNickMu.RUnlock()
 	return c.preferredNick
+}
+
+// setPingLedger installs (or clears, with nil) the per-session ledger
+// the dispatch loop acks PONGs into. Idempotent.
+func (c *Connector) setPingLedger(l *pingLedger) {
+	c.pingLedgerRef.Store(l)
+}
+
+// pongLedger returns the per-session ledger, or nil if no session is
+// currently running. dispatchLine consults this on every inbound PONG.
+func (c *Connector) pongLedger() *pingLedger {
+	return c.pingLedgerRef.Load()
 }
 
 // effectiveNick returns the nick the supervisor should register with:
@@ -909,6 +942,25 @@ func (c *Connector) runSession(ctx context.Context) error {
 	g, gctx := errgroup.WithContext(ctx)
 	lines := make(chan string, 64)
 
+	// Per-session PING/PONG ledger: the ping-writer Adds a token before
+	// every PING write; the dispatch goroutine Acks it on the matching
+	// PONG; the pong-watchdog (below) fails the session when an entry
+	// outlives PongTimeout. Fresh per runSession iteration so a reconnect
+	// starts with a clean slate.
+	ledger := newPingLedger()
+	c.setPingLedger(ledger)
+	defer c.setPingLedger(nil)
+
+	// Monotonic counter for PING token assignment. The previous time-
+	// based token risked collisions when two ticks fired within the same
+	// second (e.g. an unconfigured 0-or-1s ClientPingInterval); a counter
+	// makes every token globally unique within the session.
+	var pingSeq uint64
+	nextToken := func() string {
+		n := atomic.AddUint64(&pingSeq, 1)
+		return "tb-" + strconv.FormatUint(n, 36)
+	}
+
 	g.Go(func() error {
 		<-gctx.Done()
 		_ = cli.Unblock()
@@ -958,7 +1010,9 @@ func (c *Connector) runSession(ctx context.Context) error {
 	// SOMETHING (a PONG) at a predictable cadence so NAT mappings stay
 	// warm and a stalled socket trips the idle timeout above instead of
 	// hanging forever. Cadence must be lower than ReadIdleTimeout (the
-	// Settings.Validate cross-check enforces this).
+	// Settings.Validate cross-check enforces this). Every tick records
+	// the token in the ledger BEFORE the WriteLine so a write that
+	// races a pong arrival can never be acked-before-tracked.
 	g.Go(func() error {
 		interval := c.settings.ClientPingInterval
 		if interval <= 0 {
@@ -971,13 +1025,67 @@ func (c *Connector) runSession(ctx context.Context) error {
 			case <-gctx.Done():
 				return nil
 			case <-ticker.C:
-				token := strconv.FormatInt(time.Now().Unix(), 10)
+				token := nextToken()
+				ledger.Add(token, time.Now())
 				if err := cli.WriteLine(CmdPing + " :" + token); err != nil {
 					if gctx.Err() != nil {
 						return nil
 					}
 					return fmt.Errorf("irc client ping: %w", err)
 				}
+			}
+		}
+	})
+
+	// Pong-watchdog: actively probes upstream liveness. When the oldest
+	// outstanding PING is older than PongTimeout the session is failed
+	// with a transient classification — the supervisor's existing
+	// backoff + bringUp path takes over, and the state-emitter +
+	// bouncer state-subscription surface the disconnect to attached
+	// clients well before ReadIdleTimeout would have caught the
+	// silently-dead socket.
+	g.Go(func() error {
+		timeout := c.settings.PongTimeout
+		if timeout <= 0 || c.settings.ClientPingInterval <= 0 {
+			return nil
+		}
+		// Cadence: timeout/2 so an expired token is observed within ~1.5x
+		// the timeout in the worst case. Capped at 1s so production
+		// (timeout=30s) doesn't bother polling at 15s granularity; and
+		// floored at 10ms so millisecond-scale test timings stay
+		// responsive.
+		tickEvery := timeout / 2
+		if tickEvery > time.Second {
+			tickEvery = time.Second
+		}
+		if tickEvery < 10*time.Millisecond {
+			tickEvery = 10 * time.Millisecond
+		}
+		ticker := time.NewTicker(tickEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-gctx.Done():
+				return nil
+			case <-ticker.C:
+				oldest, ok := ledger.Oldest()
+				if !ok {
+					continue
+				}
+				age := time.Since(oldest)
+				if age <= timeout {
+					continue
+				}
+				// Eagerly transition so the state-emitter PUT and the
+				// bouncer's channel-targeted NOTICE both fire before
+				// the reconnect supervisor cycles. ClassifyError also
+				// maps our returned error to transient — both paths
+				// are idempotent under Transition's same-state no-op.
+				c.machine.Transition(
+					UpstreamStateDisconnectedTransient,
+					WithServerReason(fmt.Sprintf("no PONG for %s", timeout)),
+				)
+				return &pongTimeoutError{age: age}
 			}
 		}
 	})
@@ -1174,6 +1282,20 @@ func (c *Connector) dispatchLine(ctx context.Context, line string) {
 	switch msg.Command {
 	case CmdPing:
 		c.respondPong(msg)
+	case CmdPong:
+		// Match the token back to the outstanding-PING ledger so the
+		// pong-watchdog sees a fresh oldest-entry on its next tick.
+		// Servers vary: some put the token in the trailing slot
+		// (PONG :token), some in the param slot (PONG server token).
+		if ledger := c.pongLedger(); ledger != nil {
+			token := msg.Trailing
+			if token == "" && len(msg.Params) > 0 {
+				token = msg.Params[len(msg.Params)-1]
+			}
+			if token != "" {
+				ledger.Ack(token)
+			}
+		}
 	case RplWelcome:
 		// :server 001 <actualnick> :Welcome to the [...] network <actualnick>
 		// The first param is the nick the server actually assigned.

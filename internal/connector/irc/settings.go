@@ -35,6 +35,17 @@ type Settings struct {
 	ReadIdleTimeout    time.Duration `env:"READ_IDLE_TIMEOUT"    envDefault:"300s"`
 	ClientPingInterval time.Duration `env:"CLIENT_PING_INTERVAL" envDefault:"120s"`
 
+	// PongTimeout is the maximum time the connector will wait for a PONG
+	// response to its most recent client-initiated PING before classifying
+	// the upstream as dead and unwinding the session. Independent of
+	// ReadIdleTimeout (which catches the "no inbound data at all" case) —
+	// PongTimeout actively probes liveness on a schedule, dropping
+	// silently-dead socket detection from ~ReadIdleTimeout to
+	// ~ClientPingInterval + PongTimeout. 0 disables the active probe and
+	// falls back to ReadIdleTimeout only. When ClientPingInterval is 0
+	// the probe is also functionally disabled (no PINGs to time out).
+	PongTimeout time.Duration `env:"PONG_TIMEOUT" envDefault:"30s"`
+
 	BouncerPassword              string        `env:"BOUNCER_PASSWORD"`
 	BouncerHost                  string        `env:"BOUNCER_HOST" envDefault:"127.0.0.1"`
 	BouncerPort                  int           `env:"BOUNCER_PORT" envDefault:"31337"`
@@ -143,6 +154,9 @@ func (s *Settings) BouncerEnabled() bool {
 func (s *Settings) Validate() error {
 	if s.ClientPingInterval > 0 && s.ReadIdleTimeout > 0 && s.ClientPingInterval >= s.ReadIdleTimeout {
 		return errors.New("irc: client_ping_interval must be less than read_idle_timeout")
+	}
+	if s.PongTimeout > 0 && s.ClientPingInterval > 0 && s.PongTimeout >= s.ClientPingInterval {
+		return errors.New("irc: pong_timeout must be less than client_ping_interval")
 	}
 	return nil
 }

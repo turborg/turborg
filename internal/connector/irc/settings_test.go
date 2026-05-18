@@ -34,6 +34,8 @@ func TestLoadSettingsFromEnv(t *testing.T) {
 	assert.Equal(t, "turborg", s.EffectiveUsername())
 	assert.Equal(t, 60*time.Second, s.ReadIdleTimeout)
 	assert.Equal(t, 30*time.Second, s.ClientPingInterval)
+	assert.Equal(t, 30*time.Second, s.PongTimeout,
+		"PongTimeout defaults to 30s when no env override is supplied")
 }
 
 func TestLoadSettingsDefaults(t *testing.T) {
@@ -89,6 +91,48 @@ func TestValidateAllowsZeroSentinels(t *testing.T) {
 }
 
 func TestValidateAcceptsHealthyConfig(t *testing.T) {
-	s := &irc.Settings{ClientPingInterval: 120 * time.Second, ReadIdleTimeout: 300 * time.Second}
+	s := &irc.Settings{
+		ClientPingInterval: 120 * time.Second,
+		ReadIdleTimeout:    300 * time.Second,
+		PongTimeout:        30 * time.Second,
+	}
+	assert.NoError(t, s.Validate())
+}
+
+func TestValidateRejectsPongTimeoutGEPingInterval(t *testing.T) {
+	// A pong timeout >= the ping cadence lets the next tick race past
+	// an already-stale outstanding token. Operators should narrow
+	// PongTimeout below ClientPingInterval (default 30s vs 120s).
+	s := &irc.Settings{
+		ClientPingInterval: 30 * time.Second,
+		ReadIdleTimeout:    300 * time.Second,
+		PongTimeout:        30 * time.Second,
+	}
+	err := s.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pong_timeout")
+}
+
+func TestValidateAllowsPongTimeoutZero(t *testing.T) {
+	// Zero disables the active probe; ReadIdleTimeout is still the
+	// backstop. Operators who want the old detection envelope use this.
+	s := &irc.Settings{
+		ClientPingInterval: 120 * time.Second,
+		ReadIdleTimeout:    300 * time.Second,
+		PongTimeout:        0,
+	}
+	assert.NoError(t, s.Validate())
+}
+
+func TestValidateAllowsPongTimeoutWithoutPingInterval(t *testing.T) {
+	// PongTimeout > 0 with ClientPingInterval == 0 is functionally
+	// inert (no PINGs being sent → nothing to time out) but must not
+	// trip validation. The connector handles the inert case at
+	// goroutine-start time.
+	s := &irc.Settings{
+		ClientPingInterval: 0,
+		ReadIdleTimeout:    300 * time.Second,
+		PongTimeout:        30 * time.Second,
+	}
 	assert.NoError(t, s.Validate())
 }
