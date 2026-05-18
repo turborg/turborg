@@ -33,6 +33,7 @@ type Server struct {
 	tb       testing.TB
 	listener net.Listener
 	sasl     SASLResult
+	pongPing bool
 
 	wmu  sync.Mutex
 	conn net.Conn
@@ -47,6 +48,14 @@ type Option func(*Server)
 
 func WithSASL(r SASLResult) Option {
 	return func(s *Server) { s.sasl = r }
+}
+
+// WithPongResponses makes the server reply to every client-initiated
+// `PING :token` with a matching `:fake PONG fake :token`. Off by default
+// so existing tests (which don't drive a non-zero ClientPingInterval
+// against a fake that wouldn't matter either way) behave as before.
+func WithPongResponses(enabled bool) Option {
+	return func(s *Server) { s.pongPing = enabled }
 }
 
 func New(tb testing.TB, opts ...Option) *Server {
@@ -160,6 +169,12 @@ func (s *Server) handleLine(line string) {
 		nick := s.firstNick()
 		_ = s.SendLine(fmt.Sprintf(":fake 001 %s :Welcome", nick))
 		_ = s.SendLine(fmt.Sprintf(":fake 376 %s :End of MOTD", nick))
+	case strings.HasPrefix(line, "PING "):
+		if s.pongPing {
+			payload := strings.TrimSpace(strings.TrimPrefix(line, "PING"))
+			payload = strings.TrimPrefix(payload, ":")
+			_ = s.SendLine(":fake PONG fake :" + payload)
+		}
 	case strings.HasPrefix(line, "JOIN "):
 		// Real servers echo the client's own JOIN back so it can update
 		// its membership state. fakeirc mirrors that — without it, the
