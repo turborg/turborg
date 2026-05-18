@@ -78,6 +78,26 @@ type Options struct {
 	// external observer can learn that a dashboard client is actively
 	// using this agent — distinct from "bot is alive" log signal.
 	OnClientAttached func(reason string)
+
+	// MessageRecorder receives every recorded channel message so it
+	// can mirror it to a durable backend. SaaS deployments wire a
+	// messagesink-backed recorder that batches into a sidecar HTTP
+	// call; self-host leaves this nil and history stops at the
+	// in-memory ring (which is still served on (re)connect via
+	// replayBuffers).
+	MessageRecorder MessageRecorder
+}
+
+// MessageRecorder is the narrow seam between the gateway and a
+// durable message store. One method: the gateway hands off (channel,
+// nick, text, ts); the recorder owns msg_id generation, timestamp
+// formatting, transport, batching, and retries.
+//
+// Nil interface value = no-op (no durable mirror). To avoid the
+// typed-nil-interface gotcha, runtime constructs the recorder behind
+// a non-nil guard before assigning to Options.
+type MessageRecorder interface {
+	Submit(channel, nick, text string, ts time.Time)
 }
 
 // Gateway is an HTTP server exposing /ws (WebSocket), /health, /metrics,
@@ -683,15 +703,22 @@ func (g *Gateway) onMessage(_ context.Context, ev *agent.Event) {
 	if env != nil {
 		channel, sender, text = env.Channel, env.Sender, env.Text
 	}
+	// Snapshot ts once so the wire payload (seconds for back-compat
+	// with the existing replay format) and the durable recorder
+	// (microsecond ISO for accounts-api) agree on the moment.
+	now := time.Now()
 	payload := map[string]any{
 		"op":      "message",
 		"channel": channel,
 		"nick":    sender,
 		"text":    text,
-		"ts":      time.Now().Unix(),
+		"ts":      now.Unix(),
 	}
 	g.recordChannel(payload)
 	g.broadcast(payload)
+	if g.opts.MessageRecorder != nil {
+		g.opts.MessageRecorder.Submit(channel, sender, text, now)
+	}
 }
 
 func (g *Gateway) onMessageSent(_ context.Context, ev *agent.Event) {
@@ -717,15 +744,19 @@ func (g *Gateway) onMessageSent(_ context.Context, ev *agent.Event) {
 	if sender == "" {
 		sender = g.bridge.CurrentNick()
 	}
+	now := time.Now()
 	payload := map[string]any{
 		"op":      "message",
 		"channel": channel,
 		"nick":    sender,
 		"text":    text,
-		"ts":      time.Now().Unix(),
+		"ts":      now.Unix(),
 	}
 	g.recordChannel(payload)
 	g.broadcast(payload)
+	if g.opts.MessageRecorder != nil {
+		g.opts.MessageRecorder.Submit(channel, sender, text, now)
+	}
 }
 
 func (g *Gateway) onUserJoin(_ context.Context, ev *agent.Event) {

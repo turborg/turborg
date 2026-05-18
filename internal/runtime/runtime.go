@@ -26,6 +26,7 @@ import (
 	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/llm/anthropic"
+	"github.com/turborg/turborg/internal/messagesink"
 	"github.com/turborg/turborg/internal/statepush"
 	"github.com/turborg/turborg/internal/version"
 	"github.com/turborg/turborg/internal/web"
@@ -229,6 +230,15 @@ func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, lo
 		// stops both halves. Runtime can't supply it without knowing the
 		// CLI's ctx. Leaving OnIdleShutdown nil here means the gateway
 		// logs and no-ops; the CLI installs the real callback after Build.
+	}
+	// Durable message mirror. Empty MESSAGE_SINK_URL = self-host: nil
+	// sink, nil recorder, web.Options.MessageRecorder stays unset.
+	// Guard the assignment behind a non-nil check so we don't end up
+	// with a typed-nil interface value (Go gotcha — the `if recorder
+	// != nil` guard inside the gateway only catches an untyped nil).
+	if sink := messagesink.New(s.MessageSinkURL, s.MessageSinkToken, log); sink != nil {
+		opts.MessageRecorder = messagesink.NewRecorder(sink)
+		log.Info("message sink enabled", "endpoint", s.MessageSinkURL)
 	}
 	gw, err := web.New(ircConn, ircConn, opts)
 	if err != nil {
