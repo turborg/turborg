@@ -209,6 +209,32 @@ func (s *ChannelState) OnMemberKick(channel, nick string) {
 	s.OnMemberPart(channel, nick)
 }
 
+// SetMemberPrefix overwrites the displayed prefix for a nick on a
+// channel. Callers (the MODE dispatcher) compute the new displayed
+// prefix by walking the mode string against the known prefix
+// hierarchy (~ > & > @ > % > +); we just store the result here so
+// the next sendState reflects what the SPA / bouncer-attached client
+// would see live.
+//
+// No-op when the channel or nick is unknown — services or oper-issued
+// modes on someone not in our view shouldn't materialise a phantom
+// member.
+func (s *ChannelState) SetMemberPrefix(channel, nick, prefix string) {
+	if nick == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	info, ok := s.channels[strings.ToLower(channel)]
+	if !ok {
+		return
+	}
+	if _, present := info.Members[nick]; !present {
+		return
+	}
+	info.Members[nick] = prefix
+}
+
 // OnMemberQuit removes a nick from every channel — IRC QUIT applies
 // network-wide, not per-channel.
 func (s *ChannelState) OnMemberQuit(nick string) {

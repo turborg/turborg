@@ -161,6 +161,37 @@ func TestChannelStateChannelsContaining(t *testing.T) {
 	assert.Empty(t, got, "empty nick is a no-op")
 }
 
+func TestChannelStateSetMemberPrefix(t *testing.T) {
+	// Mirrors the bot-side ApplyPrefixModes path: when a live MODE
+	// line changes a member's displayed prefix, we need to keep the
+	// in-memory ChannelState aligned so the next sendState (fresh WS
+	// attach) reflects reality without waiting for NAMES.
+	s := irc.NewChannelState()
+	s.OnSelfJoin("#ch")
+	s.OnNamesReply("#ch", []string{"alice", "bob"})
+	s.OnNamesEnd("#ch")
+
+	// Promote bob to op.
+	s.SetMemberPrefix("#ch", "bob", "@")
+	assert.Equal(t, "@", s.Get("#ch").Members["bob"])
+
+	// Demote bob.
+	s.SetMemberPrefix("#ch", "bob", "")
+	assert.Equal(t, "", s.Get("#ch").Members["bob"])
+
+	// Unknown nick is a no-op (no phantom members invented).
+	s.SetMemberPrefix("#ch", "phantom", "@")
+	assert.NotContains(t, s.Get("#ch").Members, "phantom")
+
+	// Unknown channel is a no-op.
+	s.SetMemberPrefix("#nope", "alice", "@")
+	assert.Nil(t, s.Get("#nope"))
+
+	// Empty nick is a no-op (defensive against malformed MODE args).
+	s.SetMemberPrefix("#ch", "", "@")
+	assert.Equal(t, 2, len(s.Get("#ch").Members))
+}
+
 func TestChannelStateNamesAutoJoinIfMissing(t *testing.T) {
 	s := irc.NewChannelState()
 	s.OnNamesReply("#auto", []string{"alice"})

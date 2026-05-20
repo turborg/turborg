@@ -1398,6 +1398,8 @@ func (c *Connector) dispatchLine(ctx context.Context, line string) {
 		c.handleNickChange(ctx, msg)
 	case CmdTopic:
 		c.handleTopic(ctx, msg)
+	case CmdMode:
+		c.handleMode(ctx, msg)
 	case RplTopic:
 		// :server 332 nick #ch :topic
 		if len(msg.Params) >= 2 {
@@ -1669,6 +1671,118 @@ func (c *Connector) handleNickChange(ctx context.Context, msg Message) {
 			"new":       newNick,
 		},
 	})
+}
+
+// handleMode handles `:setter MODE #channel <modes> [args...]` lines.
+// It does two things:
+//
+//  1. Update the bot's local ChannelState so prefix changes (q/a/o/h/v)
+//     are reflected in member.Mode for the next sendState snapshot —
+//     otherwise newly-attaching WS clients see a stale view until the
+//     next NAMES sync.
+//  2. Publish EventModeChanged so the gateway can broadcast op:mode_changed
+//     to currently-attached clients. The wire payload mirrors what the
+//     SPA's mode_changed dispatcher already consumes (channel + modes
+//     + args + setBy).
+//
+// User-targeted modes (where param[0] doesn't look like a channel) are
+// ignored — they're personal flags on the bot, not channel state.
+func (c *Connector) handleMode(ctx context.Context, msg Message) {
+	if len(msg.Params) < 2 {
+		return
+	}
+	channel := msg.Params[0]
+	if !startsWithChannelSigil(channel) {
+		return
+	}
+	modes := msg.Params[1]
+	args := msg.Params[2:]
+
+	// Walk the mode string. For each prefix-mode letter (q/a/o/h/v)
+	// we consume one arg and update the affected member's displayed
+	// prefix. Non-prefix arg-consuming modes (b/e/I/k/l/f/j) also
+	// consume args; we skip them but advance the cursor so subsequent
+	// prefix-mode-arg alignment stays correct.
+	applyPrefixModesToState(c.state, channel, modes, args)
+
+	c.publish(ctx, agent.Event{
+		Type: agent.EventModeChanged,
+		Fields: map[string]any{
+			"connector": c.Name(),
+			"channel":   channel,
+			"modes":     modes,
+			"args":      strings.Join(args, " "),
+			"by":        Nick(msg.Prefix),
+		},
+	})
+}
+
+// applyPrefixModesToState mutates `state` in place for any prefix-mode
+// (q/a/o/h/v) changes carried by the MODE line. Mirrors the SPA-side
+// applyPrefixModeChange so the bot's view and the SPA's view converge
+// on the same displayed prefix after the same input. Only the highest
+// active prefix is stored (the displayed one) — the lower modes a
+// user may also hold are not tracked separately, the next NAMES sync
+// is the authoritative source if it matters.
+func applyPrefixModesToState(state *ChannelState, channel, modes string, args []string) {
+	if state == nil {
+		return
+	}
+	prefixForLetter := map[byte]string{'q': "~", 'a': "&", 'o': "@", 'h': "%", 'v': "+"}
+	prefixRank := map[string]int{"~": 0, "&": 1, "@": 2, "%": 3, "+": 4, "": 5}
+	// Modes that consume an arg in BOTH + and - (prefix modes plus
+	// list modes plus always-arg chan modes). `l` is the only common
+	// arg-on-set-only mode worth modeling.
+	argBoth := map[byte]bool{
+		'q': true, 'a': true, 'o': true, 'h': true, 'v': true,
+		'b': true, 'e': true, 'I': true, 'k': true, 'f': true, 'j': true,
+	}
+	argAddOnly := map[byte]bool{'l': true}
+
+	info := state.Get(channel)
+	if info == nil {
+		return
+	}
+
+	argIdx := 0
+	adding := true
+	for i := 0; i < len(modes); i++ {
+		c := modes[i]
+		if c == '+' {
+			adding = true
+			continue
+		}
+		if c == '-' {
+			adding = false
+			continue
+		}
+		consumesArg := argBoth[c] || (adding && argAddOnly[c])
+		var arg string
+		if consumesArg && argIdx < len(args) {
+			arg = args[argIdx]
+			argIdx++
+		}
+		prefix, isPrefixMode := prefixForLetter[c]
+		if !isPrefixMode || arg == "" {
+			continue
+		}
+		current, present := info.Members[arg]
+		if !present {
+			continue
+		}
+		if adding {
+			// Promote only if the new prefix outranks the displayed
+			// one. Granting +v to an op shouldn't visually demote.
+			if prefixRank[prefix] < prefixRank[current] {
+				state.SetMemberPrefix(channel, arg, prefix)
+			}
+		} else if current == prefix {
+			// Removing the displayed prefix: drop to empty. A subsequent
+			// NAMES sync restores any lower prefix the user may still
+			// hold (we don't track multi-prefix membership in real-time).
+			state.SetMemberPrefix(channel, arg, "")
+		}
+	}
 }
 
 func (c *Connector) handleTopic(ctx context.Context, msg Message) {
