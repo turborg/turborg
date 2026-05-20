@@ -843,6 +843,17 @@ func (c *Connector) Run(ctx context.Context) error {
 	}
 
 	backoff := NewBackoffSchedule()
+	// sessionStart is the moment the current upstream session became
+	// active (last successful bringUp). Used to gate backoff.Reset on a
+	// minimum-stable-session window: without this gate, networks that
+	// accept the IRC handshake and then immediately tear the connection
+	// down (Libera's drone-BL post-register KILL, a forwarded K-line,
+	// etc.) keep the supervisor pinned at the start of the schedule and
+	// reconnecting every ~1s in a tight loop. Initialised to now because
+	// Start() runs bringUp once before Run() takes over, so the first
+	// runSession iteration corresponds to that already-active session.
+	sessionStart := time.Now()
+	const sessionStableWindow = 30 * time.Second
 
 	watchdogCtx, cancelWatchdog := context.WithCancel(ctx)
 	defer cancelWatchdog()
@@ -895,6 +906,16 @@ func (c *Connector) Run(ctx context.Context) error {
 			return exitTerminal(err)
 		}
 
+		// Only credit a backoff reset if the session that just ended ran
+		// long enough to look healthy — see sessionStart comment at the
+		// top of Run for why. A nil sessionStart means the previous
+		// bringUp failed (no session ran at all) and the schedule must
+		// keep advancing.
+		if !sessionStart.IsZero() && time.Since(sessionStart) >= sessionStableWindow {
+			backoff.Reset()
+		}
+		sessionStart = time.Time{}
+
 		// Recoverable: sleep with backoff, then bring upstream back up.
 		// runCtx cancels mid-sleep when the watchdog transitions to
 		// paused_idle — that surfaces as runCtx.Done.
@@ -923,7 +944,7 @@ func (c *Connector) Run(ctx context.Context) error {
 			c.log.Warn("irc reconnect failed", "err", err)
 			continue
 		}
-		backoff.Reset()
+		sessionStart = time.Now()
 	}
 }
 
