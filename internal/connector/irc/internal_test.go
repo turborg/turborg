@@ -79,6 +79,29 @@ func TestParseUnixSeconds(t *testing.T) {
 	assert.Equal(t, int64(0), parseUnixSeconds("123abc"))
 }
 
+func TestServerNoticeTextPrefersTrailing(t *testing.T) {
+	// Standard shape: most server numerics carry their human-readable
+	// body in the trailing parameter.
+	got := serverNoticeText(Message{Params: []string{"alice"}, Trailing: "Welcome to the network"})
+	assert.Equal(t, "Welcome to the network", got)
+}
+
+func TestServerNoticeTextFallsBackToParamsWhenNoTrailing(t *testing.T) {
+	// RFC-loose servers occasionally stuff the body into space-separated
+	// params instead. Skip the first param (recipient nick) and join
+	// the rest so the server tab still renders something useful.
+	got := serverNoticeText(Message{Params: []string{"alice", "ergo.test", "ergo-2.18.0"}})
+	assert.Equal(t, "ergo.test ergo-2.18.0", got)
+}
+
+func TestIsServerPrefix(t *testing.T) {
+	assert.True(t, isServerPrefix(""), "empty prefix counts as server-originated")
+	assert.True(t, isServerPrefix("irc.libera.chat"), "bare hostname is a server")
+	assert.True(t, isServerPrefix("ergo.test"), "bare hostname is a server")
+	assert.False(t, isServerPrefix("alice!~user@host"), "nick!user@host is a user")
+	assert.False(t, isServerPrefix("bot!~b@cloak/bot"), "user with cloak is still a user")
+}
+
 func TestCTCPHelpers(t *testing.T) {
 	assert.True(t, isCTCP("\x01VERSION\x01"))
 	assert.False(t, isCTCP("plain"))

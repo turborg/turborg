@@ -1328,6 +1328,39 @@ func (c *Connector) dispatchLine(ctx context.Context, line string) {
 		if len(msg.Params) > 0 {
 			c.setCurrentNick(msg.Params[0])
 		}
+		c.publishServerNotice(ctx, "welcome", msg.Trailing)
+	case RplYourHost, RplCreated, RplMyInfo, RplISupport,
+		RplLUserClient, RplLUserOp, RplLUserUnknown, RplLUserChannels, RplLUserMe:
+		// Connection-info numerics (server name, version, user counts,
+		// supported features). Forward as `info` to the server tab so
+		// users see something land during the handshake instead of a
+		// blank Server tab. Trailing carries the human-readable text
+		// for these; if a server pulls a non-RFC shape that puts the
+		// content in params, fall back to the joined params.
+		c.publishServerNotice(ctx, "info", serverNoticeText(msg))
+	case RplMOTDStart, RplMOTD, RplEndOfMOTD, ErrNoMOTD:
+		// The MOTD block. RPL_MOTDSTART (375) / RPL_MOTD (372) /
+		// RPL_ENDOFMOTD (376) are the standard shape; ERR_NOMOTD (422)
+		// stands in for servers that have no MOTD configured.
+		c.publishServerNotice(ctx, "motd", serverNoticeText(msg))
+	case CmdError:
+		// :server ERROR :<reason> — pre-disconnect server-originated
+		// failure (banned, throttled, etc.). The supervisor's
+		// ClassifyERRORLine already drives the upstream state machine
+		// for this; mirror the body to the server tab so the user
+		// sees the reason in the chat surface too.
+		c.publishServerNotice(ctx, "error", serverNoticeText(msg))
+	case CmdNotice:
+		// Server-originated NOTICE (no `!user@host` in the prefix) —
+		// pre-registration "NOTICE AUTH :*** Looking up your
+		// hostname" lines, services bot greetings, etc. — flow into
+		// the server tab. Client-originated NOTICEs (with a user
+		// hostmask prefix) are intentionally left unhandled here:
+		// the bot has no PRIVMSG-equivalent path for NOTICE today,
+		// and silently dropping matches the pre-existing behaviour.
+		if isServerPrefix(msg.Prefix) {
+			c.publishServerNotice(ctx, "notice", serverNoticeText(msg))
+		}
 	case CmdPrivmsg:
 		c.handlePrivmsg(ctx, msg, line)
 	case CmdJoin:
@@ -1658,6 +1691,56 @@ func (c *Connector) publish(ctx context.Context, ev agent.Event) {
 		return
 	}
 	c.events.Publish(ctx, &ev)
+}
+
+// publishServerNotice fans a server-originated line out to the agent
+// event bus for the gateway to broadcast as `op:server` to attached
+// WS clients. Used for welcome, MOTD, info numerics, server NOTICEs
+// and pre-disconnect ERROR lines — the content that lands in the
+// SPA's synthetic "server" tab on connect.
+func (c *Connector) publishServerNotice(ctx context.Context, kind, text string) {
+	if text == "" {
+		return
+	}
+	c.publish(ctx, agent.Event{
+		Type: agent.EventServerNotice,
+		Fields: map[string]any{
+			"connector": c.Name(),
+			"kind":      kind,
+			"text":      text,
+		},
+	})
+}
+
+// serverNoticeText pulls a human-readable body out of a server message.
+// Most server numerics carry their description in the trailing parameter
+// (`:Welcome to the network`), but a few RFC-loose servers stuff the
+// content into space-separated params instead. Fall back to joining the
+// non-target params so 002/003/004-style messages still render
+// something useful.
+func serverNoticeText(msg Message) string {
+	if msg.Trailing != "" {
+		return msg.Trailing
+	}
+	// Skip the first param when it looks like the bot's own nick (a
+	// recipient identifier most numerics emit). Without this we'd
+	// surface "alice" prefixed to every line.
+	params := msg.Params
+	if len(params) > 1 {
+		params = params[1:]
+	}
+	return strings.TrimSpace(strings.Join(params, " "))
+}
+
+// isServerPrefix reports whether a message prefix identifies a server
+// rather than a user. User prefixes carry `!user@host`; server prefixes
+// are a bare hostname like `irc.libera.chat`. Empty prefix also counts
+// as server-originated (some servers omit it for global notices).
+func isServerPrefix(prefix string) bool {
+	if prefix == "" {
+		return true
+	}
+	return !strings.ContainsRune(prefix, '!')
 }
 
 func (c *Connector) Stop(_ context.Context) error {
