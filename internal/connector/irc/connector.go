@@ -791,9 +791,32 @@ func (c *Connector) awaitHandshake(ctx context.Context) error {
 		case ErrNotRegistered:
 			return fmt.Errorf("irc handshake: server rejected pre-registration command (451)")
 		}
+		// Welcome / info / MOTD numerics all arrive during the handshake
+		// window — before runSession's main dispatcher takes over. Mirror
+		// them to the server tab here so the SPA's Server view shows them
+		// streaming in instead of staying empty until the next runtime
+		// notice (which on a healthy bot may never come).
+		c.maybePublishHandshakeServerNotice(hctx, msg)
 		if IsHandshakeComplete(msg.Command) {
 			return nil
 		}
+	}
+}
+
+// maybePublishHandshakeServerNotice forwards welcome / info / MOTD
+// numerics seen during awaitHandshake to the agent bus so the gateway
+// can replay them to attached SPA clients. Mirrors the parallel cases
+// in the main runSession dispatcher; the duplication is intentional
+// because handshake-window lines never reach that dispatcher.
+func (c *Connector) maybePublishHandshakeServerNotice(ctx context.Context, msg Message) {
+	switch msg.Command {
+	case RplWelcome:
+		c.publishServerNotice(ctx, "welcome", msg.Trailing)
+	case RplYourHost, RplCreated, RplMyInfo, RplISupport,
+		RplLUserClient, RplLUserOp, RplLUserUnknown, RplLUserChannels, RplLUserMe:
+		c.publishServerNotice(ctx, "info", serverNoticeText(msg))
+	case RplMOTDStart, RplMOTD, RplEndOfMOTD, ErrNoMOTD:
+		c.publishServerNotice(ctx, "motd", serverNoticeText(msg))
 	}
 }
 
