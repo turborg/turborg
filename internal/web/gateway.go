@@ -364,8 +364,32 @@ func (g *Gateway) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	g.sendState(ctx, c)
+	g.sendInitialConnectorState(ctx, c)
 	g.replayBuffers(ctx, c)
 	g.readLoop(ctx, c)
+}
+
+// sendInitialConnectorState publishes a one-shot connector.state_changed
+// to the newly-attached client carrying the upstream state machine's
+// CURRENT value. onUpstreamStateChange only fires on transitions, so a
+// client that connects mid-outage (or after registration completed
+// before the WS handshake finished) would otherwise never learn the
+// upstream isn't registered, the SPA's pill would stay green, and
+// users would have to wait for the next transition to find out.
+func (g *Gateway) sendInitialConnectorState(ctx context.Context, c *client) {
+	machine := g.bridge.UpstreamState()
+	if machine == nil {
+		return
+	}
+	state := machine.State()
+	g.sendTo(ctx, c, map[string]any{
+		"op":            "connector.state_changed",
+		"state":         string(state),
+		"prior_state":   "",
+		"message":       irc.DescribeUpstreamState(state, "", machine.ServerReason()),
+		"severity":      irc.SeverityForUpstreamState(state),
+		"server_reason": machine.ServerReason(),
+	})
 }
 
 func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
