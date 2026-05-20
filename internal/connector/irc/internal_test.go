@@ -162,6 +162,170 @@ func TestPeerIPOnNilConn(t *testing.T) {
 	assert.Equal(t, "", peerIP(&BouncerClient{}))
 }
 
+// ─── Whois / List / Who numeric handlers ──────────────────────────────
+
+// connectorWithBus spins up a minimal Connector wired to a fresh
+// EventBus, plus an unbuffered subscriber channel keyed on the event
+// type. Lets numeric-handler tests assert "given input X, exactly one
+// event Y was published with these fields" without standing up the
+// runtime / dial loop.
+func connectorWithBus(t *testing.T, eventType agent.EventType) (*Connector, <-chan *agent.Event) {
+	t.Helper()
+	bus := agent.NewEventBus(nil)
+	c := New(&Settings{Nick: "me"}, nil, bus)
+	out := make(chan *agent.Event, 16)
+	bus.Subscribe(eventType, func(_ context.Context, ev *agent.Event) {
+		out <- ev
+	})
+	return c, out
+}
+
+func TestHandleWhoisNumericAccumulatesAndFlushesOnEnd(t *testing.T) {
+	c, ch := connectorWithBus(t, agent.EventWhoisResult)
+	ctx := context.Background()
+
+	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisUser, Params: []string{"me", "alice", "~uid", "host.tld", "*"}, Trailing: "Alice Wonderland"})
+	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisServer, Params: []string{"me", "alice", "ergo.test"}, Trailing: "Test Server"})
+	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisOperator, Params: []string{"me", "alice"}, Trailing: "is an IRC operator"})
+	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisIdle, Params: []string{"me", "alice", "42", "1700000000"}, Trailing: "seconds idle"})
+	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisChannels, Params: []string{"me", "alice"}, Trailing: "@#test +#voice #plain"})
+	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisAccount, Params: []string{"me", "alice", "alice-account"}, Trailing: "is logged in as"})
+	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisSecure, Params: []string{"me", "alice"}, Trailing: "is using a secure connection"})
+
+	// Nothing published yet — no 318 received.
+	select {
+	case ev := <-ch:
+		t.Fatalf("EventWhoisResult fired before RplEndOfWhois: %+v", ev)
+	default:
+	}
+
+	c.handleWhoisNumeric(ctx, Message{Command: RplEndOfWhois, Params: []string{"me", "alice"}, Trailing: "End of /WHOIS list"})
+
+	ev := <-ch
+	require.NotNil(t, ev)
+	assert.Equal(t, "alice", ev.Fields["nick"])
+	assert.Equal(t, "~uid", ev.Fields["user"])
+	assert.Equal(t, "host.tld", ev.Fields["host"])
+	assert.Equal(t, "Alice Wonderland", ev.Fields["realName"])
+	assert.Equal(t, "alice-account", ev.Fields["account"])
+	assert.Equal(t, "ergo.test", ev.Fields["server"])
+	assert.Equal(t, "Test Server", ev.Fields["serverInfo"])
+	assert.Equal(t, int64(42), ev.Fields["idleSeconds"])
+	assert.Equal(t, int64(1700000000), ev.Fields["signonAt"])
+	assert.Equal(t, true, ev.Fields["secure"])
+	assert.Equal(t, true, ev.Fields["isOperator"])
+	assert.Equal(t, []string{"#test", "#voice", "#plain"}, ev.Fields["channels"],
+		"channel-list prefix glyphs (@, +) must be stripped")
+
+	// Builder cleared.
+	c.whoisMu.Lock()
+	_, stillThere := c.whoisInFlight["alice"]
+	c.whoisMu.Unlock()
+	assert.False(t, stillThere, "whois builder must be cleared after the 318 flush")
+}
+
+func TestHandleWhoisNoSuchNick(t *testing.T) {
+	c, ch := connectorWithBus(t, agent.EventWhoisResult)
+	ctx := context.Background()
+
+	// Open a whois that the server will fail. The handler buffers
+	// nothing until at least one numeric arrives; simulate a 401
+	// straight away — common when the user types /whois on a nick
+	// the server has never seen.
+	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisUser, Params: []string{"me", "phantom", "~u", "h", "*"}, Trailing: "P"})
+	c.handleWhoisNoSuchNick(ctx, "phantom", "No such nick/channel")
+
+	ev := <-ch
+	assert.Equal(t, "phantom", ev.Fields["nick"])
+	assert.Equal(t, "No such nick/channel", ev.Fields["error"])
+	// Optional fields must NOT be set on an error result — the modal
+	// renders the error path when ev.error is present.
+	assert.NotContains(t, ev.Fields, "realName")
+
+	// And a 401 with no in-flight builder is a silent no-op.
+	c.handleWhoisNoSuchNick(ctx, "nobody-i-care-about", "No such nick")
+	select {
+	case ev := <-ch:
+		t.Fatalf("401 with no in-flight whois must not publish: %+v", ev)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestHandleListNumericAggregatesAcrossBatch(t *testing.T) {
+	c, ch := connectorWithBus(t, agent.EventListResult)
+	ctx := context.Background()
+
+	c.handleListNumeric(ctx, Message{Command: RplListStart, Params: []string{"me"}, Trailing: "Channel :Users  Name"})
+	c.handleListNumeric(ctx, Message{Command: RplList, Params: []string{"me", "#test", "5"}, Trailing: "the test channel"})
+	c.handleListNumeric(ctx, Message{Command: RplList, Params: []string{"me", "#empty", "0"}, Trailing: ""})
+	c.handleListNumeric(ctx, Message{Command: RplList, Params: []string{"me", "#bare", "12"}})
+	c.handleListNumeric(ctx, Message{Command: RplListEnd, Params: []string{"me"}, Trailing: "End of /LIST"})
+
+	ev := <-ch
+	channels := ev.Fields["channels"].([]map[string]any)
+	require.Len(t, channels, 3)
+	assert.Equal(t, "#test", channels[0]["name"])
+	assert.Equal(t, 5, channels[0]["users"])
+	assert.Equal(t, "the test channel", channels[0]["topic"])
+	// Empty topic and zero users are omitted from the row map to keep
+	// the SPA's row.users / row.topic = undefined distinction intact.
+	assert.NotContains(t, channels[1], "topic")
+	assert.NotContains(t, channels[1], "users")
+	assert.Equal(t, "#bare", channels[2]["name"])
+	assert.Equal(t, 12, channels[2]["users"])
+}
+
+func TestHandleWhoNumericAggregatesPerTarget(t *testing.T) {
+	c, ch := connectorWithBus(t, agent.EventWhoResult)
+	ctx := context.Background()
+
+	// /who #test
+	c.handleWhoNumeric(ctx, Message{
+		Command:  RplWhoReply,
+		Params:   []string{"me", "#test", "~alice", "alice.tld", "ergo", "alice", "H@"},
+		Trailing: "0 Alice W",
+	})
+	c.handleWhoNumeric(ctx, Message{
+		Command:  RplWhoReply,
+		Params:   []string{"me", "#test", "~bob", "bob.tld", "ergo", "bob", "H+"},
+		Trailing: "1 Bob",
+	})
+	c.handleWhoNumeric(ctx, Message{Command: RplEndOfWho, Params: []string{"me", "#test"}, Trailing: "End of /WHO list"})
+
+	ev := <-ch
+	assert.Equal(t, "#test", ev.Fields["target"])
+	users := ev.Fields["users"].([]map[string]any)
+	require.Len(t, users, 2)
+	assert.Equal(t, "alice", users[0]["nick"])
+	assert.Equal(t, "~alice", users[0]["user"])
+	assert.Equal(t, "alice.tld", users[0]["host"])
+	assert.Equal(t, "H@", users[0]["flags"])
+	assert.Equal(t, "Alice W", users[0]["realName"], "hopcount prefix must be stripped from realname")
+	assert.Equal(t, "bob", users[1]["nick"])
+	assert.Equal(t, "Bob", users[1]["realName"])
+}
+
+func TestHandleWhoNumericTwoTargetsInFlight(t *testing.T) {
+	// Two /who targets running interleaved must not smear their
+	// member lists into each other.
+	c, ch := connectorWithBus(t, agent.EventWhoResult)
+	ctx := context.Background()
+
+	c.handleWhoNumeric(ctx, Message{Command: RplWhoReply, Params: []string{"me", "#a", "~a", "h", "s", "alice", "H"}, Trailing: "0 A"})
+	c.handleWhoNumeric(ctx, Message{Command: RplWhoReply, Params: []string{"me", "#b", "~b", "h", "s", "bob", "H"}, Trailing: "0 B"})
+	c.handleWhoNumeric(ctx, Message{Command: RplEndOfWho, Params: []string{"me", "#a"}})
+	c.handleWhoNumeric(ctx, Message{Command: RplEndOfWho, Params: []string{"me", "#b"}})
+
+	first := <-ch
+	second := <-ch
+	// Order on the bus matches the order of EndOfWho processing.
+	assert.Equal(t, "#a", first.Fields["target"])
+	assert.Len(t, first.Fields["users"].([]map[string]any), 1)
+	assert.Equal(t, "alice", first.Fields["users"].([]map[string]any)[0]["nick"])
+	assert.Equal(t, "#b", second.Fields["target"])
+	assert.Equal(t, "bob", second.Fields["users"].([]map[string]any)[0]["nick"])
+}
+
 func TestPeerIPNonTCPFallback(t *testing.T) {
 	// Our recordingConn returns a fakeAddr that is NOT *net.TCPAddr,
 	// so peerIP must fall through to RemoteAddr().String() — covers

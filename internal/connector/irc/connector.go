@@ -39,7 +39,7 @@ func (e *pongTimeoutError) Temporary() bool { return true }
 //     RPL_ENDOFMOTD or ERR_NOMOTD, JOIN configured channels, send
 //     NickServ IDENTIFY if configured, start the bouncer if configured.
 //   - Run: long-lived supervised loop owned by Agent's errgroup. Reader
-//     + dispatcher, all unwound on ctx cancel via SetReadDeadline.
+//   - dispatcher, all unwound on ctx cancel via SetReadDeadline.
 //   - Stop: send QUIT, close the upstream, stop the bouncer. Idempotent.
 type Connector struct {
 	settings *Settings
@@ -61,9 +61,9 @@ type Connector struct {
 	// paused. Initialised in New so callers can subscribe before Start.
 	machine *UpstreamStateMachine
 
-	state    *ChannelState
-	bouncer  *Bouncer
-	ctcp     *Throttle
+	state   *ChannelState
+	bouncer *Bouncer
+	ctcp    *Throttle
 
 	// wanted is the "channels I want to be in" set the reconnect
 	// supervisor replays JOINs from. Seeded at construction from the
@@ -132,7 +132,75 @@ type Connector struct {
 	// that bypass runSession) makes the ack a no-op.
 	pingLedgerRef atomic.Pointer[pingLedger]
 
+	// whoisInFlight accumulates the multi-numeric WHOIS response (311/
+	// 312/313/317/319/330/671) keyed by lower-case target nick. Cleared
+	// on RPL_ENDOFWHOIS (318) or ERR_NOSUCHNICK (401) once the
+	// EventWhoisResult is published. Concurrent /whois on different
+	// nicks are isolated by the map key; same-nick interleaving merges
+	// into a single result (last-write-wins for any duplicated field).
+	whoisMu       sync.Mutex
+	whoisInFlight map[string]*whoisBuilder
+
+	// listInFlight accumulates RPL_LIST (322) items between 321 (start)
+	// or first 322 and 323 (end). Single buffer because IRC /LIST is
+	// network-global, not per-target — two concurrent calls overlap on
+	// the same numeric stream so we have no signal to split them.
+	listMu       sync.Mutex
+	listInFlight []listChannelEntry
+
+	// whoInFlight accumulates RPL_WHOREPLY (352) items keyed by lower-
+	// case query target (channel or mask). Cleared on RPL_ENDOFWHO
+	// (315) when the EventWhoResult is published. Per-target keying so
+	// /who #a and /who #b running simultaneously stay isolated.
+	whoMu       sync.Mutex
+	whoInFlight map[string]*whoBuilder
+
 	stopOnce sync.Once
+}
+
+// whoisBuilder accumulates a WHOIS response across the 311/312/313/317/
+// 319/330/671 numerics. Optional fields default to their zero value;
+// the publisher only adds them to the agent.Event map when they were
+// populated, so the SPA's WhoisResultEvent retains its
+// undefined-vs-empty-string distinction.
+type whoisBuilder struct {
+	nick        string
+	user        string
+	host        string
+	realName    string
+	server      string
+	serverInfo  string
+	account     string
+	idleSeconds int64
+	signonAt    int64
+	secure      bool
+	isOperator  bool
+	channels    []string
+}
+
+// listChannelEntry mirrors one RPL_LIST (322) row aggregated into the
+// EventListResult payload. Optional users/topic stay empty when the
+// server omits them (some IRCDs send only the channel name).
+type listChannelEntry struct {
+	name  string
+	users int
+	topic string
+}
+
+// whoBuilder accumulates RPL_WHOREPLY (352) rows for a /WHO target
+// until RPL_ENDOFWHO (315) closes the request.
+type whoBuilder struct {
+	target string
+	users  []whoUserEntry
+}
+
+// whoUserEntry mirrors one row of a /WHO reply.
+type whoUserEntry struct {
+	nick     string
+	user     string
+	host     string
+	realName string
+	flags    string
 }
 
 // New constructs an IRC Connector. Pass nil for events when the agent is
@@ -182,10 +250,10 @@ func (c *Connector) setClient(cli *Client) {
 // lifetime of the Connector.
 func (c *Connector) UpstreamState() *UpstreamStateMachine { return c.machine }
 
-func (c *Connector) Name() string                          { return "irc" }
+func (c *Connector) Name() string                           { return "irc" }
 func (c *Connector) Inbound() <-chan *agent.InboundEnvelope { return c.inbox }
-func (c *Connector) ClaimSupervision() bool                { return true }
-func (c *Connector) State() *ChannelState                  { return c.state }
+func (c *Connector) ClaimSupervision() bool                 { return true }
+func (c *Connector) State() *ChannelState                   { return c.state }
 
 // SetClientLimits installs the operator-policy struct that gates
 // client-initiated commands (NICK, USER realname, JOIN-vs-channel-cap).
@@ -1450,6 +1518,29 @@ func (c *Connector) dispatchLine(ctx context.Context, line string) {
 	case ErrBannedFromChan, ErrBadChannelKey, ErrChannelIsFull,
 		ErrInviteOnlyChan, ErrBadChanMask:
 		c.handleJoinFailure(ctx, msg)
+	case RplWhoisUser,
+		RplWhoisServer,
+		RplWhoisOperator,
+		RplWhoisIdle,
+		RplWhoisChannels,
+		RplWhoisAccount,
+		RplWhoisSecure,
+		RplEndOfWhois:
+		c.handleWhoisNumeric(ctx, msg)
+	case RplListStart, RplList, RplListEnd:
+		c.handleListNumeric(ctx, msg)
+	case RplWhoReply, RplEndOfWho:
+		c.handleWhoNumeric(ctx, msg)
+	case ErrNoSuchNick:
+		// `WHOIS phantom` → server replies with 401. If we have a
+		// whois in flight for that nick, finalise it with an error so
+		// the SPA's modal renders a friendly "no such nick" instead
+		// of staying empty. Standalone 401s (the bot is told it sent
+		// PRIVMSG/NOTICE to a vanished nick) hit this too — harmless
+		// no-op when no whois is in flight.
+		if len(msg.Params) >= 2 {
+			c.handleWhoisNoSuchNick(ctx, msg.Params[1], msg.Trailing)
+		}
 	}
 }
 
@@ -1783,6 +1874,288 @@ func applyPrefixModesToState(state *ChannelState, channel, modes string, args []
 			state.SetMemberPrefix(channel, arg, "")
 		}
 	}
+}
+
+// handleWhoisNumeric accumulates one WHOIS numeric into the in-flight
+// builder for the target nick. On RPL_ENDOFWHOIS (318) the builder is
+// snapshotted into an EventWhoisResult and cleared. The map key uses
+// case-folded nicks so 311/318 from servers that send the original
+// casing both target the same in-flight entry.
+//
+// All numerics share the shape `:server NNN mynick targetnick ...rest`.
+// Param indexing assumes that; defensively bails when params are too
+// short rather than panicking.
+func (c *Connector) handleWhoisNumeric(ctx context.Context, msg Message) {
+	if len(msg.Params) < 2 {
+		return
+	}
+	targetNick := msg.Params[1]
+	b := c.whoisBuilderFor(targetNick)
+	if b.nick == "" {
+		b.nick = targetNick
+	}
+	switch msg.Command {
+	case RplWhoisUser:
+		// 311 mynick target user host * :realname
+		if len(msg.Params) >= 4 {
+			b.user = msg.Params[2]
+			b.host = msg.Params[3]
+		}
+		b.realName = msg.Trailing
+	case RplWhoisServer:
+		// 312 mynick target server :serverInfo
+		if len(msg.Params) >= 3 {
+			b.server = msg.Params[2]
+		}
+		b.serverInfo = msg.Trailing
+	case RplWhoisOperator:
+		b.isOperator = true
+	case RplWhoisIdle:
+		// 317 mynick target idle_seconds [signon_unix] :seconds idle
+		if len(msg.Params) >= 3 {
+			b.idleSeconds = parseUnixSeconds(msg.Params[2])
+		}
+		if len(msg.Params) >= 4 {
+			b.signonAt = parseUnixSeconds(msg.Params[3])
+		}
+	case RplWhoisChannels:
+		// 319 mynick target :@#foo +#bar #baz
+		if msg.Trailing != "" {
+			for _, ch := range strings.Fields(msg.Trailing) {
+				// Strip prefix glyphs (~ & @ % +) so the SPA gets a
+				// clean channel name to render — modes are surfaced
+				// separately if/when the user opens that channel.
+				b.channels = append(b.channels, strings.TrimLeft(ch, "~&@%+"))
+			}
+		}
+	case RplWhoisAccount:
+		// 330 mynick target account :is logged in as
+		if len(msg.Params) >= 3 {
+			b.account = msg.Params[2]
+		}
+	case RplWhoisSecure:
+		b.secure = true
+	case RplEndOfWhois:
+		c.publishWhoisResult(ctx, targetNick, b, "")
+	}
+}
+
+// handleWhoisNoSuchNick finalises an in-flight whois with an error and
+// publishes. If no whois is in flight for this nick the 401 is unrelated
+// (e.g. a stale PRIVMSG target) and we silently no-op.
+func (c *Connector) handleWhoisNoSuchNick(ctx context.Context, targetNick, reason string) {
+	c.whoisMu.Lock()
+	b, ok := c.whoisInFlight[strings.ToLower(targetNick)]
+	c.whoisMu.Unlock()
+	if !ok {
+		return
+	}
+	c.publishWhoisResult(ctx, targetNick, b, reason)
+}
+
+// whoisBuilderFor returns (creating if needed) the in-flight builder
+// for the target nick. Concurrent /whois calls on different nicks are
+// safely isolated by the map.
+func (c *Connector) whoisBuilderFor(targetNick string) *whoisBuilder {
+	key := strings.ToLower(targetNick)
+	c.whoisMu.Lock()
+	defer c.whoisMu.Unlock()
+	if c.whoisInFlight == nil {
+		c.whoisInFlight = make(map[string]*whoisBuilder)
+	}
+	b, ok := c.whoisInFlight[key]
+	if !ok {
+		b = &whoisBuilder{}
+		c.whoisInFlight[key] = b
+	}
+	return b
+}
+
+func (c *Connector) publishWhoisResult(ctx context.Context, targetNick string, b *whoisBuilder, errReason string) {
+	c.whoisMu.Lock()
+	delete(c.whoisInFlight, strings.ToLower(targetNick))
+	c.whoisMu.Unlock()
+
+	fields := map[string]any{
+		"connector": c.Name(),
+		"nick":      targetNick,
+	}
+	if errReason != "" {
+		fields["error"] = errReason
+	} else {
+		// Only emit populated fields so the SPA's WhoisResultEvent
+		// retains its undefined-vs-empty distinction. The renderer
+		// short-circuits rows whose value is undefined.
+		if b.user != "" {
+			fields["user"] = b.user
+		}
+		if b.host != "" {
+			fields["host"] = b.host
+		}
+		if b.realName != "" {
+			fields["realName"] = b.realName
+		}
+		if b.account != "" {
+			fields["account"] = b.account
+		}
+		if b.server != "" {
+			fields["server"] = b.server
+		}
+		if b.serverInfo != "" {
+			fields["serverInfo"] = b.serverInfo
+		}
+		if b.idleSeconds > 0 {
+			fields["idleSeconds"] = b.idleSeconds
+		}
+		if b.signonAt > 0 {
+			fields["signonAt"] = b.signonAt
+		}
+		if b.secure {
+			fields["secure"] = true
+		}
+		if b.isOperator {
+			fields["isOperator"] = true
+		}
+		if len(b.channels) > 0 {
+			fields["channels"] = b.channels
+		}
+	}
+	c.publish(ctx, agent.Event{
+		Type:   agent.EventWhoisResult,
+		Fields: fields,
+	})
+}
+
+// handleListNumeric accumulates RPL_LIST (322) rows and flushes on
+// RPL_LISTENED (323). RPL_LISTSTART (321) is informational only; some
+// servers omit it. /LIST is network-global so we share one buffer.
+func (c *Connector) handleListNumeric(ctx context.Context, msg Message) {
+	switch msg.Command {
+	case RplListStart:
+		c.listMu.Lock()
+		c.listInFlight = c.listInFlight[:0]
+		c.listMu.Unlock()
+	case RplList:
+		// 322 mynick channel #users :topic
+		if len(msg.Params) < 3 {
+			return
+		}
+		entry := listChannelEntry{name: msg.Params[1], topic: msg.Trailing}
+		if n, err := strconv.Atoi(msg.Params[2]); err == nil {
+			entry.users = n
+		}
+		c.listMu.Lock()
+		c.listInFlight = append(c.listInFlight, entry)
+		c.listMu.Unlock()
+	case RplListEnd:
+		c.listMu.Lock()
+		channels := make([]map[string]any, 0, len(c.listInFlight))
+		for _, e := range c.listInFlight {
+			row := map[string]any{"name": e.name}
+			if e.users > 0 {
+				row["users"] = e.users
+			}
+			if e.topic != "" {
+				row["topic"] = e.topic
+			}
+			channels = append(channels, row)
+		}
+		c.listInFlight = nil
+		c.listMu.Unlock()
+		c.publish(ctx, agent.Event{
+			Type: agent.EventListResult,
+			Fields: map[string]any{
+				"connector": c.Name(),
+				"channels":  channels,
+			},
+		})
+	}
+}
+
+// handleWhoNumeric accumulates RPL_WHOREPLY (352) rows and flushes on
+// RPL_ENDOFWHO (315). Keyed by lower-case query target so /who #a and
+// /who #b in flight at the same time don't smear into each other.
+func (c *Connector) handleWhoNumeric(ctx context.Context, msg Message) {
+	switch msg.Command {
+	case RplWhoReply:
+		// 352 mynick target user host server nick flags :hopcount realname
+		if len(msg.Params) < 7 {
+			return
+		}
+		target := msg.Params[1]
+		entry := whoUserEntry{
+			user:  msg.Params[2],
+			host:  msg.Params[3],
+			nick:  msg.Params[5],
+			flags: msg.Params[6],
+		}
+		// Trailing is `<hopcount> <realname>` — split on first space.
+		// Defensively handle malformed shapes that omit hopcount.
+		if msg.Trailing != "" {
+			if sp := strings.IndexByte(msg.Trailing, ' '); sp >= 0 {
+				entry.realName = msg.Trailing[sp+1:]
+			} else {
+				entry.realName = msg.Trailing
+			}
+		}
+		b := c.whoBuilderFor(target)
+		b.users = append(b.users, entry)
+	case RplEndOfWho:
+		// 315 mynick target :End of /WHO list
+		if len(msg.Params) < 2 {
+			return
+		}
+		target := msg.Params[1]
+		c.whoMu.Lock()
+		b, ok := c.whoInFlight[strings.ToLower(target)]
+		if ok {
+			delete(c.whoInFlight, strings.ToLower(target))
+		}
+		c.whoMu.Unlock()
+		if !ok {
+			b = &whoBuilder{target: target}
+		}
+		users := make([]map[string]any, 0, len(b.users))
+		for _, u := range b.users {
+			row := map[string]any{"nick": u.nick}
+			if u.user != "" {
+				row["user"] = u.user
+			}
+			if u.host != "" {
+				row["host"] = u.host
+			}
+			if u.realName != "" {
+				row["realName"] = u.realName
+			}
+			if u.flags != "" {
+				row["flags"] = u.flags
+			}
+			users = append(users, row)
+		}
+		c.publish(ctx, agent.Event{
+			Type: agent.EventWhoResult,
+			Fields: map[string]any{
+				"connector": c.Name(),
+				"target":    target,
+				"users":     users,
+			},
+		})
+	}
+}
+
+func (c *Connector) whoBuilderFor(target string) *whoBuilder {
+	key := strings.ToLower(target)
+	c.whoMu.Lock()
+	defer c.whoMu.Unlock()
+	if c.whoInFlight == nil {
+		c.whoInFlight = make(map[string]*whoBuilder)
+	}
+	b, ok := c.whoInFlight[key]
+	if !ok {
+		b = &whoBuilder{target: target}
+		c.whoInFlight[key] = b
+	}
+	return b
 }
 
 func (c *Connector) handleTopic(ctx context.Context, msg Message) {
