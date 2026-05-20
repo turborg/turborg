@@ -130,6 +130,37 @@ func TestChannelStateNamesReplyReplacesAfterCycleComplete(t *testing.T) {
 	assert.NotContains(t, info.Members, "bob", "bob must be evicted; NAMES is a full snapshot")
 }
 
+// ChannelsContaining is used by the connector's QUIT handler to fan
+// out a per-channel EventUserLeave before OnMemberQuit wipes the
+// nick everywhere. Without it the gateway emits op:part events with
+// a nil channel and the SPA's per-channel state can't apply them,
+// leaving QUIT'd members ghosted in every channel they were in.
+func TestChannelStateChannelsContaining(t *testing.T) {
+	s := irc.NewChannelState()
+	s.OnSelfJoin("#one")
+	s.OnSelfJoin("#two")
+	s.OnSelfJoin("#three")
+	s.OnNamesReply("#one", []string{"alice", "bob"})
+	s.OnNamesEnd("#one")
+	s.OnNamesReply("#two", []string{"alice"})
+	s.OnNamesEnd("#two")
+	s.OnNamesReply("#three", []string{"bob"})
+	s.OnNamesEnd("#three")
+
+	got := s.ChannelsContaining("alice")
+	require.Len(t, got, 2)
+	assert.ElementsMatch(t, []string{"#one", "#two"}, got)
+
+	got = s.ChannelsContaining("bob")
+	assert.ElementsMatch(t, []string{"#one", "#three"}, got)
+
+	got = s.ChannelsContaining("carol")
+	assert.Empty(t, got)
+
+	got = s.ChannelsContaining("")
+	assert.Empty(t, got, "empty nick is a no-op")
+}
+
 func TestChannelStateNamesAutoJoinIfMissing(t *testing.T) {
 	s := irc.NewChannelState()
 	s.OnNamesReply("#auto", []string{"alice"})

@@ -1546,11 +1546,28 @@ func (c *Connector) handleQuit(ctx context.Context, msg Message) {
 	if nick == "" {
 		return
 	}
+	// Snapshot which channels the nick was in BEFORE the state mutation,
+	// so we can fan out a per-channel EventUserLeave for each. The web
+	// gateway translates EventUserLeave → op:part on the wire, and the
+	// SPA's part handler looks up the channel by name. Without a
+	// channel field the SPA can't find the channel and silently no-ops,
+	// leaving the QUITting nick ghosted in every member list it was
+	// in. IRC QUIT is network-wide; the user-facing model in clients
+	// is per-channel removal.
+	affected := c.state.ChannelsContaining(nick)
 	c.state.OnMemberQuit(nick)
-	c.publish(ctx, agent.Event{
-		Type:   agent.EventUserLeave,
-		Fields: map[string]any{"connector": c.Name(), "nick": nick, "reason": msg.Trailing},
-	})
+	reason := msg.Trailing
+	for _, channel := range affected {
+		c.publish(ctx, agent.Event{
+			Type: agent.EventUserLeave,
+			Fields: map[string]any{
+				"connector": c.Name(),
+				"channel":   channel,
+				"nick":      nick,
+				"reason":    reason,
+			},
+		})
+	}
 }
 
 func (c *Connector) handleKick(ctx context.Context, msg Message) {

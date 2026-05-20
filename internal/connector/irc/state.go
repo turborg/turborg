@@ -219,6 +219,25 @@ func (s *ChannelState) OnMemberQuit(nick string) {
 	}
 }
 
+// ChannelsContaining returns the channel names (original casing) the
+// given nick is currently a member of. Read-only; callers can take
+// the snapshot before invoking a mutator like OnMemberQuit so they
+// can fan out per-channel "leave" notifications to subscribers.
+func (s *ChannelState) ChannelsContaining(nick string) []string {
+	if nick == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []string
+	for _, info := range s.channels {
+		if _, ok := info.Members[nick]; ok {
+			out = append(out, info.Name)
+		}
+	}
+	return out
+}
+
 // OnNickChange propagates a NICK change across every channel that knew
 // the old nick.
 func (s *ChannelState) OnNickChange(oldNick, newNick string) {
