@@ -102,6 +102,34 @@ func TestChannelStateNamesReply(t *testing.T) {
 	assert.Equal(t, "~", info.Members["fred"])
 }
 
+// Reproduces the post-netsplit ghost-member bug: a NAMES burst that
+// arrives AFTER a previous cycle has already completed must REPLACE
+// the member set, not merge into it. Pre-fix, members who QUIT
+// during the bot's upstream outage stayed ghosted forever because
+// OnNamesReply appended to the stale set.
+func TestChannelStateNamesReplyReplacesAfterCycleComplete(t *testing.T) {
+	s := irc.NewChannelState()
+	s.OnSelfJoin("#ch")
+
+	// First NAMES cycle: alice, bob, carol present.
+	s.OnNamesReply("#ch", []string{"@alice", "bob", "carol"})
+	s.OnNamesEnd("#ch")
+	require.True(t, s.Get("#ch").NamesComplete)
+
+	// Simulate the bot losing/rejoining upstream — bob has quit while
+	// the bot was disconnected. The new NAMES burst only contains
+	// alice + carol.
+	s.OnNamesReply("#ch", []string{"@alice", "carol"})
+	s.OnNamesEnd("#ch")
+
+	info := s.Get("#ch")
+	require.NotNil(t, info)
+	assert.True(t, info.NamesComplete)
+	assert.Contains(t, info.Members, "alice")
+	assert.Contains(t, info.Members, "carol")
+	assert.NotContains(t, info.Members, "bob", "bob must be evicted; NAMES is a full snapshot")
+}
+
 func TestChannelStateNamesAutoJoinIfMissing(t *testing.T) {
 	s := irc.NewChannelState()
 	s.OnNamesReply("#auto", []string{"alice"})

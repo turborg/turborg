@@ -146,6 +146,15 @@ func (s *ChannelState) SetTopicMeta(channel, setBy string, setAt int64) {
 // OnNamesReply appends one RPL_NAMREPLY chunk to a channel's member list.
 // Multiple chunks may arrive before RPL_ENDOFNAMES; callers don't need to
 // coordinate.
+//
+// A 353 line that arrives AFTER a previous NAMES cycle has already
+// completed (NamesComplete=true) marks the start of a fresh burst —
+// typically because the bot rejoined the channel after a netsplit or
+// the user issued /NAMES. The previous member set is stale at that
+// point: ergo's NAMES reply is a complete snapshot of the channel
+// right now, so we drop the old set and let this burst rebuild from
+// scratch. Without this reset, members who QUIT during the bot's
+// upstream outage stay ghosted in the member list forever.
 func (s *ChannelState) OnNamesReply(channel string, members []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -155,6 +164,9 @@ func (s *ChannelState) OnNamesReply(channel string, members []string) {
 		info = &ChannelInfo{Name: channel, Members: map[string]string{}}
 		s.channels[key] = info
 		s.order = append(s.order, key)
+	} else if info.NamesComplete {
+		info.Members = map[string]string{}
+		info.NamesComplete = false
 	}
 	for _, entry := range members {
 		prefix, nick := splitMemberPrefix(entry)
