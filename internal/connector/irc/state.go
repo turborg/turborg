@@ -146,6 +146,15 @@ func (s *ChannelState) SetTopicMeta(channel, setBy string, setAt int64) {
 // OnNamesReply appends one RPL_NAMREPLY chunk to a channel's member list.
 // Multiple chunks may arrive before RPL_ENDOFNAMES; callers don't need to
 // coordinate.
+//
+// A 353 line that arrives AFTER a previous NAMES cycle has already
+// completed (NamesComplete=true) marks the start of a fresh burst —
+// typically because the bot rejoined the channel after a netsplit or
+// the user issued /NAMES. The previous member set is stale at that
+// point: ergo's NAMES reply is a complete snapshot of the channel
+// right now, so we drop the old set and let this burst rebuild from
+// scratch. Without this reset, members who QUIT during the bot's
+// upstream outage stay ghosted in the member list forever.
 func (s *ChannelState) OnNamesReply(channel string, members []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -155,6 +164,9 @@ func (s *ChannelState) OnNamesReply(channel string, members []string) {
 		info = &ChannelInfo{Name: channel, Members: map[string]string{}}
 		s.channels[key] = info
 		s.order = append(s.order, key)
+	} else if info.NamesComplete {
+		info.Members = map[string]string{}
+		info.NamesComplete = false
 	}
 	for _, entry := range members {
 		prefix, nick := splitMemberPrefix(entry)
@@ -197,6 +209,32 @@ func (s *ChannelState) OnMemberKick(channel, nick string) {
 	s.OnMemberPart(channel, nick)
 }
 
+// SetMemberPrefix overwrites the displayed prefix for a nick on a
+// channel. Callers (the MODE dispatcher) compute the new displayed
+// prefix by walking the mode string against the known prefix
+// hierarchy (~ > & > @ > % > +); we just store the result here so
+// the next sendState reflects what the SPA / bouncer-attached client
+// would see live.
+//
+// No-op when the channel or nick is unknown — services or oper-issued
+// modes on someone not in our view shouldn't materialise a phantom
+// member.
+func (s *ChannelState) SetMemberPrefix(channel, nick, prefix string) {
+	if nick == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	info, ok := s.channels[strings.ToLower(channel)]
+	if !ok {
+		return
+	}
+	if _, present := info.Members[nick]; !present {
+		return
+	}
+	info.Members[nick] = prefix
+}
+
 // OnMemberQuit removes a nick from every channel — IRC QUIT applies
 // network-wide, not per-channel.
 func (s *ChannelState) OnMemberQuit(nick string) {
@@ -205,6 +243,25 @@ func (s *ChannelState) OnMemberQuit(nick string) {
 	for _, info := range s.channels {
 		delete(info.Members, nick)
 	}
+}
+
+// ChannelsContaining returns the channel names (original casing) the
+// given nick is currently a member of. Read-only; callers can take
+// the snapshot before invoking a mutator like OnMemberQuit so they
+// can fan out per-channel "leave" notifications to subscribers.
+func (s *ChannelState) ChannelsContaining(nick string) []string {
+	if nick == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []string
+	for _, info := range s.channels {
+		if _, ok := info.Members[nick]; ok {
+			out = append(out, info.Name)
+		}
+	}
+	return out
 }
 
 // OnNickChange propagates a NICK change across every channel that knew

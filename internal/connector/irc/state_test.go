@@ -102,6 +102,96 @@ func TestChannelStateNamesReply(t *testing.T) {
 	assert.Equal(t, "~", info.Members["fred"])
 }
 
+// Reproduces the post-netsplit ghost-member bug: a NAMES burst that
+// arrives AFTER a previous cycle has already completed must REPLACE
+// the member set, not merge into it. Pre-fix, members who QUIT
+// during the bot's upstream outage stayed ghosted forever because
+// OnNamesReply appended to the stale set.
+func TestChannelStateNamesReplyReplacesAfterCycleComplete(t *testing.T) {
+	s := irc.NewChannelState()
+	s.OnSelfJoin("#ch")
+
+	// First NAMES cycle: alice, bob, carol present.
+	s.OnNamesReply("#ch", []string{"@alice", "bob", "carol"})
+	s.OnNamesEnd("#ch")
+	require.True(t, s.Get("#ch").NamesComplete)
+
+	// Simulate the bot losing/rejoining upstream — bob has quit while
+	// the bot was disconnected. The new NAMES burst only contains
+	// alice + carol.
+	s.OnNamesReply("#ch", []string{"@alice", "carol"})
+	s.OnNamesEnd("#ch")
+
+	info := s.Get("#ch")
+	require.NotNil(t, info)
+	assert.True(t, info.NamesComplete)
+	assert.Contains(t, info.Members, "alice")
+	assert.Contains(t, info.Members, "carol")
+	assert.NotContains(t, info.Members, "bob", "bob must be evicted; NAMES is a full snapshot")
+}
+
+// ChannelsContaining is used by the connector's QUIT handler to fan
+// out a per-channel EventUserLeave before OnMemberQuit wipes the
+// nick everywhere. Without it the gateway emits op:part events with
+// a nil channel and the SPA's per-channel state can't apply them,
+// leaving QUIT'd members ghosted in every channel they were in.
+func TestChannelStateChannelsContaining(t *testing.T) {
+	s := irc.NewChannelState()
+	s.OnSelfJoin("#one")
+	s.OnSelfJoin("#two")
+	s.OnSelfJoin("#three")
+	s.OnNamesReply("#one", []string{"alice", "bob"})
+	s.OnNamesEnd("#one")
+	s.OnNamesReply("#two", []string{"alice"})
+	s.OnNamesEnd("#two")
+	s.OnNamesReply("#three", []string{"bob"})
+	s.OnNamesEnd("#three")
+
+	got := s.ChannelsContaining("alice")
+	require.Len(t, got, 2)
+	assert.ElementsMatch(t, []string{"#one", "#two"}, got)
+
+	got = s.ChannelsContaining("bob")
+	assert.ElementsMatch(t, []string{"#one", "#three"}, got)
+
+	got = s.ChannelsContaining("carol")
+	assert.Empty(t, got)
+
+	got = s.ChannelsContaining("")
+	assert.Empty(t, got, "empty nick is a no-op")
+}
+
+func TestChannelStateSetMemberPrefix(t *testing.T) {
+	// Mirrors the bot-side ApplyPrefixModes path: when a live MODE
+	// line changes a member's displayed prefix, we need to keep the
+	// in-memory ChannelState aligned so the next sendState (fresh WS
+	// attach) reflects reality without waiting for NAMES.
+	s := irc.NewChannelState()
+	s.OnSelfJoin("#ch")
+	s.OnNamesReply("#ch", []string{"alice", "bob"})
+	s.OnNamesEnd("#ch")
+
+	// Promote bob to op.
+	s.SetMemberPrefix("#ch", "bob", "@")
+	assert.Equal(t, "@", s.Get("#ch").Members["bob"])
+
+	// Demote bob.
+	s.SetMemberPrefix("#ch", "bob", "")
+	assert.Equal(t, "", s.Get("#ch").Members["bob"])
+
+	// Unknown nick is a no-op (no phantom members invented).
+	s.SetMemberPrefix("#ch", "phantom", "@")
+	assert.NotContains(t, s.Get("#ch").Members, "phantom")
+
+	// Unknown channel is a no-op.
+	s.SetMemberPrefix("#nope", "alice", "@")
+	assert.Nil(t, s.Get("#nope"))
+
+	// Empty nick is a no-op (defensive against malformed MODE args).
+	s.SetMemberPrefix("#ch", "", "@")
+	assert.Equal(t, 2, len(s.Get("#ch").Members))
+}
+
 func TestChannelStateNamesAutoJoinIfMissing(t *testing.T) {
 	s := irc.NewChannelState()
 	s.OnNamesReply("#auto", []string{"alice"})

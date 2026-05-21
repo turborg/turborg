@@ -132,6 +132,17 @@ func readJSON(t *testing.T, conn *websocket.Conn) map[string]any {
 	return out
 }
 
+// drainInitialFrames consumes the gateway's standard attach burst —
+// currently `state` followed by `connector.state_changed` — so tests
+// can land on the first event their assertions actually care about.
+// Centralised here so adding/removing initial frames is a one-line
+// change instead of touching every test that opens a WS.
+func drainInitialFrames(t *testing.T, conn *websocket.Conn) {
+	t.Helper()
+	_ = readJSON(t, conn) // state
+	_ = readJSON(t, conn) // connector.state_changed (sendInitialConnectorState)
+}
+
 func newOptions(t *testing.T, password string) web.Options {
 	v, err := web.NewStaticPasswordVerifier(password)
 	require.NoError(t, err)
@@ -365,7 +376,7 @@ func TestEveryEventBusHandlerBroadcastsAnOp(t *testing.T) {
 
 			conn := dialWS(t, g.Addr(), "p")
 			defer conn.Close(websocket.StatusNormalClosure, "")
-			_ = readJSON(t, conn) // state
+			drainInitialFrames(t, conn)
 
 			a.Events.Publish(context.Background(), &tc.event)
 			got := readJSON(t, conn)
@@ -386,7 +397,7 @@ func TestEventBroadcastReachesClients(t *testing.T) {
 
 	conn := dialWS(t, g.Addr(), "p")
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	_ = readJSON(t, conn) // state op
+	drainInitialFrames(t, conn)
 
 	a.Events.Publish(context.Background(), &agent.Event{
 		Type:   agent.EventUserJoin,
@@ -405,7 +416,7 @@ func TestMessageEventCarriesText(t *testing.T) {
 	defer td()
 	conn := dialWS(t, g.Addr(), "p")
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	_ = readJSON(t, conn)
+	drainInitialFrames(t, conn)
 
 	a.Events.Publish(context.Background(), &agent.Event{
 		Type: agent.EventMessage,
@@ -429,7 +440,7 @@ func TestInboundSayCallsSender(t *testing.T) {
 	defer td()
 	conn := dialWS(t, g.Addr(), "p")
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	_ = readJSON(t, conn) // state
+	drainInitialFrames(t, conn)
 
 	payload, _ := json.Marshal(map[string]any{
 		"op": "say", "channel": "#test", "text": "hello via ws",
@@ -450,7 +461,7 @@ func TestInboundSayPublishesMessageSentBackToSender(t *testing.T) {
 	defer td()
 	conn := dialWS(t, g.Addr(), "p")
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	_ = readJSON(t, conn) // state
+	drainInitialFrames(t, conn)
 
 	body, _ := json.Marshal(map[string]any{
 		"op": "say", "channel": "#test", "text": "echo to self",
@@ -477,7 +488,7 @@ func TestMessageSentFromAgentDispatchRendersCorrectly(t *testing.T) {
 
 	conn := dialWS(t, g.Addr(), "p")
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	_ = readJSON(t, conn) // state
+	drainInitialFrames(t, conn)
 
 	out := &agent.OutboundEnvelope{
 		Connector: "irc",
@@ -502,7 +513,7 @@ func TestInboundSayUsesCurrentNickAfterChange(t *testing.T) {
 	defer td()
 	conn := dialWS(t, g.Addr(), "p")
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	_ = readJSON(t, conn) // state shows "orig"
+	drainInitialFrames(t, conn)
 
 	// Bot renames itself. In production, irc.Connector.setCurrentNick
 	// fires from the 001 welcome or an observed self-NICK; here we
@@ -586,7 +597,7 @@ func TestServerNoticesReplayedOnConnect(t *testing.T) {
 
 	conn := dialWS(t, g.Addr(), "p")
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	_ = readJSON(t, conn) // state
+	drainInitialFrames(t, conn)
 
 	got := readJSON(t, conn)
 	assert.Equal(t, "server", got["op"])
@@ -784,7 +795,7 @@ func TestRateLimiterResetsOnSuccessfulAuth(t *testing.T) {
 		_ = resp.Body.Close()
 	}
 	conn := dialWS(t, g.Addr(), "right")
-	_ = readJSON(t, conn) // state
+	drainInitialFrames(t, conn)
 	_ = conn.Close(websocket.StatusNormalClosure, "")
 
 	// A single bad attempt after the reset must NOT 429 — it must 401.
@@ -820,7 +831,7 @@ func TestChannelMessagesReplayedInTSOrder(t *testing.T) {
 
 	conn := dialWS(t, g.Addr(), "p")
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	_ = readJSON(t, conn) // state
+	drainInitialFrames(t, conn)
 
 	got := []string{}
 	deadline := time.Now().Add(3 * time.Second)
@@ -851,7 +862,7 @@ func TestBroadcastDropsClientOnClosedConn(t *testing.T) {
 	defer td()
 
 	conn := dialWS(t, g.Addr(), "p")
-	_ = readJSON(t, conn) // state
+	drainInitialFrames(t, conn)
 
 	// Close from the client side without notice; the gateway's next
 	// broadcast.sendTo write will fail and remove the client.
@@ -886,7 +897,7 @@ func TestInboundDispatchSkipsEmptyOrInvalidPayloads(t *testing.T) {
 	defer td()
 	conn := dialWS(t, g.Addr(), "p")
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	_ = readJSON(t, conn) // state
+	drainInitialFrames(t, conn)
 
 	// Every one of these is a syntactic no-op: required fields missing,
 	// empty strings, etc. None should fan to bridge or sender.
@@ -959,7 +970,7 @@ func TestOnMessageReadsEnvelopeFieldsWhenPresent(t *testing.T) {
 
 	conn := dialWS(t, g.Addr(), "p")
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	_ = readJSON(t, conn) // state
+	drainInitialFrames(t, conn)
 
 	// Publish an EventMessage with an envelope (not channel/sender/
 	// text fields). The gateway must read from env.* — covers the
@@ -1002,7 +1013,7 @@ func TestRecordChannelTrimsBufferAtCap(t *testing.T) {
 
 	conn := dialWS(t, g.Addr(), "p")
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	_ = readJSON(t, conn) // state
+	drainInitialFrames(t, conn)
 
 	replayed := 0
 	deadline := time.Now().Add(2 * time.Second)
@@ -1035,7 +1046,7 @@ func TestServerNoticeBufferTrimsAtCap(t *testing.T) {
 
 	conn := dialWS(t, g.Addr(), "p")
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	_ = readJSON(t, conn) // state
+	drainInitialFrames(t, conn)
 
 	replayed := 0
 	deadline := time.Now().Add(2 * time.Second)
@@ -1064,7 +1075,7 @@ func TestInboundNickDeniedWhenLocked(t *testing.T) {
 	defer td()
 	conn := dialWS(t, g.Addr(), "p")
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	_ = readJSON(t, conn) // state
+	drainInitialFrames(t, conn)
 
 	body, _ := json.Marshal(map[string]any{"op": "nick", "nick": "newnick"})
 	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
@@ -1092,7 +1103,7 @@ func TestInboundJoinDeniedAtChannelCap(t *testing.T) {
 	defer td()
 	conn := dialWS(t, g.Addr(), "p")
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	_ = readJSON(t, conn) // state
+	drainInitialFrames(t, conn)
 
 	body, _ := json.Marshal(map[string]any{"op": "join", "channel": "#c"})
 	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
@@ -1118,7 +1129,7 @@ func TestInboundJoinAllowedBelowChannelCap(t *testing.T) {
 	defer td()
 	conn := dialWS(t, g.Addr(), "p")
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	_ = readJSON(t, conn) // state
+	drainInitialFrames(t, conn)
 
 	body, _ := json.Marshal(map[string]any{"op": "join", "channel": "#b"})
 	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
@@ -1139,7 +1150,7 @@ func TestInboundSayRateLimitedEmitsRateLimitedEvent(t *testing.T) {
 	defer td()
 	conn := dialWS(t, g.Addr(), "p")
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	_ = readJSON(t, conn) // state
+	drainInitialFrames(t, conn)
 
 	// First 2 sends pass the throttle and produce the MESSAGE_SENT echo.
 	for i := 0; i < 2; i++ {
@@ -1172,7 +1183,7 @@ func TestInboundSayPerTargetThrottleScopesIndependently(t *testing.T) {
 	defer td()
 	conn := dialWS(t, g.Addr(), "p")
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	_ = readJSON(t, conn) // state
+	drainInitialFrames(t, conn)
 
 	// #a uses its bucket.
 	bodyA, _ := json.Marshal(map[string]any{"op": "say", "channel": "#a", "text": "hi"})

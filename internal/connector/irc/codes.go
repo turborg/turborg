@@ -8,6 +8,14 @@ const (
 	RplYourHost      = "002"
 	RplCreated       = "003"
 	RplMyInfo        = "004"
+	RplISupport      = "005"
+	RplLUserClient   = "251"
+	RplLUserOp       = "252"
+	RplLUserUnknown  = "253"
+	RplLUserChannels = "254"
+	RplLUserMe       = "255"
+	RplMOTD          = "372"
+	RplMOTDStart     = "375"
 	RplWhoisUser     = "311"
 	RplWhoisServer   = "312"
 	RplWhoisOperator = "313"
@@ -72,6 +80,7 @@ const (
 	CmdList          = "LIST"
 	CmdWho           = "WHO"
 	CmdAuthenticate  = "AUTHENTICATE"
+	CmdError         = "ERROR"
 )
 
 // IsHandshakeComplete reports whether the given numeric reply signals the

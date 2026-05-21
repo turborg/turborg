@@ -79,6 +79,29 @@ func TestParseUnixSeconds(t *testing.T) {
 	assert.Equal(t, int64(0), parseUnixSeconds("123abc"))
 }
 
+func TestServerNoticeTextPrefersTrailing(t *testing.T) {
+	// Standard shape: most server numerics carry their human-readable
+	// body in the trailing parameter.
+	got := serverNoticeText(Message{Params: []string{"alice"}, Trailing: "Welcome to the network"})
+	assert.Equal(t, "Welcome to the network", got)
+}
+
+func TestServerNoticeTextFallsBackToParamsWhenNoTrailing(t *testing.T) {
+	// RFC-loose servers occasionally stuff the body into space-separated
+	// params instead. Skip the first param (recipient nick) and join
+	// the rest so the server tab still renders something useful.
+	got := serverNoticeText(Message{Params: []string{"alice", "ergo.test", "ergo-2.18.0"}})
+	assert.Equal(t, "ergo.test ergo-2.18.0", got)
+}
+
+func TestIsServerPrefix(t *testing.T) {
+	assert.True(t, isServerPrefix(""), "empty prefix counts as server-originated")
+	assert.True(t, isServerPrefix("irc.libera.chat"), "bare hostname is a server")
+	assert.True(t, isServerPrefix("ergo.test"), "bare hostname is a server")
+	assert.False(t, isServerPrefix("alice!~user@host"), "nick!user@host is a user")
+	assert.False(t, isServerPrefix("bot!~b@cloak/bot"), "user with cloak is still a user")
+}
+
 func TestCTCPHelpers(t *testing.T) {
 	assert.True(t, isCTCP("\x01VERSION\x01"))
 	assert.False(t, isCTCP("plain"))
@@ -137,6 +160,170 @@ func TestPeerIPOnNilClient(t *testing.T) {
 
 func TestPeerIPOnNilConn(t *testing.T) {
 	assert.Equal(t, "", peerIP(&BouncerClient{}))
+}
+
+// ─── Whois / List / Who numeric handlers ──────────────────────────────
+
+// connectorWithBus spins up a minimal Connector wired to a fresh
+// EventBus, plus an unbuffered subscriber channel keyed on the event
+// type. Lets numeric-handler tests assert "given input X, exactly one
+// event Y was published with these fields" without standing up the
+// runtime / dial loop.
+func connectorWithBus(t *testing.T, eventType agent.EventType) (*Connector, <-chan *agent.Event) {
+	t.Helper()
+	bus := agent.NewEventBus(nil)
+	c := New(&Settings{Nick: "me"}, nil, bus)
+	out := make(chan *agent.Event, 16)
+	bus.Subscribe(eventType, func(_ context.Context, ev *agent.Event) {
+		out <- ev
+	})
+	return c, out
+}
+
+func TestHandleWhoisNumericAccumulatesAndFlushesOnEnd(t *testing.T) {
+	c, ch := connectorWithBus(t, agent.EventWhoisResult)
+	ctx := context.Background()
+
+	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisUser, Params: []string{"me", "alice", "~uid", "host.tld", "*"}, Trailing: "Alice Wonderland"})
+	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisServer, Params: []string{"me", "alice", "ergo.test"}, Trailing: "Test Server"})
+	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisOperator, Params: []string{"me", "alice"}, Trailing: "is an IRC operator"})
+	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisIdle, Params: []string{"me", "alice", "42", "1700000000"}, Trailing: "seconds idle"})
+	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisChannels, Params: []string{"me", "alice"}, Trailing: "@#test +#voice #plain"})
+	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisAccount, Params: []string{"me", "alice", "alice-account"}, Trailing: "is logged in as"})
+	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisSecure, Params: []string{"me", "alice"}, Trailing: "is using a secure connection"})
+
+	// Nothing published yet — no 318 received.
+	select {
+	case ev := <-ch:
+		t.Fatalf("EventWhoisResult fired before RplEndOfWhois: %+v", ev)
+	default:
+	}
+
+	c.handleWhoisNumeric(ctx, Message{Command: RplEndOfWhois, Params: []string{"me", "alice"}, Trailing: "End of /WHOIS list"})
+
+	ev := <-ch
+	require.NotNil(t, ev)
+	assert.Equal(t, "alice", ev.Fields["nick"])
+	assert.Equal(t, "~uid", ev.Fields["user"])
+	assert.Equal(t, "host.tld", ev.Fields["host"])
+	assert.Equal(t, "Alice Wonderland", ev.Fields["realName"])
+	assert.Equal(t, "alice-account", ev.Fields["account"])
+	assert.Equal(t, "ergo.test", ev.Fields["server"])
+	assert.Equal(t, "Test Server", ev.Fields["serverInfo"])
+	assert.Equal(t, int64(42), ev.Fields["idleSeconds"])
+	assert.Equal(t, int64(1700000000), ev.Fields["signonAt"])
+	assert.Equal(t, true, ev.Fields["secure"])
+	assert.Equal(t, true, ev.Fields["isOperator"])
+	assert.Equal(t, []string{"#test", "#voice", "#plain"}, ev.Fields["channels"],
+		"channel-list prefix glyphs (@, +) must be stripped")
+
+	// Builder cleared.
+	c.whoisMu.Lock()
+	_, stillThere := c.whoisInFlight["alice"]
+	c.whoisMu.Unlock()
+	assert.False(t, stillThere, "whois builder must be cleared after the 318 flush")
+}
+
+func TestHandleWhoisNoSuchNick(t *testing.T) {
+	c, ch := connectorWithBus(t, agent.EventWhoisResult)
+	ctx := context.Background()
+
+	// Open a whois that the server will fail. The handler buffers
+	// nothing until at least one numeric arrives; simulate a 401
+	// straight away — common when the user types /whois on a nick
+	// the server has never seen.
+	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisUser, Params: []string{"me", "phantom", "~u", "h", "*"}, Trailing: "P"})
+	c.handleWhoisNoSuchNick(ctx, "phantom", "No such nick/channel")
+
+	ev := <-ch
+	assert.Equal(t, "phantom", ev.Fields["nick"])
+	assert.Equal(t, "No such nick/channel", ev.Fields["error"])
+	// Optional fields must NOT be set on an error result — the modal
+	// renders the error path when ev.error is present.
+	assert.NotContains(t, ev.Fields, "realName")
+
+	// And a 401 with no in-flight builder is a silent no-op.
+	c.handleWhoisNoSuchNick(ctx, "nobody-i-care-about", "No such nick")
+	select {
+	case ev := <-ch:
+		t.Fatalf("401 with no in-flight whois must not publish: %+v", ev)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestHandleListNumericAggregatesAcrossBatch(t *testing.T) {
+	c, ch := connectorWithBus(t, agent.EventListResult)
+	ctx := context.Background()
+
+	c.handleListNumeric(ctx, Message{Command: RplListStart, Params: []string{"me"}, Trailing: "Channel :Users  Name"})
+	c.handleListNumeric(ctx, Message{Command: RplList, Params: []string{"me", "#test", "5"}, Trailing: "the test channel"})
+	c.handleListNumeric(ctx, Message{Command: RplList, Params: []string{"me", "#empty", "0"}, Trailing: ""})
+	c.handleListNumeric(ctx, Message{Command: RplList, Params: []string{"me", "#bare", "12"}})
+	c.handleListNumeric(ctx, Message{Command: RplListEnd, Params: []string{"me"}, Trailing: "End of /LIST"})
+
+	ev := <-ch
+	channels := ev.Fields["channels"].([]map[string]any)
+	require.Len(t, channels, 3)
+	assert.Equal(t, "#test", channels[0]["name"])
+	assert.Equal(t, 5, channels[0]["users"])
+	assert.Equal(t, "the test channel", channels[0]["topic"])
+	// Empty topic and zero users are omitted from the row map to keep
+	// the SPA's row.users / row.topic = undefined distinction intact.
+	assert.NotContains(t, channels[1], "topic")
+	assert.NotContains(t, channels[1], "users")
+	assert.Equal(t, "#bare", channels[2]["name"])
+	assert.Equal(t, 12, channels[2]["users"])
+}
+
+func TestHandleWhoNumericAggregatesPerTarget(t *testing.T) {
+	c, ch := connectorWithBus(t, agent.EventWhoResult)
+	ctx := context.Background()
+
+	// /who #test
+	c.handleWhoNumeric(ctx, Message{
+		Command:  RplWhoReply,
+		Params:   []string{"me", "#test", "~alice", "alice.tld", "ergo", "alice", "H@"},
+		Trailing: "0 Alice W",
+	})
+	c.handleWhoNumeric(ctx, Message{
+		Command:  RplWhoReply,
+		Params:   []string{"me", "#test", "~bob", "bob.tld", "ergo", "bob", "H+"},
+		Trailing: "1 Bob",
+	})
+	c.handleWhoNumeric(ctx, Message{Command: RplEndOfWho, Params: []string{"me", "#test"}, Trailing: "End of /WHO list"})
+
+	ev := <-ch
+	assert.Equal(t, "#test", ev.Fields["target"])
+	users := ev.Fields["users"].([]map[string]any)
+	require.Len(t, users, 2)
+	assert.Equal(t, "alice", users[0]["nick"])
+	assert.Equal(t, "~alice", users[0]["user"])
+	assert.Equal(t, "alice.tld", users[0]["host"])
+	assert.Equal(t, "H@", users[0]["flags"])
+	assert.Equal(t, "Alice W", users[0]["realName"], "hopcount prefix must be stripped from realname")
+	assert.Equal(t, "bob", users[1]["nick"])
+	assert.Equal(t, "Bob", users[1]["realName"])
+}
+
+func TestHandleWhoNumericTwoTargetsInFlight(t *testing.T) {
+	// Two /who targets running interleaved must not smear their
+	// member lists into each other.
+	c, ch := connectorWithBus(t, agent.EventWhoResult)
+	ctx := context.Background()
+
+	c.handleWhoNumeric(ctx, Message{Command: RplWhoReply, Params: []string{"me", "#a", "~a", "h", "s", "alice", "H"}, Trailing: "0 A"})
+	c.handleWhoNumeric(ctx, Message{Command: RplWhoReply, Params: []string{"me", "#b", "~b", "h", "s", "bob", "H"}, Trailing: "0 B"})
+	c.handleWhoNumeric(ctx, Message{Command: RplEndOfWho, Params: []string{"me", "#a"}})
+	c.handleWhoNumeric(ctx, Message{Command: RplEndOfWho, Params: []string{"me", "#b"}})
+
+	first := <-ch
+	second := <-ch
+	// Order on the bus matches the order of EndOfWho processing.
+	assert.Equal(t, "#a", first.Fields["target"])
+	assert.Len(t, first.Fields["users"].([]map[string]any), 1)
+	assert.Equal(t, "alice", first.Fields["users"].([]map[string]any)[0]["nick"])
+	assert.Equal(t, "#b", second.Fields["target"])
+	assert.Equal(t, "bob", second.Fields["users"].([]map[string]any)[0]["nick"])
 }
 
 func TestPeerIPNonTCPFallback(t *testing.T) {
@@ -1213,4 +1400,152 @@ func TestStartListenErrorSurfaces(t *testing.T) {
 	require.NoError(t, err)
 	err = b.Start(context.Background())
 	require.Error(t, err, "negative port must surface a listen error")
+}
+
+func TestHumanReadableJoinFailure(t *testing.T) {
+	cases := []struct {
+		code string
+		want string
+	}{
+		{ErrBannedFromChan, "banned from channel"},
+		{ErrBadChannelKey, "channel key required or incorrect"},
+		{ErrChannelIsFull, "channel is full"},
+		{ErrInviteOnlyChan, "channel is invite-only"},
+		{ErrBadChanMask, "channel name not accepted by the network"},
+		{"999", "rejected by network"},
+		{"", "rejected by network"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.code, func(t *testing.T) {
+			assert.Equal(t, tc.want, humanReadableJoinFailure(tc.code))
+		})
+	}
+}
+
+func TestHandleModePublishesEventAndUpdatesState(t *testing.T) {
+	c, ch := connectorWithBus(t, agent.EventModeChanged)
+	c.state.OnSelfJoin("#chan")
+	c.state.OnNamesReply("#chan", []string{"alice", "bob", "carol"})
+	c.state.OnNamesEnd("#chan")
+
+	c.handleMode(context.Background(), Message{
+		Prefix:  "op!u@h",
+		Command: CmdMode,
+		Params:  []string{"#chan", "+o-v", "alice", "bob"},
+	})
+
+	ev := <-ch
+	require.NotNil(t, ev)
+	assert.Equal(t, "#chan", ev.Fields["channel"])
+	assert.Equal(t, "+o-v", ev.Fields["modes"])
+	assert.Equal(t, "alice bob", ev.Fields["args"])
+	assert.Equal(t, "op", ev.Fields["by"])
+
+	info := c.state.Get("#chan")
+	require.NotNil(t, info)
+	assert.Equal(t, "@", info.Members["alice"], "+o on alice promotes to op prefix")
+}
+
+func TestHandleModeIgnoresMalformedLines(t *testing.T) {
+	c, ch := connectorWithBus(t, agent.EventModeChanged)
+
+	// Fewer than 2 params: no channel/modes pair, must early-out.
+	c.handleMode(context.Background(), Message{Command: CmdMode, Params: []string{"#chan"}})
+	// Target that isn't a channel sigil — MODE on a nick (umode) is not
+	// our concern here and must not publish a channel-mode event.
+	c.handleMode(context.Background(), Message{Command: CmdMode, Params: []string{"alice", "+i"}})
+
+	select {
+	case ev := <-ch:
+		t.Fatalf("EventModeChanged published for malformed MODE: %+v", ev)
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestApplyPrefixModesToStatePrefixRules(t *testing.T) {
+	state := NewChannelState()
+	state.OnSelfJoin("#chan")
+	state.OnNamesReply("#chan", []string{"@alice", "+bob", "carol"})
+	state.OnNamesEnd("#chan")
+
+	// +v on an op must not visually demote (op outranks voice).
+	applyPrefixModesToState(state, "#chan", "+v", []string{"alice"})
+	info := state.Get("#chan")
+	require.NotNil(t, info)
+	assert.Equal(t, "@", info.Members["alice"], "+v on op leaves displayed @")
+
+	// +o on a plain member promotes to @.
+	applyPrefixModesToState(state, "#chan", "+o", []string{"carol"})
+	info = state.Get("#chan")
+	assert.Equal(t, "@", info.Members["carol"])
+
+	// -v on someone currently displayed as + drops to "".
+	applyPrefixModesToState(state, "#chan", "-v", []string{"bob"})
+	info = state.Get("#chan")
+	assert.Equal(t, "", info.Members["bob"])
+
+	// -v on alice (displayed @) is a no-op for the displayed prefix —
+	// only the equal-rank removal clears the slot.
+	applyPrefixModesToState(state, "#chan", "-v", []string{"alice"})
+	info = state.Get("#chan")
+	assert.Equal(t, "@", info.Members["alice"], "removing a lower mode mustn't clear the displayed higher one")
+}
+
+func TestApplyPrefixModesToStateSkipsNonPrefixArgModes(t *testing.T) {
+	state := NewChannelState()
+	state.OnSelfJoin("#chan")
+	state.OnNamesReply("#chan", []string{"alice"})
+	state.OnNamesEnd("#chan")
+
+	// "+bo banmask alice" — `b` consumes one arg (banmask) which must
+	// be skipped so the `o` flag aligns with `alice`, not banmask.
+	applyPrefixModesToState(state, "#chan", "+bo", []string{"*!*@evil", "alice"})
+
+	info := state.Get("#chan")
+	require.NotNil(t, info)
+	assert.Equal(t, "@", info.Members["alice"], "b-mode arg must advance the cursor so o lands on alice")
+}
+
+func TestApplyPrefixModesToStateAddOnlyArgMode(t *testing.T) {
+	state := NewChannelState()
+	state.OnSelfJoin("#chan")
+	state.OnNamesReply("#chan", []string{"alice"})
+	state.OnNamesEnd("#chan")
+
+	// `+l 50 +o alice` — `l` consumes the `50` arg only when adding;
+	// `o` then aligns with `alice`. With a `-l` form (no arg), the
+	// next arg-cursor must stay put.
+	applyPrefixModesToState(state, "#chan", "+l+o", []string{"50", "alice"})
+	info := state.Get("#chan")
+	require.NotNil(t, info)
+	assert.Equal(t, "@", info.Members["alice"])
+
+	// `-l+o alice` — `l` does not consume when removing, so `o` lands
+	// on `alice` from arg[0].
+	state.SetMemberPrefix("#chan", "alice", "")
+	applyPrefixModesToState(state, "#chan", "-l+o", []string{"alice"})
+	info = state.Get("#chan")
+	assert.Equal(t, "@", info.Members["alice"])
+}
+
+func TestApplyPrefixModesToStateGuards(t *testing.T) {
+	// nil state must be a no-op (defensive).
+	assert.NotPanics(t, func() {
+		applyPrefixModesToState(nil, "#chan", "+o", []string{"alice"})
+	})
+
+	// Unknown channel — no-op.
+	state := NewChannelState()
+	assert.NotPanics(t, func() {
+		applyPrefixModesToState(state, "#missing", "+o", []string{"alice"})
+	})
+
+	// Unknown nick on a known channel — must not invent a phantom
+	// member (matches SetMemberPrefix's own guard).
+	state.OnSelfJoin("#chan")
+	applyPrefixModesToState(state, "#chan", "+o", []string{"ghost"})
+	info := state.Get("#chan")
+	require.NotNil(t, info)
+	_, present := info.Members["ghost"]
+	assert.False(t, present, "MODE for a non-member mustn't materialise the nick")
 }

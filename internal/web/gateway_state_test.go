@@ -51,7 +51,7 @@ func TestGatewayBroadcastsConnectorStateChanged(t *testing.T) {
 
 	// Drain the initial state + replay frames so the next read sees
 	// only fresh state-change events.
-	_ = readJSON(t, ws)
+	drainInitialFrames(t, ws)
 
 	// Drive a transition through the bridge's state machine.
 	bridge.UpstreamState().Transition(irc.UpstreamStateDisconnectedTransient,
@@ -92,7 +92,7 @@ func TestGatewayStateChangedSeverityForTerminalStates(t *testing.T) {
 
 			ws := dialWS(t, g.Addr(), "p")
 			defer ws.Close(0, "")
-			_ = readJSON(t, ws)
+			drainInitialFrames(t, ws)
 
 			bridge.UpstreamState().Transition(tc.state)
 			got := drainUntilOp(t, ws, "connector.state_changed", time.Second)
@@ -115,7 +115,7 @@ func TestGatewaySayRejectedWhenStateNotRegistered(t *testing.T) {
 
 	ws := dialWS(t, g.Addr(), "p")
 	defer ws.Close(0, "")
-	_ = readJSON(t, ws)
+	drainInitialFrames(t, ws)
 
 	// Drop upstream out from under any subsequent say op.
 	bridge.UpstreamState().Transition(irc.UpstreamStateDisconnectedTransient,
@@ -148,7 +148,7 @@ func TestGatewaySayWriteErrorPathRejects(t *testing.T) {
 
 	ws := dialWS(t, g.Addr(), "p")
 	defer ws.Close(0, "")
-	_ = readJSON(t, ws)
+	drainInitialFrames(t, ws)
 
 	require.NoError(t, ws.Write(context.Background(), websocket.MessageText,
 		[]byte(`{"op":"say","channel":"#a","text":"hi"}`)))
@@ -174,7 +174,7 @@ func TestGatewaySayDuringRegisteredFlowsThrough(t *testing.T) {
 
 	ws := dialWS(t, g.Addr(), "p")
 	defer ws.Close(0, "")
-	_ = readJSON(t, ws)
+	drainInitialFrames(t, ws)
 
 	require.NoError(t, ws.Write(context.Background(), websocket.MessageText,
 		[]byte(`{"op":"say","channel":"#a","text":"hi"}`)))

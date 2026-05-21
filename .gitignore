@@ -25,3 +25,5 @@ Thumbs.db
 # Local-only plans + Claude notes
 PLAN-*.md
 CLAUDE.md
+# Compiled devirc binary; leading slash so it doesn't shadow cmd/devirc/ source.
+/devirc

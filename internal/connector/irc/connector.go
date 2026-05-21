@@ -39,7 +39,7 @@ func (e *pongTimeoutError) Temporary() bool { return true }
 //     RPL_ENDOFMOTD or ERR_NOMOTD, JOIN configured channels, send
 //     NickServ IDENTIFY if configured, start the bouncer if configured.
 //   - Run: long-lived supervised loop owned by Agent's errgroup. Reader
-//     + dispatcher, all unwound on ctx cancel via SetReadDeadline.
+//   - dispatcher, all unwound on ctx cancel via SetReadDeadline.
 //   - Stop: send QUIT, close the upstream, stop the bouncer. Idempotent.
 type Connector struct {
 	settings *Settings
@@ -61,9 +61,9 @@ type Connector struct {
 	// paused. Initialised in New so callers can subscribe before Start.
 	machine *UpstreamStateMachine
 
-	state    *ChannelState
-	bouncer  *Bouncer
-	ctcp     *Throttle
+	state   *ChannelState
+	bouncer *Bouncer
+	ctcp    *Throttle
 
 	// wanted is the "channels I want to be in" set the reconnect
 	// supervisor replays JOINs from. Seeded at construction from the
@@ -132,7 +132,75 @@ type Connector struct {
 	// that bypass runSession) makes the ack a no-op.
 	pingLedgerRef atomic.Pointer[pingLedger]
 
+	// whoisInFlight accumulates the multi-numeric WHOIS response (311/
+	// 312/313/317/319/330/671) keyed by lower-case target nick. Cleared
+	// on RPL_ENDOFWHOIS (318) or ERR_NOSUCHNICK (401) once the
+	// EventWhoisResult is published. Concurrent /whois on different
+	// nicks are isolated by the map key; same-nick interleaving merges
+	// into a single result (last-write-wins for any duplicated field).
+	whoisMu       sync.Mutex
+	whoisInFlight map[string]*whoisBuilder
+
+	// listInFlight accumulates RPL_LIST (322) items between 321 (start)
+	// or first 322 and 323 (end). Single buffer because IRC /LIST is
+	// network-global, not per-target — two concurrent calls overlap on
+	// the same numeric stream so we have no signal to split them.
+	listMu       sync.Mutex
+	listInFlight []listChannelEntry
+
+	// whoInFlight accumulates RPL_WHOREPLY (352) items keyed by lower-
+	// case query target (channel or mask). Cleared on RPL_ENDOFWHO
+	// (315) when the EventWhoResult is published. Per-target keying so
+	// /who #a and /who #b running simultaneously stay isolated.
+	whoMu       sync.Mutex
+	whoInFlight map[string]*whoBuilder
+
 	stopOnce sync.Once
+}
+
+// whoisBuilder accumulates a WHOIS response across the 311/312/313/317/
+// 319/330/671 numerics. Optional fields default to their zero value;
+// the publisher only adds them to the agent.Event map when they were
+// populated, so the SPA's WhoisResultEvent retains its
+// undefined-vs-empty-string distinction.
+type whoisBuilder struct {
+	nick        string
+	user        string
+	host        string
+	realName    string
+	server      string
+	serverInfo  string
+	account     string
+	idleSeconds int64
+	signonAt    int64
+	secure      bool
+	isOperator  bool
+	channels    []string
+}
+
+// listChannelEntry mirrors one RPL_LIST (322) row aggregated into the
+// EventListResult payload. Optional users/topic stay empty when the
+// server omits them (some IRCDs send only the channel name).
+type listChannelEntry struct {
+	name  string
+	users int
+	topic string
+}
+
+// whoBuilder accumulates RPL_WHOREPLY (352) rows for a /WHO target
+// until RPL_ENDOFWHO (315) closes the request.
+type whoBuilder struct {
+	target string
+	users  []whoUserEntry
+}
+
+// whoUserEntry mirrors one row of a /WHO reply.
+type whoUserEntry struct {
+	nick     string
+	user     string
+	host     string
+	realName string
+	flags    string
 }
 
 // New constructs an IRC Connector. Pass nil for events when the agent is
@@ -182,10 +250,10 @@ func (c *Connector) setClient(cli *Client) {
 // lifetime of the Connector.
 func (c *Connector) UpstreamState() *UpstreamStateMachine { return c.machine }
 
-func (c *Connector) Name() string                          { return "irc" }
+func (c *Connector) Name() string                           { return "irc" }
 func (c *Connector) Inbound() <-chan *agent.InboundEnvelope { return c.inbox }
-func (c *Connector) ClaimSupervision() bool                { return true }
-func (c *Connector) State() *ChannelState                  { return c.state }
+func (c *Connector) ClaimSupervision() bool                 { return true }
+func (c *Connector) State() *ChannelState                   { return c.state }
 
 // SetClientLimits installs the operator-policy struct that gates
 // client-initiated commands (NICK, USER realname, JOIN-vs-channel-cap).
@@ -791,9 +859,32 @@ func (c *Connector) awaitHandshake(ctx context.Context) error {
 		case ErrNotRegistered:
 			return fmt.Errorf("irc handshake: server rejected pre-registration command (451)")
 		}
+		// Welcome / info / MOTD numerics all arrive during the handshake
+		// window — before runSession's main dispatcher takes over. Mirror
+		// them to the server tab here so the SPA's Server view shows them
+		// streaming in instead of staying empty until the next runtime
+		// notice (which on a healthy bot may never come).
+		c.maybePublishHandshakeServerNotice(hctx, msg)
 		if IsHandshakeComplete(msg.Command) {
 			return nil
 		}
+	}
+}
+
+// maybePublishHandshakeServerNotice forwards welcome / info / MOTD
+// numerics seen during awaitHandshake to the agent bus so the gateway
+// can replay them to attached SPA clients. Mirrors the parallel cases
+// in the main runSession dispatcher; the duplication is intentional
+// because handshake-window lines never reach that dispatcher.
+func (c *Connector) maybePublishHandshakeServerNotice(ctx context.Context, msg Message) {
+	switch msg.Command {
+	case RplWelcome:
+		c.publishServerNotice(ctx, "welcome", msg.Trailing)
+	case RplYourHost, RplCreated, RplMyInfo, RplISupport,
+		RplLUserClient, RplLUserOp, RplLUserUnknown, RplLUserChannels, RplLUserMe:
+		c.publishServerNotice(ctx, "info", serverNoticeText(msg))
+	case RplMOTDStart, RplMOTD, RplEndOfMOTD, ErrNoMOTD:
+		c.publishServerNotice(ctx, "motd", serverNoticeText(msg))
 	}
 }
 
@@ -843,6 +934,17 @@ func (c *Connector) Run(ctx context.Context) error {
 	}
 
 	backoff := NewBackoffSchedule()
+	// sessionStart is the moment the current upstream session became
+	// active (last successful bringUp). Used to gate backoff.Reset on a
+	// minimum-stable-session window: without this gate, networks that
+	// accept the IRC handshake and then immediately tear the connection
+	// down (Libera's drone-BL post-register KILL, a forwarded K-line,
+	// etc.) keep the supervisor pinned at the start of the schedule and
+	// reconnecting every ~1s in a tight loop. Initialised to now because
+	// Start() runs bringUp once before Run() takes over, so the first
+	// runSession iteration corresponds to that already-active session.
+	sessionStart := time.Now()
+	const sessionStableWindow = 30 * time.Second
 
 	watchdogCtx, cancelWatchdog := context.WithCancel(ctx)
 	defer cancelWatchdog()
@@ -895,6 +997,16 @@ func (c *Connector) Run(ctx context.Context) error {
 			return exitTerminal(err)
 		}
 
+		// Only credit a backoff reset if the session that just ended ran
+		// long enough to look healthy — see sessionStart comment at the
+		// top of Run for why. A nil sessionStart means the previous
+		// bringUp failed (no session ran at all) and the schedule must
+		// keep advancing.
+		if !sessionStart.IsZero() && time.Since(sessionStart) >= sessionStableWindow {
+			backoff.Reset()
+		}
+		sessionStart = time.Time{}
+
 		// Recoverable: sleep with backoff, then bring upstream back up.
 		// runCtx cancels mid-sleep when the watchdog transitions to
 		// paused_idle — that surfaces as runCtx.Done.
@@ -923,7 +1035,7 @@ func (c *Connector) Run(ctx context.Context) error {
 			c.log.Warn("irc reconnect failed", "err", err)
 			continue
 		}
-		backoff.Reset()
+		sessionStart = time.Now()
 	}
 }
 
@@ -1307,6 +1419,39 @@ func (c *Connector) dispatchLine(ctx context.Context, line string) {
 		if len(msg.Params) > 0 {
 			c.setCurrentNick(msg.Params[0])
 		}
+		c.publishServerNotice(ctx, "welcome", msg.Trailing)
+	case RplYourHost, RplCreated, RplMyInfo, RplISupport,
+		RplLUserClient, RplLUserOp, RplLUserUnknown, RplLUserChannels, RplLUserMe:
+		// Connection-info numerics (server name, version, user counts,
+		// supported features). Forward as `info` to the server tab so
+		// users see something land during the handshake instead of a
+		// blank Server tab. Trailing carries the human-readable text
+		// for these; if a server pulls a non-RFC shape that puts the
+		// content in params, fall back to the joined params.
+		c.publishServerNotice(ctx, "info", serverNoticeText(msg))
+	case RplMOTDStart, RplMOTD, RplEndOfMOTD, ErrNoMOTD:
+		// The MOTD block. RPL_MOTDSTART (375) / RPL_MOTD (372) /
+		// RPL_ENDOFMOTD (376) are the standard shape; ERR_NOMOTD (422)
+		// stands in for servers that have no MOTD configured.
+		c.publishServerNotice(ctx, "motd", serverNoticeText(msg))
+	case CmdError:
+		// :server ERROR :<reason> — pre-disconnect server-originated
+		// failure (banned, throttled, etc.). The supervisor's
+		// ClassifyERRORLine already drives the upstream state machine
+		// for this; mirror the body to the server tab so the user
+		// sees the reason in the chat surface too.
+		c.publishServerNotice(ctx, "error", serverNoticeText(msg))
+	case CmdNotice:
+		// Server-originated NOTICE (no `!user@host` in the prefix) —
+		// pre-registration "NOTICE AUTH :*** Looking up your
+		// hostname" lines, services bot greetings, etc. — flow into
+		// the server tab. Client-originated NOTICEs (with a user
+		// hostmask prefix) are intentionally left unhandled here:
+		// the bot has no PRIVMSG-equivalent path for NOTICE today,
+		// and silently dropping matches the pre-existing behaviour.
+		if isServerPrefix(msg.Prefix) {
+			c.publishServerNotice(ctx, "notice", serverNoticeText(msg))
+		}
 	case CmdPrivmsg:
 		c.handlePrivmsg(ctx, msg, line)
 	case CmdJoin:
@@ -1321,6 +1466,8 @@ func (c *Connector) dispatchLine(ctx context.Context, line string) {
 		c.handleNickChange(ctx, msg)
 	case CmdTopic:
 		c.handleTopic(ctx, msg)
+	case CmdMode:
+		c.handleMode(ctx, msg)
 	case RplTopic:
 		// :server 332 nick #ch :topic
 		if len(msg.Params) >= 2 {
@@ -1371,6 +1518,29 @@ func (c *Connector) dispatchLine(ctx context.Context, line string) {
 	case ErrBannedFromChan, ErrBadChannelKey, ErrChannelIsFull,
 		ErrInviteOnlyChan, ErrBadChanMask:
 		c.handleJoinFailure(ctx, msg)
+	case RplWhoisUser,
+		RplWhoisServer,
+		RplWhoisOperator,
+		RplWhoisIdle,
+		RplWhoisChannels,
+		RplWhoisAccount,
+		RplWhoisSecure,
+		RplEndOfWhois:
+		c.handleWhoisNumeric(ctx, msg)
+	case RplListStart, RplList, RplListEnd:
+		c.handleListNumeric(ctx, msg)
+	case RplWhoReply, RplEndOfWho:
+		c.handleWhoNumeric(ctx, msg)
+	case ErrNoSuchNick:
+		// `WHOIS phantom` → server replies with 401. If we have a
+		// whois in flight for that nick, finalise it with an error so
+		// the SPA's modal renders a friendly "no such nick" instead
+		// of staying empty. Standalone 401s (the bot is told it sent
+		// PRIVMSG/NOTICE to a vanished nick) hit this too — harmless
+		// no-op when no whois is in flight.
+		if len(msg.Params) >= 2 {
+			c.handleWhoisNoSuchNick(ctx, msg.Params[1], msg.Trailing)
+		}
 	}
 }
 
@@ -1525,11 +1695,28 @@ func (c *Connector) handleQuit(ctx context.Context, msg Message) {
 	if nick == "" {
 		return
 	}
+	// Snapshot which channels the nick was in BEFORE the state mutation,
+	// so we can fan out a per-channel EventUserLeave for each. The web
+	// gateway translates EventUserLeave → op:part on the wire, and the
+	// SPA's part handler looks up the channel by name. Without a
+	// channel field the SPA can't find the channel and silently no-ops,
+	// leaving the QUITting nick ghosted in every member list it was
+	// in. IRC QUIT is network-wide; the user-facing model in clients
+	// is per-channel removal.
+	affected := c.state.ChannelsContaining(nick)
 	c.state.OnMemberQuit(nick)
-	c.publish(ctx, agent.Event{
-		Type:   agent.EventUserLeave,
-		Fields: map[string]any{"connector": c.Name(), "nick": nick, "reason": msg.Trailing},
-	})
+	reason := msg.Trailing
+	for _, channel := range affected {
+		c.publish(ctx, agent.Event{
+			Type: agent.EventUserLeave,
+			Fields: map[string]any{
+				"connector": c.Name(),
+				"channel":   channel,
+				"nick":      nick,
+				"reason":    reason,
+			},
+		})
+	}
 }
 
 func (c *Connector) handleKick(ctx context.Context, msg Message) {
@@ -1577,6 +1764,400 @@ func (c *Connector) handleNickChange(ctx context.Context, msg Message) {
 	})
 }
 
+// handleMode handles `:setter MODE #channel <modes> [args...]` lines.
+// It does two things:
+//
+//  1. Update the bot's local ChannelState so prefix changes (q/a/o/h/v)
+//     are reflected in member.Mode for the next sendState snapshot —
+//     otherwise newly-attaching WS clients see a stale view until the
+//     next NAMES sync.
+//  2. Publish EventModeChanged so the gateway can broadcast op:mode_changed
+//     to currently-attached clients. The wire payload mirrors what the
+//     SPA's mode_changed dispatcher already consumes (channel + modes
+//     + args + setBy).
+//
+// User-targeted modes (where param[0] doesn't look like a channel) are
+// ignored — they're personal flags on the bot, not channel state.
+func (c *Connector) handleMode(ctx context.Context, msg Message) {
+	if len(msg.Params) < 2 {
+		return
+	}
+	channel := msg.Params[0]
+	if !startsWithChannelSigil(channel) {
+		return
+	}
+	modes := msg.Params[1]
+	args := msg.Params[2:]
+
+	// Walk the mode string. For each prefix-mode letter (q/a/o/h/v)
+	// we consume one arg and update the affected member's displayed
+	// prefix. Non-prefix arg-consuming modes (b/e/I/k/l/f/j) also
+	// consume args; we skip them but advance the cursor so subsequent
+	// prefix-mode-arg alignment stays correct.
+	applyPrefixModesToState(c.state, channel, modes, args)
+
+	c.publish(ctx, agent.Event{
+		Type: agent.EventModeChanged,
+		Fields: map[string]any{
+			"connector": c.Name(),
+			"channel":   channel,
+			"modes":     modes,
+			"args":      strings.Join(args, " "),
+			"by":        Nick(msg.Prefix),
+		},
+	})
+}
+
+// applyPrefixModesToState mutates `state` in place for any prefix-mode
+// (q/a/o/h/v) changes carried by the MODE line. Mirrors the SPA-side
+// applyPrefixModeChange so the bot's view and the SPA's view converge
+// on the same displayed prefix after the same input. Only the highest
+// active prefix is stored (the displayed one) — the lower modes a
+// user may also hold are not tracked separately, the next NAMES sync
+// is the authoritative source if it matters.
+func applyPrefixModesToState(state *ChannelState, channel, modes string, args []string) {
+	if state == nil {
+		return
+	}
+	prefixForLetter := map[byte]string{'q': "~", 'a': "&", 'o': "@", 'h': "%", 'v': "+"}
+	prefixRank := map[string]int{"~": 0, "&": 1, "@": 2, "%": 3, "+": 4, "": 5}
+	// Modes that consume an arg in BOTH + and - (prefix modes plus
+	// list modes plus always-arg chan modes). `l` is the only common
+	// arg-on-set-only mode worth modeling.
+	argBoth := map[byte]bool{
+		'q': true, 'a': true, 'o': true, 'h': true, 'v': true,
+		'b': true, 'e': true, 'I': true, 'k': true, 'f': true, 'j': true,
+	}
+	argAddOnly := map[byte]bool{'l': true}
+
+	info := state.Get(channel)
+	if info == nil {
+		return
+	}
+
+	argIdx := 0
+	adding := true
+	for i := 0; i < len(modes); i++ {
+		c := modes[i]
+		if c == '+' {
+			adding = true
+			continue
+		}
+		if c == '-' {
+			adding = false
+			continue
+		}
+		consumesArg := argBoth[c] || (adding && argAddOnly[c])
+		var arg string
+		if consumesArg && argIdx < len(args) {
+			arg = args[argIdx]
+			argIdx++
+		}
+		prefix, isPrefixMode := prefixForLetter[c]
+		if !isPrefixMode || arg == "" {
+			continue
+		}
+		current, present := info.Members[arg]
+		if !present {
+			continue
+		}
+		if adding {
+			// Promote only if the new prefix outranks the displayed
+			// one. Granting +v to an op shouldn't visually demote.
+			if prefixRank[prefix] < prefixRank[current] {
+				state.SetMemberPrefix(channel, arg, prefix)
+			}
+		} else if current == prefix {
+			// Removing the displayed prefix: drop to empty. A subsequent
+			// NAMES sync restores any lower prefix the user may still
+			// hold (we don't track multi-prefix membership in real-time).
+			state.SetMemberPrefix(channel, arg, "")
+		}
+	}
+}
+
+// handleWhoisNumeric accumulates one WHOIS numeric into the in-flight
+// builder for the target nick. On RPL_ENDOFWHOIS (318) the builder is
+// snapshotted into an EventWhoisResult and cleared. The map key uses
+// case-folded nicks so 311/318 from servers that send the original
+// casing both target the same in-flight entry.
+//
+// All numerics share the shape `:server NNN mynick targetnick ...rest`.
+// Param indexing assumes that; defensively bails when params are too
+// short rather than panicking.
+func (c *Connector) handleWhoisNumeric(ctx context.Context, msg Message) {
+	if len(msg.Params) < 2 {
+		return
+	}
+	targetNick := msg.Params[1]
+	b := c.whoisBuilderFor(targetNick)
+	if b.nick == "" {
+		b.nick = targetNick
+	}
+	switch msg.Command {
+	case RplWhoisUser:
+		// 311 mynick target user host * :realname
+		if len(msg.Params) >= 4 {
+			b.user = msg.Params[2]
+			b.host = msg.Params[3]
+		}
+		b.realName = msg.Trailing
+	case RplWhoisServer:
+		// 312 mynick target server :serverInfo
+		if len(msg.Params) >= 3 {
+			b.server = msg.Params[2]
+		}
+		b.serverInfo = msg.Trailing
+	case RplWhoisOperator:
+		b.isOperator = true
+	case RplWhoisIdle:
+		// 317 mynick target idle_seconds [signon_unix] :seconds idle
+		if len(msg.Params) >= 3 {
+			b.idleSeconds = parseUnixSeconds(msg.Params[2])
+		}
+		if len(msg.Params) >= 4 {
+			b.signonAt = parseUnixSeconds(msg.Params[3])
+		}
+	case RplWhoisChannels:
+		// 319 mynick target :@#foo +#bar #baz
+		if msg.Trailing != "" {
+			for _, ch := range strings.Fields(msg.Trailing) {
+				// Strip prefix glyphs (~ & @ % +) so the SPA gets a
+				// clean channel name to render — modes are surfaced
+				// separately if/when the user opens that channel.
+				b.channels = append(b.channels, strings.TrimLeft(ch, "~&@%+"))
+			}
+		}
+	case RplWhoisAccount:
+		// 330 mynick target account :is logged in as
+		if len(msg.Params) >= 3 {
+			b.account = msg.Params[2]
+		}
+	case RplWhoisSecure:
+		b.secure = true
+	case RplEndOfWhois:
+		c.publishWhoisResult(ctx, targetNick, b, "")
+	}
+}
+
+// handleWhoisNoSuchNick finalises an in-flight whois with an error and
+// publishes. If no whois is in flight for this nick the 401 is unrelated
+// (e.g. a stale PRIVMSG target) and we silently no-op.
+func (c *Connector) handleWhoisNoSuchNick(ctx context.Context, targetNick, reason string) {
+	c.whoisMu.Lock()
+	b, ok := c.whoisInFlight[strings.ToLower(targetNick)]
+	c.whoisMu.Unlock()
+	if !ok {
+		return
+	}
+	c.publishWhoisResult(ctx, targetNick, b, reason)
+}
+
+// whoisBuilderFor returns (creating if needed) the in-flight builder
+// for the target nick. Concurrent /whois calls on different nicks are
+// safely isolated by the map.
+func (c *Connector) whoisBuilderFor(targetNick string) *whoisBuilder {
+	key := strings.ToLower(targetNick)
+	c.whoisMu.Lock()
+	defer c.whoisMu.Unlock()
+	if c.whoisInFlight == nil {
+		c.whoisInFlight = make(map[string]*whoisBuilder)
+	}
+	b, ok := c.whoisInFlight[key]
+	if !ok {
+		b = &whoisBuilder{}
+		c.whoisInFlight[key] = b
+	}
+	return b
+}
+
+func (c *Connector) publishWhoisResult(ctx context.Context, targetNick string, b *whoisBuilder, errReason string) {
+	c.whoisMu.Lock()
+	delete(c.whoisInFlight, strings.ToLower(targetNick))
+	c.whoisMu.Unlock()
+
+	fields := map[string]any{
+		"connector": c.Name(),
+		"nick":      targetNick,
+	}
+	if errReason != "" {
+		fields["error"] = errReason
+	} else {
+		// Only emit populated fields so the SPA's WhoisResultEvent
+		// retains its undefined-vs-empty distinction. The renderer
+		// short-circuits rows whose value is undefined.
+		if b.user != "" {
+			fields["user"] = b.user
+		}
+		if b.host != "" {
+			fields["host"] = b.host
+		}
+		if b.realName != "" {
+			fields["realName"] = b.realName
+		}
+		if b.account != "" {
+			fields["account"] = b.account
+		}
+		if b.server != "" {
+			fields["server"] = b.server
+		}
+		if b.serverInfo != "" {
+			fields["serverInfo"] = b.serverInfo
+		}
+		if b.idleSeconds > 0 {
+			fields["idleSeconds"] = b.idleSeconds
+		}
+		if b.signonAt > 0 {
+			fields["signonAt"] = b.signonAt
+		}
+		if b.secure {
+			fields["secure"] = true
+		}
+		if b.isOperator {
+			fields["isOperator"] = true
+		}
+		if len(b.channels) > 0 {
+			fields["channels"] = b.channels
+		}
+	}
+	c.publish(ctx, agent.Event{
+		Type:   agent.EventWhoisResult,
+		Fields: fields,
+	})
+}
+
+// handleListNumeric accumulates RPL_LIST (322) rows and flushes on
+// RPL_LISTENED (323). RPL_LISTSTART (321) is informational only; some
+// servers omit it. /LIST is network-global so we share one buffer.
+func (c *Connector) handleListNumeric(ctx context.Context, msg Message) {
+	switch msg.Command {
+	case RplListStart:
+		c.listMu.Lock()
+		c.listInFlight = c.listInFlight[:0]
+		c.listMu.Unlock()
+	case RplList:
+		// 322 mynick channel #users :topic
+		if len(msg.Params) < 3 {
+			return
+		}
+		entry := listChannelEntry{name: msg.Params[1], topic: msg.Trailing}
+		if n, err := strconv.Atoi(msg.Params[2]); err == nil {
+			entry.users = n
+		}
+		c.listMu.Lock()
+		c.listInFlight = append(c.listInFlight, entry)
+		c.listMu.Unlock()
+	case RplListEnd:
+		c.listMu.Lock()
+		channels := make([]map[string]any, 0, len(c.listInFlight))
+		for _, e := range c.listInFlight {
+			row := map[string]any{"name": e.name}
+			if e.users > 0 {
+				row["users"] = e.users
+			}
+			if e.topic != "" {
+				row["topic"] = e.topic
+			}
+			channels = append(channels, row)
+		}
+		c.listInFlight = nil
+		c.listMu.Unlock()
+		c.publish(ctx, agent.Event{
+			Type: agent.EventListResult,
+			Fields: map[string]any{
+				"connector": c.Name(),
+				"channels":  channels,
+			},
+		})
+	}
+}
+
+// handleWhoNumeric accumulates RPL_WHOREPLY (352) rows and flushes on
+// RPL_ENDOFWHO (315). Keyed by lower-case query target so /who #a and
+// /who #b in flight at the same time don't smear into each other.
+func (c *Connector) handleWhoNumeric(ctx context.Context, msg Message) {
+	switch msg.Command {
+	case RplWhoReply:
+		// 352 mynick target user host server nick flags :hopcount realname
+		if len(msg.Params) < 7 {
+			return
+		}
+		target := msg.Params[1]
+		entry := whoUserEntry{
+			user:  msg.Params[2],
+			host:  msg.Params[3],
+			nick:  msg.Params[5],
+			flags: msg.Params[6],
+		}
+		// Trailing is `<hopcount> <realname>` — split on first space.
+		// Defensively handle malformed shapes that omit hopcount.
+		if msg.Trailing != "" {
+			if sp := strings.IndexByte(msg.Trailing, ' '); sp >= 0 {
+				entry.realName = msg.Trailing[sp+1:]
+			} else {
+				entry.realName = msg.Trailing
+			}
+		}
+		b := c.whoBuilderFor(target)
+		b.users = append(b.users, entry)
+	case RplEndOfWho:
+		// 315 mynick target :End of /WHO list
+		if len(msg.Params) < 2 {
+			return
+		}
+		target := msg.Params[1]
+		c.whoMu.Lock()
+		b, ok := c.whoInFlight[strings.ToLower(target)]
+		if ok {
+			delete(c.whoInFlight, strings.ToLower(target))
+		}
+		c.whoMu.Unlock()
+		if !ok {
+			b = &whoBuilder{target: target}
+		}
+		users := make([]map[string]any, 0, len(b.users))
+		for _, u := range b.users {
+			row := map[string]any{"nick": u.nick}
+			if u.user != "" {
+				row["user"] = u.user
+			}
+			if u.host != "" {
+				row["host"] = u.host
+			}
+			if u.realName != "" {
+				row["realName"] = u.realName
+			}
+			if u.flags != "" {
+				row["flags"] = u.flags
+			}
+			users = append(users, row)
+		}
+		c.publish(ctx, agent.Event{
+			Type: agent.EventWhoResult,
+			Fields: map[string]any{
+				"connector": c.Name(),
+				"target":    target,
+				"users":     users,
+			},
+		})
+	}
+}
+
+func (c *Connector) whoBuilderFor(target string) *whoBuilder {
+	key := strings.ToLower(target)
+	c.whoMu.Lock()
+	defer c.whoMu.Unlock()
+	if c.whoInFlight == nil {
+		c.whoInFlight = make(map[string]*whoBuilder)
+	}
+	b, ok := c.whoInFlight[key]
+	if !ok {
+		b = &whoBuilder{target: target}
+		c.whoInFlight[key] = b
+	}
+	return b
+}
+
 func (c *Connector) handleTopic(ctx context.Context, msg Message) {
 	if len(msg.Params) < 1 {
 		return
@@ -1620,6 +2201,56 @@ func (c *Connector) publish(ctx context.Context, ev agent.Event) {
 		return
 	}
 	c.events.Publish(ctx, &ev)
+}
+
+// publishServerNotice fans a server-originated line out to the agent
+// event bus for the gateway to broadcast as `op:server` to attached
+// WS clients. Used for welcome, MOTD, info numerics, server NOTICEs
+// and pre-disconnect ERROR lines — the content that lands in the
+// SPA's synthetic "server" tab on connect.
+func (c *Connector) publishServerNotice(ctx context.Context, kind, text string) {
+	if text == "" {
+		return
+	}
+	c.publish(ctx, agent.Event{
+		Type: agent.EventServerNotice,
+		Fields: map[string]any{
+			"connector": c.Name(),
+			"kind":      kind,
+			"text":      text,
+		},
+	})
+}
+
+// serverNoticeText pulls a human-readable body out of a server message.
+// Most server numerics carry their description in the trailing parameter
+// (`:Welcome to the network`), but a few RFC-loose servers stuff the
+// content into space-separated params instead. Fall back to joining the
+// non-target params so 002/003/004-style messages still render
+// something useful.
+func serverNoticeText(msg Message) string {
+	if msg.Trailing != "" {
+		return msg.Trailing
+	}
+	// Skip the first param when it looks like the bot's own nick (a
+	// recipient identifier most numerics emit). Without this we'd
+	// surface "alice" prefixed to every line.
+	params := msg.Params
+	if len(params) > 1 {
+		params = params[1:]
+	}
+	return strings.TrimSpace(strings.Join(params, " "))
+}
+
+// isServerPrefix reports whether a message prefix identifies a server
+// rather than a user. User prefixes carry `!user@host`; server prefixes
+// are a bare hostname like `irc.libera.chat`. Empty prefix also counts
+// as server-originated (some servers omit it for global notices).
+func isServerPrefix(prefix string) bool {
+	if prefix == "" {
+		return true
+	}
+	return !strings.ContainsRune(prefix, '!')
 }
 
 func (c *Connector) Stop(_ context.Context) error {
