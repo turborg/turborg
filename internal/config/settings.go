@@ -166,6 +166,21 @@ type Settings struct {
 	// per-container token reused, since both endpoints terminate at
 	// the same sidecar gating on the same ActivityTracker.
 	MessageSinkToken string `env:"MESSAGE_SINK_TOKEN"`
+
+	// MessageStoreURL is the endpoint the bouncer (CHATHISTORY) +
+	// gateway (history op, attach replay) GET to read historical
+	// messages. Empty = no remote read backend: replay + scrollback
+	// fall back to the in-process MemoryStore (capped at 200/channel,
+	// lost across restarts). When set, operators point it at an HTTP
+	// service that implements the contract documented on
+	// messages.HTTPStore.
+	MessageStoreURL string `env:"MESSAGE_STORE_URL"`
+
+	// MessageStoreToken is the bearer the store endpoint expects on
+	// every GET. Defaults to MessageSinkToken via normalize() when
+	// unset — the write and read halves typically share the same
+	// per-container token.
+	MessageStoreToken string `env:"MESSAGE_STORE_TOKEN"`
 }
 
 // Load parses TURBORG_* env vars into a Settings, normalizing the
@@ -194,6 +209,14 @@ func (s *Settings) normalize() error {
 	}
 	s.AllowedNetworks = trimDropEmpties(s.AllowedNetworks)
 	s.AllowedLLMModels = trimDropEmpties(s.AllowedLLMModels)
+
+	// MessageStoreToken defaults to the sink token — both halves
+	// usually terminate at the same accounts-api endpoint with the
+	// same per-container bearer. Operators who want different tokens
+	// for read vs. write set MESSAGE_STORE_TOKEN explicitly.
+	if s.MessageStoreToken == "" {
+		s.MessageStoreToken = s.MessageSinkToken
+	}
 	return nil
 }
 

@@ -26,6 +26,7 @@ import (
 	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/llm/anthropic"
+	"github.com/turborg/turborg/internal/messages"
 	"github.com/turborg/turborg/internal/messagesink"
 	"github.com/turborg/turborg/internal/statepush"
 	"github.com/turborg/turborg/internal/version"
@@ -43,12 +44,12 @@ const AskSystemPrompt = "You are turborg, an IRC chatbot. Keep replies short and
 // connectors are added; built-in commands are registered; the owner +
 // throttle guard is installed.
 type Built struct {
-	Agent        *agent.Agent
-	IRC          *irc.Connector
-	Gateway      *web.Gateway
-	LLM          llm.Provider        // nil when Anthropic is not configured
-	Activity     *activity.Notifier  // never nil; no-op when ACTIVITY_URL is unset
-	StatePush    *statepush.Emitter  // never nil; inert no-op when STATE_WEBHOOK_URL is unset
+	Agent     *agent.Agent
+	IRC       *irc.Connector
+	Gateway   *web.Gateway
+	LLM       llm.Provider       // nil when Anthropic is not configured
+	Activity  *activity.Notifier // never nil; no-op when ACTIVITY_URL is unset
+	StatePush *statepush.Emitter // never nil; inert no-op when STATE_WEBHOOK_URL is unset
 }
 
 // Build wires the agent + connectors + gateway from settings. Callers
@@ -126,7 +127,24 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	)
 	wireStatePushEmitter(ircConn, stateEmitter)
 
+	// Build the shared messages.Store before connectors register
+	// for events, so the IRC connector's bouncer + the gateway both
+	// see the same store. The store also picks up Submit calls from
+	// the EventBus subscriber wired further down.
+	store, sink := buildMessageStore(s, log)
+	ircConn.SetMessageStore(store)
+	ircConn.SetBouncerWelcomeReplayDepth(clampReplayDepth(ircCfg.BouncerWelcomeReplayDepth))
+
 	a.AddConnector(ircConn)
+
+	// Single EventBus subscriber feeds the store for every channel
+	// message the agent observes. Filters at submit-time: only
+	// channel-sigil targets count (DMs don't enter replay history).
+	if store != nil {
+		a.Events.Subscribe(agent.EventMessage, makeStoreSubmitter(store, log))
+		a.Events.Subscribe(agent.EventMessageSent, makeStoreSubmitter(store, log))
+	}
+	_ = sink // referenced for lifecycle parity; closing happens with the agent
 
 	if len(s.Connectors) > 1 {
 		for _, name := range s.Connectors {
@@ -151,7 +169,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	}
 
 	if s.GatewayEnabled() {
-		gw, err := buildGateway(s, ircConn, a, log, notifier)
+		gw, err := buildGateway(s, ircConn, a, log, notifier, store)
 		if err != nil {
 			return nil, err
 		}
@@ -200,7 +218,7 @@ func buildLLM(s *config.Settings) (llm.Provider, error) {
 	return p, nil
 }
 
-func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, log *slog.Logger, notifier *activity.Notifier) (*web.Gateway, error) {
+func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, log *slog.Logger, notifier *activity.Notifier, store messages.Store) (*web.Gateway, error) {
 	verifier, err := web.NewStaticPasswordVerifier(s.GatewayPassword)
 	if err != nil {
 		return nil, fmt.Errorf("runtime: gateway verifier: %w", err)
@@ -215,11 +233,12 @@ func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, lo
 		return nil, fmt.Errorf("runtime: gateway ratelimit: %w", err)
 	}
 	opts := web.Options{
-		Host:        s.GatewayHost,
-		Port:        s.GatewayPort,
-		Verifier:    verifier,
-		RateLimiter: rl,
-		Log:         log,
+		Host:         s.GatewayHost,
+		Port:         s.GatewayPort,
+		Verifier:     verifier,
+		RateLimiter:  rl,
+		Log:          log,
+		MessageStore: store,
 	}
 	if notifier.Enabled() {
 		opts.OnClientAttached = notifier.Hook
@@ -231,20 +250,109 @@ func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, lo
 		// CLI's ctx. Leaving OnIdleShutdown nil here means the gateway
 		// logs and no-ops; the CLI installs the real callback after Build.
 	}
-	// Durable message mirror. Empty MESSAGE_SINK_URL = self-host: nil
-	// sink, nil recorder, web.Options.MessageRecorder stays unset.
-	// Guard the assignment behind a non-nil check so we don't end up
-	// with a typed-nil interface value (Go gotcha — the `if recorder
-	// != nil` guard inside the gateway only catches an untyped nil).
-	if sink := messagesink.New(s.MessageSinkURL, s.MessageSinkToken, log); sink != nil {
-		opts.MessageRecorder = messagesink.NewRecorder(sink)
-		log.Info("message sink enabled", "endpoint", s.MessageSinkURL)
-	}
 	gw, err := web.New(ircConn, ircConn, opts)
 	if err != nil {
 		return nil, err
 	}
 	return gw, nil
+}
+
+// buildMessageStore picks the right Store implementation from
+// settings. Returns the chosen Store plus the underlying sink (if
+// any) so the caller can own its lifecycle.
+//
+//   - MESSAGE_STORE_URL + MESSAGE_SINK_URL both set → HTTPStore
+//     (durable read + write through accounts-api).
+//   - MESSAGE_SINK_URL set, MESSAGE_STORE_URL unset → MemoryStore for
+//     reads but writes still mirror through the sink (legacy half).
+//   - Neither set → MemoryStore only (self-host default).
+func buildMessageStore(s *config.Settings, log *slog.Logger) (messages.Store, *messagesink.Sink) {
+	if log == nil {
+		log = slog.Default()
+	}
+	sink := messagesink.New(s.MessageSinkURL, s.MessageSinkToken, log)
+	if sink != nil {
+		log.Info("message sink enabled", "endpoint", s.MessageSinkURL)
+	}
+	if hs := messages.NewHTTPStore(s.MessageStoreURL, s.MessageStoreToken, sink, log); hs != nil {
+		log.Info("message store enabled (HTTP)", "endpoint", s.MessageStoreURL)
+		return hs, sink
+	}
+	// Fall back to in-process. When a sink IS configured but no store
+	// URL, the MemoryStore still serves attach replay + scrollback
+	// locally; the sink keeps mirroring writes for whatever consumer
+	// runs on the other side.
+	return messages.NewMemoryStore(0), sink
+}
+
+// makeStoreSubmitter returns an EventBus handler that mirrors every
+// channel-targeted EventMessage / EventMessageSent into the shared
+// store. DMs are filtered out at this seam (channel must start with
+// a channel sigil) so replay history stays channel-only.
+func makeStoreSubmitter(store messages.Store, log *slog.Logger) func(ctx context.Context, ev *agent.Event) {
+	return func(ctx context.Context, ev *agent.Event) {
+		channel, _ := ev.Fields["channel"].(string)
+		nick, _ := ev.Fields["sender"].(string)
+		text, _ := ev.Fields["text"].(string)
+		// MESSAGE_SENT from agent command-dispatch carries the
+		// envelope, not the explicit fields — peek for both shapes.
+		if env, ok := ev.Fields["envelope"].(*agent.OutboundEnvelope); ok && env != nil {
+			if channel == "" {
+				channel = env.Channel
+			}
+			if text == "" {
+				text = env.Text
+			}
+		}
+		if env, ok := ev.Fields["envelope"].(*agent.InboundEnvelope); ok && env != nil {
+			if channel == "" {
+				channel = env.Channel
+			}
+			if nick == "" {
+				nick = env.Sender
+			}
+			if text == "" {
+				text = env.Text
+			}
+		}
+		if channel == "" || !isChannelTarget(channel) {
+			return
+		}
+		if err := store.Submit(ctx, messages.Message{
+			Channel: channel,
+			Nick:    nick,
+			Text:    text,
+			TS:      time.Now(),
+		}); err != nil {
+			log.Debug("store submit", "err", err, "channel", channel)
+		}
+	}
+}
+
+// clampReplayDepth keeps the operator's TURBORG_IRC_BOUNCER_WELCOME_
+// REPLAY_DEPTH inside a sane window. 1..2000 are accepted; out-of-band
+// values fall back to the package default rather than rejecting boot.
+func clampReplayDepth(n int) int {
+	const def = 200
+	const max = 2000
+	if n < 1 {
+		return def
+	}
+	if n > max {
+		return max
+	}
+	return n
+}
+
+func isChannelTarget(s string) bool {
+	if s == "" {
+		return false
+	}
+	switch s[0] {
+	case '#', '&', '+', '!':
+		return true
+	}
+	return false
 }
 
 // RegisterBuiltinCommands installs ping, version, help, and (when an

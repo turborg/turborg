@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/turborg/turborg/internal/agent"
+	"github.com/turborg/turborg/internal/messages"
 	"github.com/turborg/turborg/internal/version"
 	"golang.org/x/sync/errgroup"
 )
@@ -88,6 +89,18 @@ type Connector struct {
 	// during startBouncer. Held here so SetBouncerAttachHook can run
 	// before Start without depending on bouncer existence yet.
 	bouncerAttachHook func(reason string)
+
+	// messageStore is forwarded onto the bouncer at startBouncer time
+	// so attach-replay and CHATHISTORY queries go against the runtime-
+	// composed store. Held here so the runtime can call
+	// SetMessageStore before Start.
+	messageStore messages.Store
+
+	// bouncerWelcomeReplayDepth is forwarded onto the bouncer at
+	// startBouncer time so the operator's
+	// TURBORG_BOUNCER_WELCOME_REPLAY_DEPTH lands on the right knob.
+	// Zero leaves the bouncer default in place.
+	bouncerWelcomeReplayDepth int
 
 	// onUpstreamWarn fires from the escalation watchdog once per
 	// transient-outage window when UpstreamWarnAfter elapses without
@@ -296,6 +309,18 @@ func (c *Connector) SetActivityHook(hook func(reason string)) { c.onBotSpoke = h
 // successful client auth. Pass nil to disable. Must be called before
 // Start so the bouncer picks it up when it is constructed.
 func (c *Connector) SetBouncerAttachHook(hook func(reason string)) { c.bouncerAttachHook = hook }
+
+// SetMessageStore wires the shared messages.Store. The connector
+// forwards it to the bouncer at startBouncer time so attach-replay
+// and CHATHISTORY queries flow through it. Must be called before
+// Start.
+func (c *Connector) SetMessageStore(s messages.Store) { c.messageStore = s }
+
+// SetBouncerWelcomeReplayDepth overrides how many recent messages
+// the bouncer ships per joined channel on each fresh client attach.
+// Forwarded to the bouncer at startBouncer time. Pass 0 to leave the
+// default in place.
+func (c *Connector) SetBouncerWelcomeReplayDepth(n int) { c.bouncerWelcomeReplayDepth = n }
 
 // SetUpstreamWarnHook installs the callback the escalation watchdog
 // fires when a transient outage persists past UpstreamWarnAfter. Pass
@@ -632,6 +657,8 @@ func (c *Connector) startBouncer(ctx context.Context) error {
 	b.AttachUpstreamState(c.machine, c.settings.Hostname)
 	b.AttachWantedChannels(c.wanted)
 	b.AttachPreferredNickHook(c.SetPreferredNick)
+	b.AttachMessageStore(c.messageStore)
+	b.AttachWelcomeReplayDepth(c.bouncerWelcomeReplayDepth)
 	// Reuse the existing onUpstreamWarn hook slot: the supervisor's
 	// long-outage watchdog calls into the bouncer's broadcast so
 	// channels get a stronger "still retrying" NOTICE at the warn

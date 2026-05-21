@@ -15,8 +15,11 @@ import (
 	"github.com/coder/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"errors"
+
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/connector/irc"
+	"github.com/turborg/turborg/internal/messages"
 	"github.com/turborg/turborg/internal/web"
 )
 
@@ -42,10 +45,10 @@ func newFakeBridge(nick string) *fakeBridge {
 	m.Transition(irc.UpstreamStateRegistered)
 	return &fakeBridge{nick: nick, state: irc.NewChannelState(), machine: m}
 }
-func (f *fakeBridge) CurrentNick() string                 { return f.nick }
-func (f *fakeBridge) State() *irc.ChannelState            { return f.state }
-func (f *fakeBridge) ClientLimits() irc.ClientLimits      { return f.limits }
-func (f *fakeBridge) OutboundThrottle() *irc.Throttle     { return f.throttle }
+func (f *fakeBridge) CurrentNick() string                      { return f.nick }
+func (f *fakeBridge) State() *irc.ChannelState                 { return f.state }
+func (f *fakeBridge) ClientLimits() irc.ClientLimits           { return f.limits }
+func (f *fakeBridge) OutboundThrottle() *irc.Throttle          { return f.throttle }
 func (f *fakeBridge) UpstreamState() *irc.UpstreamStateMachine { return f.machine }
 func (f *fakeBridge) SendRaw(line string) error {
 	f.sentMu.Lock()
@@ -146,7 +149,16 @@ func drainInitialFrames(t *testing.T, conn *websocket.Conn) {
 func newOptions(t *testing.T, password string) web.Options {
 	v, err := web.NewStaticPasswordVerifier(password)
 	require.NoError(t, err)
-	return web.Options{Host: "127.0.0.1", Port: 0, Verifier: v}
+	// Every test gets a fresh in-memory store so attach replay +
+	// history scrollback have something to read from. Tests that
+	// need to seed/inspect the store can read MessageStore back via
+	// type assertion on *messages.MemoryStore.
+	return web.Options{
+		Host:         "127.0.0.1",
+		Port:         0,
+		Verifier:     v,
+		MessageStore: messages.NewMemoryStore(0),
+	}
 }
 
 // --- construction ----------------------------------------------------------
@@ -812,14 +824,18 @@ func TestRateLimiterResetsOnSuccessfulAuth(t *testing.T) {
 
 func TestChannelMessagesReplayedInTSOrder(t *testing.T) {
 	bridge := newFakeBridge("turborg")
+	// replayBuffers iterates over JoinedChannels — seed the bridge
+	// state so #x is in the list, otherwise the channel-history
+	// replay loop never visits it.
+	bridge.state.OnSelfJoin("#x")
 	g, a, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
 	defer td()
 
 	// Publish three EventMessage events before any client connects;
-	// they land in the per-channel ring buffer. Wait until the bus
-	// has actually recorded all three before connecting — without
-	// this, the WS client could connect mid-publish and miss the
-	// later messages from the replay.
+	// they land in the gateway's MessageStore (via gateway.onMessage
+	// → submitToStore). When the WS client attaches, replayBuffers
+	// pulls the last N for every joined channel and emits them as
+	// `replayed: true` frames.
 	for _, text := range []string{"first", "second", "third"} {
 		a.Events.Publish(context.Background(), &agent.Event{
 			Type: agent.EventMessage,
@@ -852,6 +868,225 @@ func TestChannelMessagesReplayedInTSOrder(t *testing.T) {
 	}
 	assert.Equal(t, []string{"first", "second", "third"}, got,
 		"channel replay must come back in original publish order")
+}
+
+// --- history op (scrollback) ----------------------------------------
+
+func TestHistoryOpReturnsOlderMessagesFromStore(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	bridge.state.OnSelfJoin("#x")
+	opts := newOptions(t, "p")
+	store := opts.MessageStore.(*messages.MemoryStore)
+	g, _, td := startGateway(t, opts, bridge, &fakeSender{})
+	defer td()
+
+	// Seed 5 messages; ask for the 3 older than the most recent.
+	base := time.Date(2026, 5, 21, 12, 0, 0, 0, time.UTC)
+	for i, text := range []string{"m1", "m2", "m3", "m4", "m5"} {
+		require.NoError(t, store.Submit(context.Background(), messages.Message{
+			Channel: "#x", Nick: "alice", Text: text,
+			TS: base.Add(time.Duration(i) * time.Second),
+		}))
+	}
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+	// Drain the initial replay frames (5 of them) before the history op.
+	for i := 0; i < 5; i++ {
+		_ = readJSON(t, conn)
+	}
+
+	// Ask for everything strictly before m5's ts.
+	req := map[string]any{
+		"op":      "history",
+		"channel": "#x",
+		"before":  base.Add(4 * time.Second).Format(time.RFC3339Nano),
+		"limit":   10,
+	}
+	body, _ := json.Marshal(req)
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	got := readJSON(t, conn)
+	assert.Equal(t, "history_result", got["op"])
+	assert.Equal(t, "#x", got["channel"])
+	msgs, ok := got["messages"].([]any)
+	require.True(t, ok, "messages must be an array, got %T", got["messages"])
+	require.Len(t, msgs, 4, "expected m1..m4 older than m5")
+	first := msgs[0].(map[string]any)
+	// Newest-first within the response.
+	assert.Equal(t, "m4", first["text"])
+	assert.Equal(t, false, got["has_more"], "5 < limit=10, no more pages")
+}
+
+func TestHistoryOpRespectsLimitAndReportsHasMore(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	bridge.state.OnSelfJoin("#x")
+	opts := newOptions(t, "p")
+	store := opts.MessageStore.(*messages.MemoryStore)
+	g, _, td := startGateway(t, opts, bridge, &fakeSender{})
+	defer td()
+
+	for i := 0; i < 5; i++ {
+		require.NoError(t, store.Submit(context.Background(), messages.Message{
+			Channel: "#x", Nick: "alice", Text: "m",
+			TS: time.Now().Add(-time.Duration(5-i) * time.Second),
+		}))
+	}
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+	for i := 0; i < 5; i++ {
+		_ = readJSON(t, conn)
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"op": "history", "channel": "#x", "limit": 2,
+	})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+	got := readJSON(t, conn)
+	msgs, _ := got["messages"].([]any)
+	assert.Len(t, msgs, 2)
+	assert.Equal(t, true, got["has_more"], "len == limit signals more available")
+}
+
+func TestHistoryOpWithNilStoreReturnsEmpty(t *testing.T) {
+	// Gateway without a MessageStore: history op must still answer
+	// with a valid history_result frame (empty messages, has_more
+	// false) so the UI's "loading older messages" spinner clears.
+	v, err := web.NewStaticPasswordVerifier("p")
+	require.NoError(t, err)
+	bridge := newFakeBridge("turborg")
+	g, _, td := startGateway(t, web.Options{
+		Host: "127.0.0.1", Port: 0, Verifier: v,
+		// MessageStore intentionally nil.
+	}, bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+
+	body, _ := json.Marshal(map[string]any{
+		"op": "history", "channel": "#x", "limit": 10,
+	})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+	got := readJSON(t, conn)
+	assert.Equal(t, "history_result", got["op"])
+	msgs, _ := got["messages"].([]any)
+	assert.Empty(t, msgs)
+	assert.Equal(t, false, got["has_more"])
+}
+
+func TestHistoryOpAcceptsTimestampWithMillisFormat(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	bridge.state.OnSelfJoin("#x")
+	opts := newOptions(t, "p")
+	store := opts.MessageStore.(*messages.MemoryStore)
+	g, _, td := startGateway(t, opts, bridge, &fakeSender{})
+	defer td()
+
+	base := time.Date(2026, 5, 21, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, store.Submit(context.Background(), messages.Message{
+		Channel: "#x", Nick: "a", Text: "older", TS: base,
+	}))
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+	_ = readJSON(t, conn) // initial replay
+
+	// `before` in the .000Z variant — the gateway's parser falls
+	// through to that format when RFC3339Nano doesn't match.
+	body, _ := json.Marshal(map[string]any{
+		"op": "history", "channel": "#x",
+		"before": "2026-05-21T12:00:10.000Z",
+		"limit":  10,
+	})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+	got := readJSON(t, conn)
+	msgs, _ := got["messages"].([]any)
+	require.Len(t, msgs, 1)
+}
+
+// failingStore satisfies messages.Store with a Recent that errors.
+// Used to exercise the gateway's error-degraded response on the
+// history op (which must still emit a valid history_result frame so
+// the UI's loading state clears).
+type failingStore struct{}
+
+func (failingStore) Submit(context.Context, messages.Message) error { return nil }
+func (failingStore) Recent(context.Context, string, time.Time, int) ([]messages.Message, error) {
+	return nil, errFake
+}
+
+var errFake = errors.New("fake store error")
+
+func TestReplayBuffersStoreErrorIsSwallowed(t *testing.T) {
+	// On attach, store.Recent failures must NOT block the gateway —
+	// the client still gets `state` + initial connector state and
+	// can continue normally. Verifies the error-degrade branch in
+	// replayBuffers.
+	v, err := web.NewStaticPasswordVerifier("p")
+	require.NoError(t, err)
+	bridge := newFakeBridge("turborg")
+	bridge.state.OnSelfJoin("#x")
+	g, _, td := startGateway(t, web.Options{
+		Host: "127.0.0.1", Port: 0, Verifier: v,
+		MessageStore: failingStore{},
+	}, bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	// Must successfully read state + connector.state_changed despite
+	// the store error — proves the gateway didn't hang or close.
+	drainInitialFrames(t, conn)
+}
+
+func TestHistoryOpStoreErrorReturnsEmpty(t *testing.T) {
+	v, err := web.NewStaticPasswordVerifier("p")
+	require.NoError(t, err)
+	bridge := newFakeBridge("turborg")
+	g, _, td := startGateway(t, web.Options{
+		Host: "127.0.0.1", Port: 0, Verifier: v,
+		MessageStore: failingStore{},
+	}, bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+
+	body, _ := json.Marshal(map[string]any{"op": "history", "channel": "#x", "limit": 10})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+	got := readJSON(t, conn)
+	assert.Equal(t, "history_result", got["op"])
+	msgs, _ := got["messages"].([]any)
+	assert.Empty(t, msgs, "error path must return empty messages, not panic")
+	assert.Equal(t, false, got["has_more"])
+}
+
+func TestHistoryOpRejectsNonChannelTarget(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	g, _, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+
+	body, _ := json.Marshal(map[string]any{
+		"op": "history", "channel": "alice",
+	})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+	// No response is expected for a malformed op — the gateway
+	// silently drops it. Verify by polling with a short deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, _, err := conn.Read(ctx)
+	assert.Error(t, err, "non-channel target must not produce a history_result")
 }
 
 // --- sendTo error path: closed conn is removed from clients ------

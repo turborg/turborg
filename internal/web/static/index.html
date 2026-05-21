@@ -1299,6 +1299,14 @@
         if (ev.replayed && hasPersistedTwin(ev.channel, ev)) break;
         appendMessage(ev.channel, ev);
         break;
+      case "history_result":
+        // Older-message page from a `history` op the UI fired when the
+        // user scrolled near the top. Prepend in chronological order
+        // (the wire payload is newest-first; we reverse here) and
+        // preserve scroll position so the visible top message stays
+        // anchored under the user's eye.
+        prependHistoryPage(ev);
+        break;
       case "join": {
         const ch = ensureChannel(ev.channel);
         ch.members.set(ev.nick, "");
@@ -1670,10 +1678,76 @@
       channels.set(name, {
         topic: null, members: new Map(), log: [...seedLog],
         unread: 0, mentions: 0,
+        // Scrollback state: hasMoreHistory starts true and flips to
+        // false when the gateway answers a `history` op with
+        // has_more=false. historyLoading is the in-flight guard that
+        // keeps the scroll listener from issuing duplicate requests
+        // while a page is on the wire.
+        hasMoreHistory: true, historyLoading: false,
       });
       renderChannels();
     }
     return channels.get(name);
+  }
+
+  // Infinite scroll: when the user scrolls within 100px of the top of
+  // the messages pane, ask the gateway for the next older page.
+  // hasMoreHistory + historyLoading on the active channel gate the
+  // request so we don't spam pages or repeat after the well runs dry.
+  const HISTORY_PAGE_SIZE = 200;
+  const HISTORY_TRIGGER_PX = 100;
+  messagesEl.addEventListener("scroll", () => {
+    if (!activeChannel) return;
+    const ch = channels.get(activeChannel);
+    if (!ch || !ch.hasMoreHistory || ch.historyLoading) return;
+    if (messagesEl.scrollTop > HISTORY_TRIGGER_PX) return;
+    if (!ws || ws.readyState !== 1) return;
+    // SERVER_TAB and other non-channel views have no history op support
+    // — only channels with a # / & / + / ! sigil.
+    if (!/^[#&+!]/.test(activeChannel)) return;
+    const oldestTs = ch.log.length ? (ch.log[0].ts || 0) : 0;
+    ch.historyLoading = true;
+    send({
+      op: "history",
+      channel: activeChannel,
+      before: oldestTs ? new Date(oldestTs * 1000).toISOString() : "",
+      limit: HISTORY_PAGE_SIZE,
+    });
+  });
+
+  // prependHistoryPage merges an `history_result` payload into the
+  // channel's log without disturbing the user's scroll position. The
+  // wire shape is newest-first; we reverse so the prepended chunk
+  // matches the chronological order of the visible log.
+  function prependHistoryPage(ev) {
+    const ch = channels.get(ev.channel);
+    if (!ch) return;
+    ch.historyLoading = false;
+    ch.hasMoreHistory = !!ev.has_more;
+    const incoming = (ev.messages || []).slice().reverse();
+    if (incoming.length === 0) return;
+
+    // Dedupe by ts+nick+text against existing log head so a refresh
+    // doesn't double-render the initial replay's overlap with what
+    // the user persisted in IndexedDB. Cheap O(n+m) on small windows.
+    const seen = new Set();
+    const seenKey = (m) => `${m.ts || 0}|${m.nick}|${m.text}`;
+    for (let i = 0; i < Math.min(50, ch.log.length); i++) seen.add(seenKey(ch.log[i]));
+    const toAdd = incoming.filter((m) => !seen.has(seenKey(m)));
+    if (toAdd.length === 0) return;
+
+    ch.log = toAdd.concat(ch.log);
+    toAdd.forEach((m) => persistMessage(ev.channel, m));
+
+    if (ev.channel !== activeChannel) return;
+    // Re-render with the user's eye anchored: capture the previous
+    // total height, re-render, then restore the offset so the topmost
+    // visible message stays at the same screen Y.
+    const prevHeight = messagesEl.scrollHeight;
+    const prevTop = messagesEl.scrollTop;
+    renderActiveLog();
+    const delta = messagesEl.scrollHeight - prevHeight;
+    messagesEl.scrollTop = prevTop + delta;
   }
 
   function appendMessage(name, msg) {

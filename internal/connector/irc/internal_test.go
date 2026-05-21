@@ -373,28 +373,12 @@ func TestAddrBeforeStart(t *testing.T) {
 	assert.Equal(t, "", b.Addr(), "Addr before Start is empty")
 }
 
-func TestRecordForReplayIgnoresNonChannel(t *testing.T) {
-	state := NewChannelState()
-	state.OnSelfJoin("#known")
-	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
-	require.NoError(t, err)
-	b.AttachState(state, "nick", "ident", "host")
-
-	// Non-PRIVMSG/NOTICE: noop.
-	b.recordForReplay("PING :x")
-	// Channel-targeted to an unknown channel: noop.
-	b.recordForReplay(":a!u@h PRIVMSG #unknown :hi")
-	// Non-channel target (DM): noop.
-	b.recordForReplay(":a!u@h PRIVMSG nick :hi")
-	// Channel we track: should be captured.
-	b.recordForReplay(":a!u@h PRIVMSG #known :hi")
-
-	b.logMu.Lock()
-	got := b.channelLog
-	b.logMu.Unlock()
-	require.Len(t, got, 1, "only the known-channel line should be captured: %v", got)
-	require.Equal(t, 1, len(got["#known"]))
-}
+// Recording-side filter logic (only channel-targeted PRIVMSG / NOTICE
+// counts as recordable history) used to live on the bouncer as
+// recordForReplay. That filter now lives on the runtime-wired EventBus
+// subscriber that feeds messages.Store; the bouncer is read-only on
+// the store. See `messages` package tests for the ring/cap behavior
+// and `runtime` package tests for the publish filter.
 
 // Direct handler tests via private API to cover guard-rail branches that
 // the integration tests don't naturally hit.
@@ -714,13 +698,27 @@ func TestSendBroadcastsThroughBouncerWhenAttached(t *testing.T) {
 	b.AttachState(c.state, "bot", "user", "host")
 	c.state.OnSelfJoin("#x")
 
-	// Send must call bouncer.BroadcastAsSelf — visible via the replay buffer.
+	// Connector.Send fans through bouncer.BroadcastAsSelf, which
+	// writes to every authenticated client. Attach a recording stub
+	// so we can observe the line landed.
+	rc := newRecordingConn()
+	bc := newBouncerClient(rc, slog.Default())
+	bc.setAuthenticated()
+	b.mu.Lock()
+	b.clients[bc] = struct{}{}
+	b.mu.Unlock()
+
 	require.NoError(t, c.Send(&agent.OutboundEnvelope{Channel: "#x", Text: "hi"}))
 
-	b.logMu.Lock()
-	defer b.logMu.Unlock()
-	require.Len(t, b.channelLog["#x"], 1,
-		"Send must record self-prefixed line into the bouncer's replay buffer")
+	got := rc.snapshot()
+	require.NotEmpty(t, got, "Send must fan a self-prefixed PRIVMSG to attached clients")
+	var sawPrivmsg bool
+	for _, line := range got {
+		if strings.Contains(line, "PRIVMSG #x :hi") {
+			sawPrivmsg = true
+		}
+	}
+	assert.True(t, sawPrivmsg, "attached client must see the PRIVMSG; got %v", got)
 }
 
 func TestHandlePrivmsgRoutesDMToSenderChannel(t *testing.T) {
@@ -898,8 +896,7 @@ func TestBroadcastSkipsUnauthenticatedClients(t *testing.T) {
 
 func TestUpstreamPrefixEmptyShortCircuitsBroadcastAsSelf(t *testing.T) {
 	// With no upstream nick, upstreamPrefix() returns "" and
-	// BroadcastAsSelf passes the line through untouched. recordForReplay
-	// runs with no state attached (early return).
+	// BroadcastAsSelf passes the line through untouched.
 	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
 	require.NoError(t, err)
 	// No AttachState call → state == nil, upstreamNick == "" → both
@@ -1208,21 +1205,8 @@ func TestDecorateReplayLine(t *testing.T) {
 	})
 }
 
-func TestRecordForReplayBoundsRing(t *testing.T) {
-	state := NewChannelState()
-	state.OnSelfJoin("#busy")
-	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
-	require.NoError(t, err)
-	b.AttachState(state, "nick", "ident", "host")
-
-	for i := 0; i < channelLogCap+50; i++ {
-		b.recordForReplay(":a!u@h PRIVMSG #busy :spam")
-	}
-	b.logMu.Lock()
-	got := len(b.channelLog["#busy"])
-	b.logMu.Unlock()
-	assert.Equal(t, channelLogCap, got, "ring should cap at channelLogCap")
-}
+// Per-channel ring cap behavior moved with the storage seam — see
+// TestMemoryStoreRingCap in the messages package.
 
 func TestWatchdogPollInterval(t *testing.T) {
 	cases := []struct {
