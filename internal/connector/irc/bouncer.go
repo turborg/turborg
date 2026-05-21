@@ -3,7 +3,9 @@ package irc
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,6 +14,20 @@ import (
 	"sync"
 	"time"
 )
+
+// serverTimeLayout is the IRCv3 server-time tag format: ISO8601 UTC
+// with millisecond precision. See
+// https://ircv3.net/specs/extensions/server-time
+const serverTimeLayout = "2006-01-02T15:04:05.000Z"
+
+// loggedLine is one entry in the per-channel replay ring. ts is the
+// wall-clock moment we observed the line (used to populate the IRCv3
+// `time=` tag on replay so attached clients render the message as
+// historical instead of highlighting the tab as new traffic).
+type loggedLine struct {
+	line string
+	ts   time.Time
+}
 
 // channelLogCap is the per-channel ring of recent PRIVMSG / NOTICE lines
 // replayed to a bouncer client on (re)connect. Bound per-channel so a
@@ -213,10 +229,10 @@ type Bouncer struct {
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 
-	upstreamMu     sync.RWMutex
-	upstreamNick   string
-	upstreamIdent  string
-	upstreamHost   string
+	upstreamMu    sync.RWMutex
+	upstreamNick  string
+	upstreamIdent string
+	upstreamHost  string
 
 	sendUpstream SendUpstreamFunc
 	onForwarded  ForwardedObserver
@@ -262,7 +278,7 @@ type Bouncer struct {
 	setPreferredNick func(nick string)
 
 	logMu      sync.Mutex
-	channelLog map[string][]string
+	channelLog map[string][]loggedLine
 }
 
 func NewBouncer(password, host string, port int, rl *RateLimiter, log *slog.Logger) (*Bouncer, error) {
@@ -282,7 +298,7 @@ func NewBouncer(password, host string, port int, rl *RateLimiter, log *slog.Logg
 		rateLimiter:  rl,
 		log:          log,
 		clients:      map[*BouncerClient]struct{}{},
-		channelLog:   map[string][]string{},
+		channelLog:   map[string][]loggedLine{},
 		upstreamHost: "turborg",
 	}, nil
 }
@@ -736,6 +752,12 @@ func (b *Bouncer) recordPartedFromWanted(msg Message) {
 //     Pure pass-through.
 //   - away-notify: when an upstream user goes away/back, the server
 //     sends AWAY notifications. Pure pass-through.
+//   - batch: framework cap for grouping a sequence of lines under a
+//     server-generated batch id. The bouncer uses this to wrap
+//     channel-log replay in a `chathistory`-typed batch so capable
+//     clients render the block as historical instead of highlighting
+//     each line as fresh activity. Clients that didn't negotiate it
+//     get the legacy NOTICE-bracketed replay.
 //
 // All listed caps are honored by the existing dispatchLine →
 // Broadcast path; advertising them costs nothing extra.
@@ -746,6 +768,7 @@ var supportedCaps = map[string]bool{
 	"server-time":         true,
 	"account-tag":         true,
 	"away-notify":         true,
+	"batch":               true,
 }
 
 func supportedCapsList() string {
@@ -928,12 +951,12 @@ func (b *Bouncer) replayState(client *BouncerClient) {
 
 func (b *Bouncer) replayChannelLogs(client *BouncerClient) {
 	b.logMu.Lock()
-	snap := make(map[string][]string, len(b.channelLog))
+	snap := make(map[string][]loggedLine, len(b.channelLog))
 	for k, v := range b.channelLog {
 		if len(v) == 0 {
 			continue
 		}
-		cp := make([]string, len(v))
+		cp := make([]loggedLine, len(v))
 		copy(cp, v)
 		snap[k] = cp
 	}
@@ -946,20 +969,90 @@ func (b *Bouncer) replayChannelLogs(client *BouncerClient) {
 		return
 	}
 
+	tagTime := client.hasCap("server-time")
+	useBatch := client.hasCap("batch")
+
 	for channel, lines := range snap {
-		_ = client.sendLine(fmt.Sprintf(
-			":turborg-bouncer NOTICE %s :--- buffer playback for %s (%d lines) ---",
-			channel, channel, len(lines),
-		))
-		for _, line := range lines {
-			if err := client.sendLine(line); err != nil {
+		var batchID string
+		if useBatch {
+			batchID = newBatchID()
+			_ = client.sendLine(fmt.Sprintf(
+				"BATCH +%s chathistory %s", batchID, channel,
+			))
+		} else {
+			_ = client.sendLine(fmt.Sprintf(
+				":turborg-bouncer NOTICE %s :--- buffer playback for %s (%d lines) ---",
+				channel, channel, len(lines),
+			))
+		}
+		for _, entry := range lines {
+			if err := client.sendLine(decorateReplayLine(entry, tagTime, batchID)); err != nil {
 				return
 			}
 		}
-		_ = client.sendLine(fmt.Sprintf(
-			":turborg-bouncer NOTICE %s :--- end of buffer ---", channel,
-		))
+		if useBatch {
+			_ = client.sendLine("BATCH -" + batchID)
+		} else {
+			_ = client.sendLine(fmt.Sprintf(
+				":turborg-bouncer NOTICE %s :--- end of buffer ---", channel,
+			))
+		}
 	}
+}
+
+// decorateReplayLine builds the wire form of a replay line for the
+// attached client's negotiated caps:
+//
+//   - server-time: prepend `time=<ISO8601 UTC>` so HexChat / mIRC /
+//     irssi render the line as historical and don't highlight the
+//     channel tab. Upstream's own `@time=` (when the line already
+//     carries tags) takes precedence — we don't second-guess what the
+//     network declared the message arrival time was.
+//   - batch:       prepend `batch=<id>` so the line is associated with
+//     the surrounding `BATCH +<id> chathistory <channel>` envelope.
+//
+// When neither cap was negotiated, the line passes through unchanged —
+// preserving today's behavior for clients on legacy stacks.
+func decorateReplayLine(entry loggedLine, tagTime bool, batchID string) string {
+	line := entry.line
+	hasExistingTags := strings.HasPrefix(line, "@")
+
+	var added []string
+	if batchID != "" {
+		added = append(added, "batch="+batchID)
+	}
+	if tagTime && !hasExistingTags {
+		added = append(added, "time="+entry.ts.UTC().Format(serverTimeLayout))
+	}
+	if len(added) == 0 {
+		return line
+	}
+
+	if !hasExistingTags {
+		return "@" + strings.Join(added, ";") + " " + line
+	}
+	// Merge: keep upstream's tags as-is, prepend ours. IRCv3 message-tags
+	// allows duplicate keys ordering-wise, but to be conservative we
+	// place ours first and let upstream's win on conflict (clients that
+	// parse left-to-right will see upstream's value last and store it).
+	sp := strings.IndexByte(line, ' ')
+	if sp < 0 {
+		// Malformed (tags without a body) — pass through.
+		return line
+	}
+	existing := line[1:sp]
+	rest := line[sp+1:]
+	return "@" + strings.Join(added, ";") + ";" + existing + " " + rest
+}
+
+// newBatchID returns a short, sufficiently-unique batch reference tag
+// per the IRCv3 batch spec. 8 hex chars (32 bits) easily clears the
+// per-attach collision bar — there are at most a few hundred channels
+// in flight at once for one bouncer client.
+func newBatchID() string {
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // Broadcast writes line to every authenticated client except exclude.
@@ -1578,7 +1671,7 @@ func (b *Bouncer) recordForReplay(line string) {
 	b.logMu.Lock()
 	defer b.logMu.Unlock()
 	bucket := b.channelLog[target]
-	bucket = append(bucket, line)
+	bucket = append(bucket, loggedLine{line: line, ts: time.Now()})
 	if len(bucket) > channelLogCap {
 		bucket = bucket[len(bucket)-channelLogCap:]
 	}

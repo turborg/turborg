@@ -113,13 +113,13 @@ func TestCTCPHelpers(t *testing.T) {
 
 func TestCTCPReplyCovers(t *testing.T) {
 	cases := map[string]string{
-		"\x01VERSION\x01":        "VERSION turborg " + version.Version + " (https://github.com/turborg/turborg)",
-		"\x01PING 12345\x01":     "PING 12345",
-		"\x01CLIENTINFO\x01":     "CLIENTINFO VERSION PING TIME CLIENTINFO SOURCE USERINFO",
-		"\x01SOURCE\x01":         "SOURCE https://github.com/turborg/turborg",
-		"\x01USERINFO\x01":       "USERINFO turborg agent",
-		"\x01\x01":               "",  // empty inner
-		"\x01UNKNOWN\x01":        "",  // unrecognized
+		"\x01VERSION\x01":           "VERSION turborg " + version.Version + " (https://github.com/turborg/turborg)",
+		"\x01PING 12345\x01":        "PING 12345",
+		"\x01CLIENTINFO\x01":        "CLIENTINFO VERSION PING TIME CLIENTINFO SOURCE USERINFO",
+		"\x01SOURCE\x01":            "SOURCE https://github.com/turborg/turborg",
+		"\x01USERINFO\x01":          "USERINFO turborg agent",
+		"\x01\x01":                  "", // empty inner
+		"\x01UNKNOWN\x01":           "", // unrecognized
 		"\x01version lowercase\x01": "VERSION turborg " + version.Version + " (https://github.com/turborg/turborg)",
 	}
 	for in, want := range cases {
@@ -407,7 +407,7 @@ func TestHandlersIgnoreMalformedMessages(t *testing.T) {
 	c.handlePrivmsg(ctx, Message{}, "")
 	c.handlePart(ctx, Message{})
 	c.handleKick(ctx, Message{Params: []string{"#ch"}}) // missing victim
-	c.handleNickChange(ctx, Message{}) // no old
+	c.handleNickChange(ctx, Message{})                  // no old
 	c.handleTopic(ctx, Message{})
 	c.handleJoin(ctx, Message{}) // empty target
 
@@ -921,7 +921,7 @@ func TestUpstreamPrefixEmptyShortCircuitsBroadcastAsSelf(t *testing.T) {
 // recordingConn captures everything written to it so tests can assert
 // the bytes the bouncer emits to a client.
 type recordingConn struct {
-	mu    sync.Mutex
+	mu     sync.Mutex
 	writes [][]byte
 }
 
@@ -1150,6 +1150,62 @@ func TestHandleCapListAndEnd(t *testing.T) {
 		}
 	}
 	assert.True(t, gotAck, "CAP REQ via params (not trailing) must still ACK")
+}
+
+func TestDecorateReplayLine(t *testing.T) {
+	ts := time.Date(2026, 5, 21, 12, 34, 56, 789_000_000, time.UTC)
+	entry := loggedLine{line: ":alice!u@h PRIVMSG #ch :hi", ts: ts}
+	taggedEntry := loggedLine{
+		line: "@time=2025-01-01T00:00:00.000Z;account=alice :alice!u@h PRIVMSG #ch :tagged",
+		ts:   ts,
+	}
+
+	t.Run("no caps passes line through unchanged", func(t *testing.T) {
+		assert.Equal(t, entry.line, decorateReplayLine(entry, false, ""))
+	})
+
+	t.Run("server-time prepends time= tag", func(t *testing.T) {
+		got := decorateReplayLine(entry, true, "")
+		assert.Equal(t,
+			"@time=2026-05-21T12:34:56.789Z :alice!u@h PRIVMSG #ch :hi",
+			got)
+	})
+
+	t.Run("batch prepends batch= tag", func(t *testing.T) {
+		got := decorateReplayLine(entry, false, "abc123")
+		assert.Equal(t,
+			"@batch=abc123 :alice!u@h PRIVMSG #ch :hi",
+			got)
+	})
+
+	t.Run("both caps combine in one @-segment", func(t *testing.T) {
+		got := decorateReplayLine(entry, true, "abc123")
+		assert.Equal(t,
+			"@batch=abc123;time=2026-05-21T12:34:56.789Z :alice!u@h PRIVMSG #ch :hi",
+			got)
+	})
+
+	t.Run("existing upstream tags merge: time= preserved, our tags prepended", func(t *testing.T) {
+		got := decorateReplayLine(taggedEntry, true, "abc123")
+		// Upstream's `time=2025-01-01...` must survive; ours must NOT be
+		// duplicated when the line already has tags. Batch tag is
+		// always prepended.
+		assert.True(t, strings.HasPrefix(got, "@batch=abc123;"),
+			"merged line must start with batch tag, got %q", got)
+		assert.Contains(t, got, "time=2025-01-01T00:00:00.000Z",
+			"upstream's time= must survive merge, got %q", got)
+		assert.NotContains(t, got, "time=2026-05-21",
+			"our recorded ts must not overwrite upstream's time=, got %q", got)
+		assert.Contains(t, got, "account=alice",
+			"other upstream tags must survive merge, got %q", got)
+	})
+
+	t.Run("malformed tagged line (no body separator) passes through", func(t *testing.T) {
+		malformed := loggedLine{line: "@time=2025-01-01T00:00:00.000Z", ts: ts}
+		// No space → no body. decorateReplayLine returns it unchanged
+		// rather than producing an invalid frame.
+		assert.Equal(t, malformed.line, decorateReplayLine(malformed, true, "abc123"))
+	})
 }
 
 func TestRecordForReplayBoundsRing(t *testing.T) {

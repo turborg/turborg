@@ -795,6 +795,124 @@ func TestBouncerReplaysChannelLog(t *testing.T) {
 	assert.True(t, sawBufferEnd, "buffer end marker missing")
 }
 
+// negotiateAndPass walks the IRCv3 CAP LS → CAP REQ <caps> → PASS →
+// CAP END handshake against the bouncer and returns once auth+welcome
+// have completed. Used by the replay-decoration tests to put the
+// client into a known cap state before it consumes replay output.
+func negotiateAndPass(t *testing.T, conn net.Conn, r *bufio.Reader, caps, password string) {
+	t.Helper()
+	_, _ = r.ReadString('\n') // pre-auth NOTICE
+
+	writeLine(t, conn, "CAP LS")
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, err := r.ReadString('\n')
+	require.NoError(t, err)
+
+	writeLine(t, conn, "CAP REQ :"+caps)
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	ack, err := r.ReadString('\n')
+	require.NoError(t, err)
+	require.Contains(t, ack, "CAP * ACK :", "expected ACK for negotiated caps, got %q", ack)
+
+	writeLine(t, conn, "PASS "+password)
+	writeLine(t, conn, "CAP END")
+}
+
+func TestBouncerReplayCarriesServerTimeTag(t *testing.T) {
+	// Clients that negotiated server-time must receive replayed lines
+	// with an `@time=<ISO8601 UTC>` prefix so HexChat / mIRC / irssi
+	// render them as historical and don't highlight the channel tab
+	// as fresh activity. This is the user-visible fix for the "buffer
+	// playback looks like new messages" bug.
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#test")
+	b.AttachState(state, "turborg", "ident", "host")
+
+	b.Broadcast(":alice!u@h PRIVMSG #test :hello from before", nil)
+
+	conn, r := bouncerClient(t, addr)
+	negotiateAndPass(t, conn, r, "server-time message-tags", "hunter2")
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var sawTaggedReplay bool
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		if strings.Contains(line, "PRIVMSG #test") &&
+			strings.Contains(line, "hello from before") {
+			// Tag block must precede the prefix and contain time= in
+			// the expected ISO8601 format (RFC3339-ish with millis).
+			assert.True(t, strings.HasPrefix(line, "@"),
+				"server-time replay must start with @tags, got %q", line)
+			assert.Contains(t, line, "time=",
+				"server-time replay must carry time= tag, got %q", line)
+			sawTaggedReplay = true
+			break
+		}
+	}
+	assert.True(t, sawTaggedReplay, "expected tagged replay line for #test")
+}
+
+func TestBouncerReplayWrappedInChathistoryBatch(t *testing.T) {
+	// Clients that negotiated the `batch` cap get the per-channel
+	// replay block wrapped in `BATCH +<id> chathistory <channel>` /
+	// `BATCH -<id>` with every replayed line tagged `batch=<id>`. The
+	// legacy NOTICE markers are dropped in this case — capable clients
+	// would render them as out-of-band server NOTICEs, which is wrong.
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#test")
+	b.AttachState(state, "turborg", "ident", "host")
+
+	b.Broadcast(":alice!u@h PRIVMSG #test :hello from before", nil)
+
+	conn, r := bouncerClient(t, addr)
+	negotiateAndPass(t, conn, r, "batch message-tags", "hunter2")
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var batchStart, batchEnd, batchedLine, sawLegacyMarker bool
+	var batchID string
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		line = strings.TrimRight(line, "\r\n")
+		switch {
+		case strings.HasPrefix(line, "BATCH +"):
+			// Format: "BATCH +<id> chathistory <channel>"
+			rest := strings.TrimPrefix(line, "BATCH +")
+			parts := strings.Fields(rest)
+			require.GreaterOrEqual(t, len(parts), 3, "BATCH start malformed: %q", line)
+			batchID = parts[0]
+			assert.Equal(t, "chathistory", parts[1])
+			assert.Equal(t, "#test", parts[2])
+			batchStart = true
+		case strings.HasPrefix(line, "BATCH -") && batchID != "":
+			assert.Equal(t, "BATCH -"+batchID, line)
+			batchEnd = true
+		case strings.Contains(line, "PRIVMSG #test") &&
+			strings.Contains(line, "hello from before"):
+			assert.Contains(t, line, "batch="+batchID,
+				"replay line must carry the batch tag: %q", line)
+			batchedLine = true
+		case strings.Contains(line, "buffer playback for #test"),
+			strings.Contains(line, "end of buffer"):
+			sawLegacyMarker = true
+		}
+		if batchEnd {
+			break
+		}
+	}
+	assert.True(t, batchStart, "missing BATCH start")
+	assert.True(t, batchEnd, "missing BATCH end")
+	assert.True(t, batchedLine, "missing batched replay line")
+	assert.False(t, sawLegacyMarker, "legacy NOTICE markers must be suppressed for batch-cap clients")
+}
+
 // --- PING / PONG --------------------------------------------------------
 
 func TestBouncerPingReplyDoesNotForward(t *testing.T) {
