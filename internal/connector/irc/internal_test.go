@@ -1401,3 +1401,151 @@ func TestStartListenErrorSurfaces(t *testing.T) {
 	err = b.Start(context.Background())
 	require.Error(t, err, "negative port must surface a listen error")
 }
+
+func TestHumanReadableJoinFailure(t *testing.T) {
+	cases := []struct {
+		code string
+		want string
+	}{
+		{ErrBannedFromChan, "banned from channel"},
+		{ErrBadChannelKey, "channel key required or incorrect"},
+		{ErrChannelIsFull, "channel is full"},
+		{ErrInviteOnlyChan, "channel is invite-only"},
+		{ErrBadChanMask, "channel name not accepted by the network"},
+		{"999", "rejected by network"},
+		{"", "rejected by network"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.code, func(t *testing.T) {
+			assert.Equal(t, tc.want, humanReadableJoinFailure(tc.code))
+		})
+	}
+}
+
+func TestHandleModePublishesEventAndUpdatesState(t *testing.T) {
+	c, ch := connectorWithBus(t, agent.EventModeChanged)
+	c.state.OnSelfJoin("#chan")
+	c.state.OnNamesReply("#chan", []string{"alice", "bob", "carol"})
+	c.state.OnNamesEnd("#chan")
+
+	c.handleMode(context.Background(), Message{
+		Prefix:  "op!u@h",
+		Command: CmdMode,
+		Params:  []string{"#chan", "+o-v", "alice", "bob"},
+	})
+
+	ev := <-ch
+	require.NotNil(t, ev)
+	assert.Equal(t, "#chan", ev.Fields["channel"])
+	assert.Equal(t, "+o-v", ev.Fields["modes"])
+	assert.Equal(t, "alice bob", ev.Fields["args"])
+	assert.Equal(t, "op", ev.Fields["by"])
+
+	info := c.state.Get("#chan")
+	require.NotNil(t, info)
+	assert.Equal(t, "@", info.Members["alice"], "+o on alice promotes to op prefix")
+}
+
+func TestHandleModeIgnoresMalformedLines(t *testing.T) {
+	c, ch := connectorWithBus(t, agent.EventModeChanged)
+
+	// Fewer than 2 params: no channel/modes pair, must early-out.
+	c.handleMode(context.Background(), Message{Command: CmdMode, Params: []string{"#chan"}})
+	// Target that isn't a channel sigil — MODE on a nick (umode) is not
+	// our concern here and must not publish a channel-mode event.
+	c.handleMode(context.Background(), Message{Command: CmdMode, Params: []string{"alice", "+i"}})
+
+	select {
+	case ev := <-ch:
+		t.Fatalf("EventModeChanged published for malformed MODE: %+v", ev)
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestApplyPrefixModesToStatePrefixRules(t *testing.T) {
+	state := NewChannelState()
+	state.OnSelfJoin("#chan")
+	state.OnNamesReply("#chan", []string{"@alice", "+bob", "carol"})
+	state.OnNamesEnd("#chan")
+
+	// +v on an op must not visually demote (op outranks voice).
+	applyPrefixModesToState(state, "#chan", "+v", []string{"alice"})
+	info := state.Get("#chan")
+	require.NotNil(t, info)
+	assert.Equal(t, "@", info.Members["alice"], "+v on op leaves displayed @")
+
+	// +o on a plain member promotes to @.
+	applyPrefixModesToState(state, "#chan", "+o", []string{"carol"})
+	info = state.Get("#chan")
+	assert.Equal(t, "@", info.Members["carol"])
+
+	// -v on someone currently displayed as + drops to "".
+	applyPrefixModesToState(state, "#chan", "-v", []string{"bob"})
+	info = state.Get("#chan")
+	assert.Equal(t, "", info.Members["bob"])
+
+	// -v on alice (displayed @) is a no-op for the displayed prefix —
+	// only the equal-rank removal clears the slot.
+	applyPrefixModesToState(state, "#chan", "-v", []string{"alice"})
+	info = state.Get("#chan")
+	assert.Equal(t, "@", info.Members["alice"], "removing a lower mode mustn't clear the displayed higher one")
+}
+
+func TestApplyPrefixModesToStateSkipsNonPrefixArgModes(t *testing.T) {
+	state := NewChannelState()
+	state.OnSelfJoin("#chan")
+	state.OnNamesReply("#chan", []string{"alice"})
+	state.OnNamesEnd("#chan")
+
+	// "+bo banmask alice" — `b` consumes one arg (banmask) which must
+	// be skipped so the `o` flag aligns with `alice`, not banmask.
+	applyPrefixModesToState(state, "#chan", "+bo", []string{"*!*@evil", "alice"})
+
+	info := state.Get("#chan")
+	require.NotNil(t, info)
+	assert.Equal(t, "@", info.Members["alice"], "b-mode arg must advance the cursor so o lands on alice")
+}
+
+func TestApplyPrefixModesToStateAddOnlyArgMode(t *testing.T) {
+	state := NewChannelState()
+	state.OnSelfJoin("#chan")
+	state.OnNamesReply("#chan", []string{"alice"})
+	state.OnNamesEnd("#chan")
+
+	// `+l 50 +o alice` — `l` consumes the `50` arg only when adding;
+	// `o` then aligns with `alice`. With a `-l` form (no arg), the
+	// next arg-cursor must stay put.
+	applyPrefixModesToState(state, "#chan", "+l+o", []string{"50", "alice"})
+	info := state.Get("#chan")
+	require.NotNil(t, info)
+	assert.Equal(t, "@", info.Members["alice"])
+
+	// `-l+o alice` — `l` does not consume when removing, so `o` lands
+	// on `alice` from arg[0].
+	state.SetMemberPrefix("#chan", "alice", "")
+	applyPrefixModesToState(state, "#chan", "-l+o", []string{"alice"})
+	info = state.Get("#chan")
+	assert.Equal(t, "@", info.Members["alice"])
+}
+
+func TestApplyPrefixModesToStateGuards(t *testing.T) {
+	// nil state must be a no-op (defensive).
+	assert.NotPanics(t, func() {
+		applyPrefixModesToState(nil, "#chan", "+o", []string{"alice"})
+	})
+
+	// Unknown channel — no-op.
+	state := NewChannelState()
+	assert.NotPanics(t, func() {
+		applyPrefixModesToState(state, "#missing", "+o", []string{"alice"})
+	})
+
+	// Unknown nick on a known channel — must not invent a phantom
+	// member (matches SetMemberPrefix's own guard).
+	state.OnSelfJoin("#chan")
+	applyPrefixModesToState(state, "#chan", "+o", []string{"ghost"})
+	info := state.Get("#chan")
+	require.NotNil(t, info)
+	_, present := info.Members["ghost"]
+	assert.False(t, present, "MODE for a non-member mustn't materialise the nick")
+}
