@@ -141,8 +141,9 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	// message the agent observes. Filters at submit-time: only
 	// channel-sigil targets count (DMs don't enter replay history).
 	if store != nil {
-		a.Events.Subscribe(agent.EventMessage, makeStoreSubmitter(store, log))
-		a.Events.Subscribe(agent.EventMessageSent, makeStoreSubmitter(store, log))
+		botNick := ircConn.CurrentNick
+		a.Events.Subscribe(agent.EventMessage, makeStoreSubmitter(store, botNick, log))
+		a.Events.Subscribe(agent.EventMessageSent, makeStoreSubmitter(store, botNick, log))
 	}
 	_ = sink // referenced for lifecycle parity; closing happens with the agent
 
@@ -158,7 +159,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	}
 
 	RegisterBuiltinCommands(a, provider)
-	a.Commands.SetGuard(BuildCommandGuard(s))
+	a.Commands.SetGuard(BuildCommandGuard(s, ircCfg))
 
 	built := &Built{
 		Agent:     a,
@@ -286,17 +287,30 @@ func buildMessageStore(s *config.Settings, log *slog.Logger) (messages.Store, *m
 }
 
 // makeStoreSubmitter returns an EventBus handler that mirrors every
-// channel-targeted EventMessage / EventMessageSent into the shared
-// store. DMs are filtered out at this seam (channel must start with
-// a channel sigil) so replay history stays channel-only.
-func makeStoreSubmitter(store messages.Store, log *slog.Logger) func(ctx context.Context, ev *agent.Event) {
+// EventMessage / EventMessageSent into the shared store. DMs land
+// alongside channel messages — the row's `channel` field carries the
+// peer's nick for the DM case (set by handlePrivmsg's IsDirect branch)
+// so each conversation has its own scrollback bucket.
+//
+// botNick is consulted when the event payload doesn't carry an explicit
+// sender — specifically EventMessageSent from agent.handle, where the
+// OutboundEnvelope has no Sender field (bot identity is implicit). The
+// receiving side validates nick as non-empty, so without this fallback
+// command replies (!ping → pong) silently 422'd at accounts-api and
+// never landed in the durable history. The callback shape lets us
+// re-resolve the nick on every event — handy when the bot renames
+// mid-session (NICK changes); avoids stamping the original boot-time
+// nick onto every later reply.
+func makeStoreSubmitter(store messages.Store, botNick func() string, log *slog.Logger) func(ctx context.Context, ev *agent.Event) {
 	return func(ctx context.Context, ev *agent.Event) {
 		channel, _ := ev.Fields["channel"].(string)
 		nick, _ := ev.Fields["sender"].(string)
 		text, _ := ev.Fields["text"].(string)
 		// MESSAGE_SENT from agent command-dispatch carries the
 		// envelope, not the explicit fields — peek for both shapes.
+		isOutbound := false
 		if env, ok := ev.Fields["envelope"].(*agent.OutboundEnvelope); ok && env != nil {
+			isOutbound = true
 			if channel == "" {
 				channel = env.Channel
 			}
@@ -315,7 +329,17 @@ func makeStoreSubmitter(store messages.Store, log *slog.Logger) func(ctx context
 				text = env.Text
 			}
 		}
-		if channel == "" || !isChannelTarget(channel) {
+		// Outbound messages don't carry a sender — fall back to the
+		// bot's own current nick so the row attributes correctly.
+		if nick == "" && isOutbound && botNick != nil {
+			nick = botNick()
+		}
+		// Drop only when we lack the minimum fields to write a valid
+		// row. The receiver's validator requires non-empty channel +
+		// nick + text; persisting with any of those blank would 422
+		// silently. Channel may be a sigil-prefixed channel name OR a
+		// nick (DM target) — both are legitimate scrollback buckets.
+		if channel == "" || nick == "" || text == "" {
 			return
 		}
 		if err := store.Submit(ctx, messages.Message{
@@ -355,15 +379,20 @@ func isChannelTarget(s string) bool {
 	return false
 }
 
-// RegisterBuiltinCommands installs ping, version, help, and (when an
-// LLM is configured) ask. Idempotent for the same registry — duplicate
-// names just overwrite the prior handler. Builtins call ReplyTo so
-// DM-routing works out of the box.
+// RegisterBuiltinCommands installs ping, version, and (when an LLM is
+// configured) ask. Idempotent for the same registry — duplicate names
+// just overwrite the prior handler. Builtins call ReplyTo so DM-routing
+// works out of the box.
 func RegisterBuiltinCommands(a *agent.Agent, provider llm.Provider) {
+	a.Commands.Register("ping", pingCmd, nil)
 	a.Commands.Register("version", versionCmd, nil)
 	if provider != nil {
 		a.Commands.Register("ask", askCmd(provider, a.Log()), nil)
 	}
+}
+
+func pingCmd(_ context.Context, env *agent.InboundEnvelope, _ []string) (*agent.OutboundEnvelope, error) {
+	return agent.ReplyTo(env, "pong"), nil
 }
 
 func versionCmd(_ context.Context, env *agent.InboundEnvelope, _ []string) (*agent.OutboundEnvelope, error) {
@@ -392,18 +421,54 @@ func collapseWhitespace(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// BuildCommandGuard composes the owner-only + per-sender throttle into
-// a single CommandGuard. Returns nil when neither owner check nor
-// throttle is configured — the registry then skips the call entirely.
+// BuildCommandGuard composes the owner-trust check and per-sender
+// throttle into a single CommandGuard. Returns nil when the configured
+// owner mode is "none" AND no throttle is configured — the command
+// registry then skips the guard entirely.
 //
-// Owner checks fail closed when an account tag is required but missing
-// (e.g. a services-less network or a client without the account-tag
-// capability). Failing open would let any nick spoof the owner the
-// moment the account-tag pipeline went unavailable, which is exactly
-// when defensive gating matters most.
-func BuildCommandGuard(s *config.Settings) agent.CommandGuard {
+// Three owner modes are supported. The default is "none" — !commands
+// are inert until the operator opts in.
+//
+//   - "none":     refuse every !command. Bots running as pure relays,
+//                 log-only agents, or personal-bouncer use cases sit
+//                 here. Throttle still runs against anonymous scope so
+//                 a misconfigured throttle gate doesn't silently allow.
+//   - "self":     trust messages where the sender's nick equals the
+//                 bot's own nick. Useful for personal AI assistants
+//                 where the operator attaches via the bouncer and IS
+//                 the bot. The IRC network won't allow nick collisions,
+//                 so the sender check is sufficient on its own.
+//   - "external": trust messages from OwnerNick, verified via the
+//                 IRCv3 account-tag. OwnerAccount overrides the
+//                 expected account name (defaults to OwnerNick). When
+//                 the network has no services and no account-tag
+//                 arrives, fall back to hostmask matching against
+//                 OwnerHostmask when it's set. Without either, deny.
+//
+// Owner checks fail closed: ambiguous signals never resolve to "trust".
+// This matters most precisely when the verification pipeline is
+// degraded — a missing account-tag must not become a free pass.
+func BuildCommandGuard(s *config.Settings, ircCfg *irc.Settings) agent.CommandGuard {
+	mode := strings.ToLower(strings.TrimSpace(s.OwnerMode))
+	if mode == "" {
+		mode = "none"
+	}
+
 	ownerNick := strings.ToLower(strings.TrimSpace(s.OwnerNick))
-	ownerAccount := strings.TrimSpace(s.OwnerAccount)
+	// account-tag values are case-insensitive in practice — IRC services
+	// vary on whether they preserve nick case or normalize. Lowercase
+	// both sides so "StephenS" matches whether the server sends
+	// "StephenS" or "stephens".
+	ownerAccount := strings.ToLower(strings.TrimSpace(s.OwnerAccount))
+	if ownerAccount == "" {
+		ownerAccount = strings.ToLower(strings.TrimSpace(s.OwnerNick))
+	}
+	ownerHostmask := strings.ToLower(strings.TrimSpace(s.OwnerHostmask))
+
+	var botNick string
+	if ircCfg != nil {
+		botNick = strings.ToLower(strings.TrimSpace(ircCfg.Nick))
+	}
 
 	var throttle *irc.Throttle
 	if s.CommandMaxPerWindow > 0 && s.CommandWindowSeconds > 0 {
@@ -417,31 +482,99 @@ func BuildCommandGuard(s *config.Settings) agent.CommandGuard {
 		}
 	}
 
-	if ownerNick == "" && ownerAccount == "" && throttle == nil {
-		return nil
-	}
-
 	return func(env *agent.InboundEnvelope) bool {
-		sender := strings.ToLower(env.Sender)
-		account, _ := env.Metadata["account"].(string)
-		if ownerAccount != "" && account != ownerAccount {
+		if !ownerCheck(env, mode, botNick, ownerNick, ownerAccount, ownerHostmask) {
 			return false
 		}
-		if ownerNick != "" && sender != ownerNick {
-			return false
+		if throttle == nil {
+			return true
 		}
-		scope := account
-		if scope == "" {
-			scope = sender
-		}
-		if scope == "" {
-			scope = "anon"
-		}
-		if throttle != nil {
-			return throttle.Allow(scope)
-		}
-		return true
+		return throttle.Allow(throttleScope(env))
 	}
+}
+
+// ownerCheck applies the per-mode identity test. Returns true only when
+// the inbound envelope is from a trusted operator under the configured
+// mode; otherwise false. Fails closed on missing / ambiguous signals.
+func ownerCheck(env *agent.InboundEnvelope, mode, botNick, ownerNick, ownerAccount, ownerHostmask string) bool {
+	switch mode {
+	case "self":
+		sender := strings.ToLower(env.Sender)
+		return botNick != "" && sender == botNick
+	case "external":
+		sender := strings.ToLower(env.Sender)
+		if ownerNick == "" || sender != ownerNick {
+			return false
+		}
+		return verifyExternalOwner(env, ownerAccount, ownerHostmask)
+	default:
+		// "none" and any unknown value (operator typo) — deny.
+		return false
+	}
+}
+
+// verifyExternalOwner runs the account-tag → hostmask cascade. account-
+// tag wins when present (the strongest signal); hostmask is the
+// services-less fallback. Without either, deny.
+func verifyExternalOwner(env *agent.InboundEnvelope, ownerAccount, ownerHostmask string) bool {
+	account, _ := env.Metadata["account"].(string)
+	if account != "" {
+		// Lowercase compare — see ownerCheck for why.
+		return strings.ToLower(account) == ownerAccount
+	}
+	if ownerHostmask == "" {
+		return false
+	}
+	prefix, _ := env.Metadata["prefix"].(string)
+	return hostmaskMatches(strings.ToLower(prefix), ownerHostmask)
+}
+
+// throttleScope picks the bucket key for the per-sender throttle.
+// Prefers the IRCv3 account-tag (stable across nick changes); falls
+// back to the inbound sender; finally a shared "anon" bucket for the
+// degenerate case where neither was set.
+func throttleScope(env *agent.InboundEnvelope) string {
+	if scope, _ := env.Metadata["account"].(string); scope != "" {
+		return scope
+	}
+	if sender := strings.ToLower(env.Sender); sender != "" {
+		return sender
+	}
+	return "anon"
+}
+
+// hostmaskMatches tests whether an inbound IRC prefix (nick!ident@host,
+// already lowercased) matches a hostmask pattern with `*` glob
+// wildcards. The pattern is operator-supplied so we keep the surface
+// tiny: only `*` is interpreted (matches any sequence including empty).
+// Anything else is a literal byte match. Both sides are case-folded by
+// the caller — IRC hostnames are case-insensitive.
+func hostmaskMatches(prefix, pattern string) bool {
+	if pattern == "" {
+		return false
+	}
+	// Strip the leading ':' some IRCD parsers include.
+	prefix = strings.TrimPrefix(prefix, ":")
+	parts := strings.Split(pattern, "*")
+	// No wildcards → literal compare.
+	if len(parts) == 1 {
+		return prefix == pattern
+	}
+	// First fragment must prefix-match.
+	if !strings.HasPrefix(prefix, parts[0]) {
+		return false
+	}
+	prefix = prefix[len(parts[0]):]
+	// Walk middle fragments left-to-right.
+	for i := 1; i < len(parts)-1; i++ {
+		idx := strings.Index(prefix, parts[i])
+		if idx < 0 {
+			return false
+		}
+		prefix = prefix[idx+len(parts[i]):]
+	}
+	// Last fragment must suffix-match what's left.
+	return strings.HasSuffix(prefix, parts[len(parts)-1])
 }
 
 // buildIRCSnapshot returns a snapshot builder closed over ircConn. The

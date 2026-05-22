@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
+	"github.com/oklog/ulid/v2"
 	"github.com/turborg/turborg/internal/messagesink"
 )
 
@@ -42,6 +45,13 @@ type HTTPStore struct {
 	client   *http.Client
 	sink     *messagesink.Sink // owned: written by Submit, closed by Close.
 	log      *slog.Logger
+
+	// entropy + entropyMu mint ULIDs for messages submitted without an
+	// explicit ID. Receiver-side validators require a 26-char ULID; the
+	// previous "let the receiver mint it" contract turned out to be
+	// untrue in accounts-api, so the responsibility lives here.
+	entropy   *rand.Rand
+	entropyMu sync.Mutex
 }
 
 // NewHTTPStore returns nil when either endpoint or token is empty —
@@ -66,6 +76,12 @@ func NewHTTPStore(endpoint, token string, sink *messagesink.Sink, log *slog.Logg
 		client:   &http.Client{Timeout: readTimeout},
 		sink:     sink,
 		log:      log,
+		// math/rand for ULID entropy: ULID uniqueness is a (timestamp,
+		// 80-bit random) shape; collision needs both to match within the
+		// same millisecond, and the receiving side's (msg_id, ts) unique
+		// key catches the vanishing chance anyway. Same convention the
+		// legacy messagesink.Recorder used before this Store seam.
+		entropy: rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -75,20 +91,21 @@ func NewHTTPStore(endpoint, token string, sink *messagesink.Sink, log *slog.Logg
 // slow backend would visibly freeze the user's UI.
 const readTimeout = 5 * time.Second
 
-// Submit defers to the underlying sink. The HTTPStore intentionally
-// owns no per-Submit logic — message ID minting + ISO 8601 timestamp
-// formatting + batched POST are all messagesink concerns we don't
-// duplicate here.
+// Submit hands the entry off through messagesink's batched Submit.
+// Mints a ULID when m.ID is empty — the receiver requires a 26-char
+// msg_id and rejects empty values with 422. Callers that already have
+// an id (e.g. replaying a known-id message from another source) can
+// pass it through Message.ID and it's preserved verbatim.
 func (s *HTTPStore) Submit(_ context.Context, m Message) error {
 	if s == nil || s.sink == nil {
 		return nil
 	}
-	// Hand the entry off through messagesink's batched Submit. The
-	// receiving service is expected to mint msg_id when the field is
-	// empty (matching the legacy messagesink.Recorder contract); a
-	// caller that has its own id can pass it through Message.ID.
+	id := m.ID
+	if id == "" {
+		id = s.mintID(m.TS)
+	}
 	s.sink.Submit(messagesink.Entry{
-		MsgID:   m.ID,
+		MsgID:   id,
 		Channel: m.Channel,
 		Nick:    m.Nick,
 		Text:    m.Text,
@@ -96,6 +113,14 @@ func (s *HTTPStore) Submit(_ context.Context, m Message) error {
 		Kind:    "message",
 	})
 	return nil
+}
+
+// mintID returns a fresh ULID stamped at ts. The entropy source is
+// guarded — ULID.MustNew is not goroutine-safe.
+func (s *HTTPStore) mintID(ts time.Time) string {
+	s.entropyMu.Lock()
+	defer s.entropyMu.Unlock()
+	return ulid.MustNew(ulid.Timestamp(ts), s.entropy).String()
 }
 
 // Recent queries the configured endpoint for up to limit messages

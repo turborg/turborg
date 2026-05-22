@@ -573,7 +573,7 @@ func (c *Connector) bringUp(ctx context.Context) error {
 			return fmt.Errorf("irc JOIN %s: %w", w.Name, err)
 		}
 	}
-	if c.settings.NickServPassword != "" {
+	if c.settings.NickServEnabled() {
 		c.log.Info("irc identifying with NickServ")
 		if err := cli.WriteLine(
 			fmt.Sprintf("%s NickServ :IDENTIFY %s", CmdPrivmsg, c.settings.NickServPassword),
@@ -1660,6 +1660,22 @@ func (c *Connector) handlePrivmsg(ctx context.Context, msg Message, raw string) 
 
 	env := agent.NewInbound(c.Name(), target, sender, text)
 	env.Raw = raw
+	// IRCv3 message tags live on env.Metadata so cross-connector code
+	// (e.g. the agent's command guard's account-tag check, or any
+	// future Discord/Telegram analog) can read them without an IRC-
+	// specific import. account-tag is the headline tag — owner_mode
+	// = "external" verification consults it. server-time is preserved
+	// for chathistory ordering downstream.
+	if account, ok := msg.Tags["account"]; ok && account != "" {
+		env.Metadata["account"] = account
+	}
+	// The full inbound prefix (nick!ident@host) goes through too so
+	// the owner-resolver's hostmask fallback can compare on
+	// services-less networks. Kept raw — the resolver lowercases at
+	// compare time.
+	if msg.Prefix != "" {
+		env.Metadata["prefix"] = msg.Prefix
+	}
 	if !strings.HasPrefix(target, "#") && !strings.HasPrefix(target, "&") {
 		env.IsDirect = true
 		env.Channel = sender

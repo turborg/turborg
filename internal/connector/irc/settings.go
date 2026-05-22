@@ -29,6 +29,15 @@ type Settings struct {
 	SASLUser     string `env:"SASL_USER"`
 	SASLPassword string `env:"SASL_PASSWORD"`
 
+	// AuthMode selects which network authentication scheme the
+	// connector uses during registration. Values: "sasl", "nickserv",
+	// "none". SASL and NickServ are mutually exclusive — the operator
+	// picks one. Empty AuthMode is the legacy fallback: SASL active
+	// when both creds present, NickServ active when its password is
+	// set, otherwise no auth. Explicit "none" disables both even when
+	// stale creds are still in the env.
+	AuthMode string `env:"AUTH_MODE"`
+
 	Channels []string `env:"CHANNELS" envSeparator:","`
 
 	HandshakeTimeout   time.Duration `env:"HANDSHAKE_TIMEOUT"    envDefault:"30s"`
@@ -167,9 +176,37 @@ func (s *Settings) EffectiveQuitMessage() string {
 	return "bye from turborg"
 }
 
-// SASLEnabled is true when both credentials are present.
+// SASLEnabled is true when the operator picked SASL as the auth mode
+// and both credentials are present. Legacy fallback: when AuthMode is
+// empty, infer SASL from the presence of both credentials so existing
+// self-host configs keep working without an explicit AUTH_MODE.
 func (s *Settings) SASLEnabled() bool {
-	return s.SASLUser != "" && s.SASLPassword != ""
+	hasCreds := s.SASLUser != "" && s.SASLPassword != ""
+	mode := strings.ToLower(strings.TrimSpace(s.AuthMode))
+	switch mode {
+	case "":
+		return hasCreds
+	case "sasl":
+		return hasCreds
+	default:
+		return false
+	}
+}
+
+// NickServEnabled is true when the operator picked NickServ as the
+// auth mode and the password is present. Legacy fallback mirrors
+// SASLEnabled: when AuthMode is empty, infer from credential presence.
+func (s *Settings) NickServEnabled() bool {
+	hasPassword := s.NickServPassword != ""
+	mode := strings.ToLower(strings.TrimSpace(s.AuthMode))
+	switch mode {
+	case "":
+		return hasPassword
+	case "nickserv":
+		return hasPassword
+	default:
+		return false
+	}
 }
 
 // BouncerEnabled is true when the bouncer password is set.

@@ -828,21 +828,21 @@ func TestChannelMessagesReplayedInTSOrder(t *testing.T) {
 	// state so #x is in the list, otherwise the channel-history
 	// replay loop never visits it.
 	bridge.state.OnSelfJoin("#x")
-	g, a, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	opts := newOptions(t, "p")
+	g, _, td := startGateway(t, opts, bridge, &fakeSender{})
 	defer td()
 
-	// Publish three EventMessage events before any client connects;
-	// they land in the gateway's MessageStore (via gateway.onMessage
-	// → submitToStore). When the WS client attaches, replayBuffers
-	// pulls the last N for every joined channel and emits them as
-	// `replayed: true` frames.
-	for _, text := range []string{"first", "second", "third"} {
-		a.Events.Publish(context.Background(), &agent.Event{
-			Type: agent.EventMessage,
-			Fields: map[string]any{
-				"channel": "#x", "sender": "alice", "text": text,
-			},
-		})
+	// Seed the MessageStore directly. In production, runtime's
+	// makeStoreSubmitter writes here on every EventMessage / SENT
+	// — the gateway is broadcast-only now. The test exercises the
+	// gateway's replay path, so it bypasses the agent EventBus and
+	// stages the store contents to assert ordering.
+	base := time.Date(2026, 5, 21, 12, 0, 0, 0, time.UTC)
+	for i, text := range []string{"first", "second", "third"} {
+		require.NoError(t, opts.MessageStore.Submit(context.Background(), messages.Message{
+			Channel: "#x", Nick: "alice", Text: text,
+			TS: base.Add(time.Duration(i) * time.Millisecond),
+		}))
 	}
 
 	conn := dialWS(t, g.Addr(), "p")
@@ -1197,6 +1197,50 @@ func TestInboundModeWithoutTarget(t *testing.T) {
 }
 
 // --- recordChannel skips messages without a channel ---------
+
+// TestGatewayDoesNotWriteToMessageStore pins the contract: persistence
+// is the runtime.makeStoreSubmitter subscriber's job; the gateway only
+// broadcasts to WS clients. The previous mistake had BOTH the runtime
+// submitter AND the gateway's own subscribers calling MessageStore.
+// Submit on every EventMessage / EventMessageSent, landing every
+// channel message in the DB twice with different msg_ids. Regression
+// guard.
+func TestGatewayDoesNotWriteToMessageStore(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	bridge.state.OnSelfJoin("#x")
+	opts := newOptions(t, "p")
+	store := opts.MessageStore.(*messages.MemoryStore)
+	g, a, td := startGateway(t, opts, bridge, &fakeSender{})
+	defer td()
+	_ = g
+
+	// Publish an inbound message + an outbound (SENT) message. If the
+	// gateway re-introduced its old submitToStore path, MessageStore
+	// would now contain entries; runtime's makeStoreSubmitter is the
+	// only canonical writer and the test setup doesn't wire it.
+	a.Events.Publish(context.Background(), &agent.Event{
+		Type: agent.EventMessage,
+		Fields: map[string]any{
+			"channel": "#x", "sender": "alice", "text": "hi",
+		},
+	})
+	a.Events.Publish(context.Background(), &agent.Event{
+		Type: agent.EventMessageSent,
+		Fields: map[string]any{
+			"channel": "#x", "sender": "turborg", "text": "pong",
+		},
+	})
+
+	// Allow the EventBus delivery goroutine to drain.
+	time.Sleep(50 * time.Millisecond)
+
+	got, err := store.Recent(context.Background(), "#x", time.Now().Add(time.Hour), 10)
+	require.NoError(t, err)
+	assert.Empty(t, got,
+		"gateway must NOT persist to MessageStore — that's runtime.makeStoreSubmitter's job. "+
+			"If this fires, the gateway has re-introduced its own writer and the DB now gets every "+
+			"message twice with different msg_ids.")
+}
 
 func TestOnMessageReadsEnvelopeFieldsWhenPresent(t *testing.T) {
 	bridge := newFakeBridge("turborg")

@@ -43,8 +43,29 @@ type Settings struct {
 	// empty, the single-connector quickstart path enables IRC only.
 	Connectors []string `env:"CONNECTORS" envSeparator:","`
 
-	OwnerNick    string `env:"OWNER_NICK"`
-	OwnerAccount string `env:"OWNER_ACCOUNT"`
+	// Owner identification — see internal/runtime/runtime.go's
+	// BuildCommandGuard for the resolver semantics.
+	//
+	// OwnerMode picks which trust model the agent uses for !commands:
+	//   - "none" (default): !commands are disabled entirely.
+	//   - "self":           the bot's own nick is the owner. Useful for
+	//                       personal-AI-assistant setups where the operator
+	//                       attaches to the bouncer and IS the bot.
+	//   - "external":       a separate nick (OwnerNick) controls the bot.
+	//                       Verified via account-tag, with an optional
+	//                       hostmask fallback for services-less networks.
+	//
+	// OwnerNick is the configured nick to trust when OwnerMode == "external".
+	// OwnerAccount is an optional override for the account-tag match value;
+	// defaults to OwnerNick when empty (the common case where the operator's
+	// nick equals their NickServ account name).
+	// OwnerHostmask is the optional services-less fallback (e.g. QuakeNet
+	// private IRCDs). When set, an inbound message matching OwnerNick AND
+	// the hostmask is trusted even without an account-tag.
+	OwnerMode     string `env:"OWNER_MODE" envDefault:"none"`
+	OwnerNick     string `env:"OWNER_NICK"`
+	OwnerAccount  string `env:"OWNER_ACCOUNT"`
+	OwnerHostmask string `env:"OWNER_HOSTMASK"`
 
 	CommandMaxPerWindow  int `env:"COMMAND_MAX_PER_WINDOW"  envDefault:"5"`
 	CommandWindowSeconds int `env:"COMMAND_WINDOW_SECONDS"  envDefault:"30"`

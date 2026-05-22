@@ -721,6 +721,58 @@ func TestSendBroadcastsThroughBouncerWhenAttached(t *testing.T) {
 	assert.True(t, sawPrivmsg, "attached client must see the PRIVMSG; got %v", got)
 }
 
+// TestHandlePrivmsgPropagatesAccountTagToMetadata pins the contract
+// between the IRC connector and the agent's command guard: when the
+// inbound PRIVMSG carries an IRCv3 @account= tag, the value MUST land
+// in env.Metadata["account"]. The owner-mode=external resolver consults
+// that key, so without this plumbing every external-mode bot fails
+// closed on every !command — the bug that hid for hours after the
+// owner-control-modes refactor.
+func TestHandlePrivmsgPropagatesAccountTagToMetadata(t *testing.T) {
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+	c.handlePrivmsg(context.Background(),
+		Message{
+			Tags:     map[string]string{"account": "StephenS", "time": "2026-05-22T13:41:16.536Z"},
+			Prefix:   "StephenS!stefika@user/stephens",
+			Params:   []string{"#xshellz-test"},
+			Trailing: "!ping",
+		},
+		"@account=StephenS;time=2026-05-22T13:41:16.536Z :StephenS!stefika@user/stephens PRIVMSG #xshellz-test :!ping")
+
+	select {
+	case env := <-c.Inbound():
+		assert.Equal(t, "StephenS", env.Metadata["account"],
+			"account-tag must round-trip into env.Metadata so the owner guard can consult it")
+		assert.Equal(t, "StephenS!stefika@user/stephens", env.Metadata["prefix"],
+			"prefix should travel through too — owner guard's hostmask fallback consults it")
+	case <-time.After(time.Second):
+		t.Fatal("expected inbound envelope")
+	}
+}
+
+// TestHandlePrivmsgWithoutAccountTagOmitsMetadataKey ensures the
+// metadata map stays clean when no account-tag arrives (services-less
+// network, or the cap wasn't negotiated). The owner-resolver treats
+// missing-account as "fall back to hostmask"; an empty-string-account
+// would skip that branch incorrectly.
+func TestHandlePrivmsgWithoutAccountTagOmitsMetadataKey(t *testing.T) {
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+	c.handlePrivmsg(context.Background(),
+		Message{
+			Prefix:   "stranger!u@h.example",
+			Params:   []string{"#ch"},
+			Trailing: "!ping",
+		},
+		":stranger!u@h.example PRIVMSG #ch :!ping")
+	select {
+	case env := <-c.Inbound():
+		_, hasAccount := env.Metadata["account"]
+		assert.False(t, hasAccount, "absent account-tag must not seed the metadata key")
+	case <-time.After(time.Second):
+		t.Fatal("expected inbound envelope")
+	}
+}
+
 func TestHandlePrivmsgRoutesDMToSenderChannel(t *testing.T) {
 	c := New(&Settings{Nick: "bot"}, nil, nil)
 	c.handlePrivmsg(context.Background(),

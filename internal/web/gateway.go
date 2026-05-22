@@ -810,16 +810,16 @@ func (g *Gateway) onMessage(_ context.Context, ev *agent.Event) {
 	if env != nil {
 		channel, sender, text = env.Channel, env.Sender, env.Text
 	}
-	// Snapshot ts once so the wire payload (Unix seconds) and the
-	// durable store entry agree on the moment.
-	now := time.Now()
-	g.submitToStore(channel, sender, text, now)
+	// Durable persistence lives on runtime.makeStoreSubmitter (one
+	// canonical subscriber per process). The gateway only handles the
+	// WS broadcast half — submitting from here too caused every message
+	// to land in the DB twice with different msg_ids.
 	g.broadcast(map[string]any{
 		"op":      "message",
 		"channel": channel,
 		"nick":    sender,
 		"text":    text,
-		"ts":      now.Unix(),
+		"ts":      time.Now().Unix(),
 	})
 }
 
@@ -846,35 +846,22 @@ func (g *Gateway) onMessageSent(_ context.Context, ev *agent.Event) {
 	if sender == "" {
 		sender = g.bridge.CurrentNick()
 	}
-	now := time.Now()
-	g.submitToStore(channel, sender, text, now)
+	// Persistence is handled by runtime.makeStoreSubmitter (single
+	// canonical subscriber); the gateway only broadcasts to WS clients.
 	g.broadcast(map[string]any{
 		"op":      "message",
 		"channel": channel,
 		"nick":    sender,
 		"text":    text,
-		"ts":      now.Unix(),
+		"ts":      time.Now().Unix(),
 	})
 }
 
-// submitToStore pushes a channel message into the configured store.
-// Filters at the gateway boundary: only channel-sigil targets are
-// stored (DMs aren't part of replay history). Errors are downgraded
-// to debug — failure to mirror must not break live broadcast.
-func (g *Gateway) submitToStore(channel, sender, text string, ts time.Time) {
-	if g.opts.MessageStore == nil || !startsWithChannelSigil(channel) {
-		return
-	}
-	err := g.opts.MessageStore.Submit(context.Background(), messages.Message{
-		Channel: channel,
-		Nick:    sender,
-		Text:    text,
-		TS:      ts,
-	})
-	if err != nil {
-		g.log.Debug("message store submit", "err", err, "channel", channel)
-	}
-}
+// (submitToStore removed — message persistence is the runtime
+// EventBus subscriber's job. Keeping a duplicate writer here caused
+// every channel message to land in the DB twice with different
+// msg_ids since both the runtime submitter and the gateway's own
+// onMessage / onMessageSent subscribers ran on the same events.)
 
 func startsWithChannelSigil(s string) bool {
 	if s == "" {

@@ -309,3 +309,92 @@ func TestHTTPStoreSubmitDelegatesToSink(t *testing.T) {
 	assert.Contains(t, string(captured), `"nick":"alice"`)
 	assert.Contains(t, string(captured), `"text":"hi"`)
 }
+
+// TestHTTPStoreSubmitMintsULIDWhenIDMissing pins the receiver-contract
+// invariant: when Submit is called with an empty Message.ID, the POSTed
+// payload still carries a 26-char (Crockford base32) ULID as msg_id.
+// Regression guard for the message-history-scrollback refactor where
+// the Recorder's ULID minting was dropped and the receiving end's
+// "msg_id must be 26 chars" validator silently 422'd every batch.
+func TestHTTPStoreSubmitMintsULIDWhenIDMissing(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		bodyBytes []byte
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() { _ = r.Body.Close() }()
+		buf := make([]byte, 4096)
+		n, _ := r.Body.Read(buf)
+		mu.Lock()
+		bodyBytes = buf[:n]
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	sink := messagesink.New(srv.URL, "tok", nil)
+	require.NotNil(t, sink)
+	hs := messages.NewHTTPStore(srv.URL, "tok", sink, nil)
+	require.NotNil(t, hs)
+
+	// Caller passes an empty ID — same shape runtime.makeStoreSubmitter
+	// uses for IRC inbound messages.
+	require.NoError(t, hs.Submit(context.Background(), mkMsg("#a", "alice", "hi",
+		time.Date(2026, 5, 21, 12, 0, 0, 0, time.UTC))))
+	sink.Close(context.Background())
+
+	mu.Lock()
+	body := string(bodyBytes)
+	mu.Unlock()
+
+	var decoded struct {
+		Messages []struct {
+			MsgID string `json:"msg_id"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &decoded))
+	require.Len(t, decoded.Messages, 1)
+	gotID := decoded.Messages[0].MsgID
+	assert.Len(t, gotID, 26, "receiver validator requires 26-char ULID; empty / short id causes 422")
+	// Crockford base32: A-Z (no I, L, O, U) + 0-9. Pin the alphabet so
+	// a future refactor that swaps to a different scheme trips this test.
+	for _, r := range gotID {
+		assert.True(t,
+			(r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z' && r != 'I' && r != 'L' && r != 'O' && r != 'U'),
+			"msg_id %q contains non-Crockford-base32 char %q", gotID, r)
+	}
+}
+
+// TestHTTPStoreSubmitPreservesCallerSuppliedID confirms the "explicit
+// id wins" branch — a caller that already has a stable ULID (e.g.
+// replaying a known-id message from another source) gets it through
+// untouched.
+func TestHTTPStoreSubmitPreservesCallerSuppliedID(t *testing.T) {
+	const presetID = "01HXJZN1H7G0M2K9PQR3S4T5V6"
+	var (
+		mu        sync.Mutex
+		bodyBytes []byte
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() { _ = r.Body.Close() }()
+		buf := make([]byte, 4096)
+		n, _ := r.Body.Read(buf)
+		mu.Lock()
+		bodyBytes = buf[:n]
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	sink := messagesink.New(srv.URL, "tok", nil)
+	hs := messages.NewHTTPStore(srv.URL, "tok", sink, nil)
+	m := mkMsg("#a", "alice", "hi", time.Date(2026, 5, 21, 12, 0, 0, 0, time.UTC))
+	m.ID = presetID
+	require.NoError(t, hs.Submit(context.Background(), m))
+	sink.Close(context.Background())
+
+	mu.Lock()
+	body := string(bodyBytes)
+	mu.Unlock()
+	assert.Contains(t, body, `"msg_id":"`+presetID+`"`)
+}
