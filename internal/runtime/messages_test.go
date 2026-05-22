@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -65,21 +66,27 @@ func TestBuildMessageStoreHTTPWhenConfigured(t *testing.T) {
 	assert.True(t, isHTTP, "with both URLs set → HTTPStore")
 }
 
-func TestMakeStoreSubmitterSkipsNonChannelTargets(t *testing.T) {
+func TestMakeStoreSubmitterPersistsDMs(t *testing.T) {
+	// DMs (handlePrivmsg sets env.Channel = sender when IsDirect) land
+	// in the store too — each conversation gets its own per-peer
+	// bucket. Previously the submitter filtered these out with an
+	// "isChannelTarget" check, which threw away every direct message
+	// the bot received or sent.
 	store := messages.NewMemoryStore(0)
-	sub := makeStoreSubmitter(store, nil)
+	sub := makeStoreSubmitter(store, nil, nil)
 	sub(context.Background(), &agent.Event{
 		Type: agent.EventMessage,
 		Fields: map[string]any{
-			"channel": "alice", "sender": "bob", "text": "psst",
+			"channel": "alice", "sender": "alice", "text": "psst",
 		},
 	})
-	assert.Equal(t, 0, store.Len("alice"), "DM target must not be stored")
+	assert.Equal(t, 1, store.Len("alice"),
+		"DM rows must be persisted under the peer-nick bucket")
 }
 
 func TestMakeStoreSubmitterSubmitsChannelMessages(t *testing.T) {
 	store := messages.NewMemoryStore(0)
-	sub := makeStoreSubmitter(store, nil)
+	sub := makeStoreSubmitter(store, nil, nil)
 	sub(context.Background(), &agent.Event{
 		Type: agent.EventMessage,
 		Fields: map[string]any{
@@ -93,7 +100,7 @@ func TestMakeStoreSubmitterUnpacksInboundEnvelope(t *testing.T) {
 	// Some publishers carry the data on `envelope` instead of the
 	// flat fields — the submitter must read both shapes.
 	store := messages.NewMemoryStore(0)
-	sub := makeStoreSubmitter(store, nil)
+	sub := makeStoreSubmitter(store, nil, nil)
 	sub(context.Background(), &agent.Event{
 		Type: agent.EventMessage,
 		Fields: map[string]any{
@@ -107,7 +114,7 @@ func TestMakeStoreSubmitterUnpacksInboundEnvelope(t *testing.T) {
 
 func TestMakeStoreSubmitterUnpacksOutboundEnvelope(t *testing.T) {
 	store := messages.NewMemoryStore(0)
-	sub := makeStoreSubmitter(store, nil)
+	sub := makeStoreSubmitter(store, nil, nil)
 	sub(context.Background(), &agent.Event{
 		Type: agent.EventMessageSent,
 		Fields: map[string]any{
@@ -120,11 +127,53 @@ func TestMakeStoreSubmitterUnpacksOutboundEnvelope(t *testing.T) {
 
 func TestMakeStoreSubmitterEmptyChannelNoop(t *testing.T) {
 	store := messages.NewMemoryStore(0)
-	sub := makeStoreSubmitter(store, nil)
+	sub := makeStoreSubmitter(store, nil, nil)
 	sub(context.Background(), &agent.Event{
 		Type:   agent.EventMessage,
 		Fields: map[string]any{"sender": "alice", "text": "no channel"},
 	})
 	// MemoryStore tracks per-channel; absent channel == nothing recorded.
 	assert.Equal(t, 0, store.Len(""))
+}
+
+// TestMakeStoreSubmitterOutboundUsesBotNick pins the contract that
+// command replies (!ping → pong) attribute correctly to the bot.
+// OutboundEnvelope has no Sender field — the bot is implicit — so the
+// submitter must consult the botNick callback to populate the
+// row's nick. accounts-api's IngestMessageEntry validator rejects
+// empty nick with 422, which silently dropped every command reply
+// until this seam was added.
+func TestMakeStoreSubmitterOutboundUsesBotNick(t *testing.T) {
+	store := messages.NewMemoryStore(0)
+	sub := makeStoreSubmitter(store, func() string { return "xinfolocal" }, nil)
+	sub(context.Background(), &agent.Event{
+		Type: agent.EventMessageSent,
+		Fields: map[string]any{
+			"envelope": &agent.OutboundEnvelope{Channel: "#x", Text: "pong"},
+		},
+	})
+	assert.Equal(t, 1, store.Len("#x"))
+	got, err := store.Recent(context.Background(), "#x", time.Now().Add(time.Hour), 10)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "xinfolocal", got[0].Nick, "outbound nick must come from botNick callback")
+	assert.Equal(t, "pong", got[0].Text)
+}
+
+// TestMakeStoreSubmitterOutboundSkipsWhenBotNickEmpty guards against
+// the half-fix where botNick returns "" (the IRC connector hasn't yet
+// learned the live nick from the server — pre-001-welcome window). The
+// submitter must NOT POST a row that would 422 at the receiver; it
+// drops the message silently and lets the next attempt succeed.
+func TestMakeStoreSubmitterOutboundSkipsWhenBotNickEmpty(t *testing.T) {
+	store := messages.NewMemoryStore(0)
+	sub := makeStoreSubmitter(store, func() string { return "" }, nil)
+	sub(context.Background(), &agent.Event{
+		Type: agent.EventMessageSent,
+		Fields: map[string]any{
+			"envelope": &agent.OutboundEnvelope{Channel: "#x", Text: "pong"},
+		},
+	})
+	assert.Equal(t, 0, store.Len("#x"),
+		"empty bot nick → row would 422; must skip rather than write a half-formed entry")
 }
