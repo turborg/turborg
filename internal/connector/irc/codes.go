@@ -36,12 +36,12 @@ const (
 	RplEndOfMOTD     = "376"
 	RplWhoisSecure   = "671"
 
-	RplSaslLoggedIn  = "900"
-	RplSaslSuccess   = "903"
-	ErrSaslFail      = "904"
-	ErrSaslTooLong   = "905"
-	ErrSaslAborted   = "906"
-	ErrSaslAlready   = "907"
+	RplSaslLoggedIn = "900"
+	RplSaslSuccess  = "903"
+	ErrSaslFail     = "904"
+	ErrSaslTooLong  = "905"
+	ErrSaslAborted  = "906"
+	ErrSaslAlready  = "907"
 
 	ErrNoSuchNick       = "401"
 	ErrNoMOTD           = "422"
@@ -59,28 +59,36 @@ const (
 
 // IRC commands turborg sends or recognizes on the wire.
 const (
-	CmdPrivmsg       = "PRIVMSG"
-	CmdNotice        = "NOTICE"
-	CmdJoin          = "JOIN"
-	CmdPart          = "PART"
-	CmdQuit          = "QUIT"
-	CmdNick          = "NICK"
-	CmdUser          = "USER"
-	CmdPass          = "PASS"
-	CmdPing          = "PING"
-	CmdPong          = "PONG"
-	CmdMode          = "MODE"
-	CmdTopic         = "TOPIC"
-	CmdKick          = "KICK"
-	CmdNames         = "NAMES"
-	CmdCap           = "CAP"
-	CmdWhois         = "WHOIS"
-	CmdInvite        = "INVITE"
-	CmdAway          = "AWAY"
-	CmdList          = "LIST"
-	CmdWho           = "WHO"
-	CmdAuthenticate  = "AUTHENTICATE"
-	CmdError         = "ERROR"
+	CmdPrivmsg      = "PRIVMSG"
+	CmdNotice       = "NOTICE"
+	CmdJoin         = "JOIN"
+	CmdPart         = "PART"
+	CmdQuit         = "QUIT"
+	CmdNick         = "NICK"
+	CmdUser         = "USER"
+	CmdPass         = "PASS"
+	CmdPing         = "PING"
+	CmdPong         = "PONG"
+	CmdMode         = "MODE"
+	CmdTopic        = "TOPIC"
+	CmdKick         = "KICK"
+	CmdNames        = "NAMES"
+	CmdCap          = "CAP"
+	CmdWhois        = "WHOIS"
+	CmdInvite       = "INVITE"
+	CmdAway         = "AWAY"
+	CmdList         = "LIST"
+	CmdWho          = "WHO"
+	CmdAuthenticate = "AUTHENTICATE"
+	CmdError        = "ERROR"
+	// CmdChathistory is the IRCv3 draft/chathistory command. Handled
+	// locally by the bouncer (queries messages.Store, returns a
+	// chathistory-typed BATCH); never forwarded upstream.
+	CmdChathistory = "CHATHISTORY"
+	// CmdBatch is the IRCv3 batch command. Used by the bouncer when
+	// framing CHATHISTORY responses and welcome replay for
+	// batch-capable clients.
+	CmdBatch = "BATCH"
 )
 
 // IsHandshakeComplete reports whether the given numeric reply signals the

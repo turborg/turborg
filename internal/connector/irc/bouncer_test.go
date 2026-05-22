@@ -12,7 +12,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/turborg/turborg/internal/connector/irc"
+	"github.com/turborg/turborg/internal/messages"
 )
+
+// attachStoreWithSeed wires a fresh MemoryStore to the bouncer and
+// pre-populates it with the given seed entries so replay-on-attach
+// tests have something to render. Returns the store for additional
+// assertions.
+func attachStoreWithSeed(t *testing.T, b *irc.Bouncer, seed []messages.Message) *messages.MemoryStore {
+	t.Helper()
+	store := messages.NewMemoryStore(0)
+	for _, m := range seed {
+		require.NoError(t, store.Submit(context.Background(), m))
+	}
+	b.AttachMessageStore(store)
+	return store
+}
 
 // freshBouncer builds a bouncer listening on a random port. tearDown
 // stops it and waits for goroutines so goleak stays happy.
@@ -763,9 +778,11 @@ func TestBouncerReplaysChannelLog(t *testing.T) {
 	state.OnSelfJoin("#test")
 	b.AttachState(state, "turborg", "ident", "host")
 
-	// Record some traffic on the channel before any client connects.
-	b.Broadcast(":alice!u@h PRIVMSG #test :hello from before", nil)
-	b.Broadcast(":bob!u@h PRIVMSG #test :and from before too", nil)
+	base := time.Now().Add(-time.Minute)
+	attachStoreWithSeed(t, b, []messages.Message{
+		{Channel: "#test", Nick: "alice", Text: "hello from before", TS: base},
+		{Channel: "#test", Nick: "bob", Text: "and from before too", TS: base.Add(time.Second)},
+	})
 
 	conn, r := bouncerClient(t, addr)
 	_, _ = r.ReadString('\n')
@@ -793,6 +810,295 @@ func TestBouncerReplaysChannelLog(t *testing.T) {
 	assert.True(t, sawBufferStart, "buffer start marker missing")
 	assert.True(t, sawHello, "buffered message missing")
 	assert.True(t, sawBufferEnd, "buffer end marker missing")
+}
+
+// negotiateAndPass walks the IRCv3 CAP LS → CAP REQ <caps> → PASS →
+// CAP END handshake against the bouncer and returns once auth+welcome
+// have completed. Used by the replay-decoration tests to put the
+// client into a known cap state before it consumes replay output.
+func negotiateAndPass(t *testing.T, conn net.Conn, r *bufio.Reader, caps, password string) {
+	t.Helper()
+	_, _ = r.ReadString('\n') // pre-auth NOTICE
+
+	writeLine(t, conn, "CAP LS")
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, err := r.ReadString('\n')
+	require.NoError(t, err)
+
+	writeLine(t, conn, "CAP REQ :"+caps)
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	ack, err := r.ReadString('\n')
+	require.NoError(t, err)
+	require.Contains(t, ack, "CAP * ACK :", "expected ACK for negotiated caps, got %q", ack)
+
+	writeLine(t, conn, "PASS "+password)
+	writeLine(t, conn, "CAP END")
+}
+
+func TestBouncerReplayCarriesServerTimeTag(t *testing.T) {
+	// Clients that negotiated server-time must receive replayed lines
+	// with an `@time=<ISO8601 UTC>` prefix so HexChat / mIRC / irssi
+	// render them as historical and don't highlight the channel tab
+	// as fresh activity. This is the user-visible fix for the "buffer
+	// playback looks like new messages" bug.
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#test")
+	b.AttachState(state, "turborg", "ident", "host")
+
+	attachStoreWithSeed(t, b, []messages.Message{
+		{Channel: "#test", Nick: "alice", Text: "hello from before", TS: time.Now().Add(-time.Minute)},
+	})
+
+	conn, r := bouncerClient(t, addr)
+	negotiateAndPass(t, conn, r, "server-time message-tags", "hunter2")
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var sawTaggedReplay bool
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		if strings.Contains(line, "PRIVMSG #test") &&
+			strings.Contains(line, "hello from before") {
+			// Tag block must precede the prefix and contain time= in
+			// the expected ISO8601 format (RFC3339-ish with millis).
+			assert.True(t, strings.HasPrefix(line, "@"),
+				"server-time replay must start with @tags, got %q", line)
+			assert.Contains(t, line, "time=",
+				"server-time replay must carry time= tag, got %q", line)
+			sawTaggedReplay = true
+			break
+		}
+	}
+	assert.True(t, sawTaggedReplay, "expected tagged replay line for #test")
+}
+
+func TestBouncerReplayWrappedInChathistoryBatch(t *testing.T) {
+	// Clients that negotiated the `batch` cap get the per-channel
+	// replay block wrapped in `BATCH +<id> chathistory <channel>` /
+	// `BATCH -<id>` with every replayed line tagged `batch=<id>`. The
+	// legacy NOTICE markers are dropped in this case — capable clients
+	// would render them as out-of-band server NOTICEs, which is wrong.
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#test")
+	b.AttachState(state, "turborg", "ident", "host")
+
+	attachStoreWithSeed(t, b, []messages.Message{
+		{Channel: "#test", Nick: "alice", Text: "hello from before", TS: time.Now().Add(-time.Minute)},
+	})
+
+	conn, r := bouncerClient(t, addr)
+	negotiateAndPass(t, conn, r, "batch message-tags", "hunter2")
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var batchStart, batchEnd, batchedLine, sawLegacyMarker bool
+	var batchID string
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		line = strings.TrimRight(line, "\r\n")
+		switch {
+		case strings.HasPrefix(line, "BATCH +"):
+			// Format: "BATCH +<id> chathistory <channel>"
+			rest := strings.TrimPrefix(line, "BATCH +")
+			parts := strings.Fields(rest)
+			require.GreaterOrEqual(t, len(parts), 3, "BATCH start malformed: %q", line)
+			batchID = parts[0]
+			assert.Equal(t, "chathistory", parts[1])
+			assert.Equal(t, "#test", parts[2])
+			batchStart = true
+		case strings.HasPrefix(line, "BATCH -") && batchID != "":
+			assert.Equal(t, "BATCH -"+batchID, line)
+			batchEnd = true
+		case strings.Contains(line, "PRIVMSG #test") &&
+			strings.Contains(line, "hello from before"):
+			assert.Contains(t, line, "batch="+batchID,
+				"replay line must carry the batch tag: %q", line)
+			batchedLine = true
+		case strings.Contains(line, "buffer playback for #test"),
+			strings.Contains(line, "end of buffer"):
+			sawLegacyMarker = true
+		}
+		if batchEnd {
+			break
+		}
+	}
+	assert.True(t, batchStart, "missing BATCH start")
+	assert.True(t, batchEnd, "missing BATCH end")
+	assert.True(t, batchedLine, "missing batched replay line")
+	assert.False(t, sawLegacyMarker, "legacy NOTICE markers must be suppressed for batch-cap clients")
+}
+
+// --- CHATHISTORY --------------------------------------------------------
+
+func TestChathistoryLatestReturnsFromStore(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#test")
+	b.AttachState(state, "turborg", "ident", "host")
+
+	base := time.Date(2026, 5, 21, 12, 0, 0, 0, time.UTC)
+	attachStoreWithSeed(t, b, []messages.Message{
+		{Channel: "#test", Nick: "alice", Text: "one", TS: base},
+		{Channel: "#test", Nick: "bob", Text: "two", TS: base.Add(time.Second)},
+		{Channel: "#test", Nick: "alice", Text: "three", TS: base.Add(2 * time.Second)},
+	})
+
+	conn, r := bouncerClient(t, addr)
+	negotiateAndPass(t, conn, r, "batch message-tags draft/chathistory", "hunter2")
+	drainUntilEndOfWelcome(t, conn, r)
+
+	writeLine(t, conn, "CHATHISTORY LATEST #test * 50")
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var batchID string
+	var lines []string
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if strings.HasPrefix(line, "BATCH +") {
+			parts := strings.Fields(strings.TrimPrefix(line, "BATCH +"))
+			require.GreaterOrEqual(t, len(parts), 3, "BATCH start malformed: %q", line)
+			batchID = parts[0]
+			assert.Equal(t, "chathistory", parts[1])
+			assert.Equal(t, "#test", parts[2])
+			continue
+		}
+		if strings.HasPrefix(line, "BATCH -") {
+			assert.Equal(t, "BATCH -"+batchID, line, "BATCH end must match start id")
+			break
+		}
+		if strings.Contains(line, "PRIVMSG #test") {
+			assert.Contains(t, line, "batch="+batchID, "line must carry batch tag")
+			lines = append(lines, line)
+		}
+	}
+
+	require.Len(t, lines, 3, "expected 3 history lines, got %v", lines)
+	// Inside the batch, messages must render chronologically (oldest first).
+	assert.Contains(t, lines[0], ":one")
+	assert.Contains(t, lines[1], ":two")
+	assert.Contains(t, lines[2], ":three")
+}
+
+func TestChathistoryBeforeFiltersByTimestamp(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#test")
+	b.AttachState(state, "turborg", "ident", "host")
+
+	base := time.Date(2026, 5, 21, 12, 0, 0, 0, time.UTC)
+	attachStoreWithSeed(t, b, []messages.Message{
+		{Channel: "#test", Nick: "a", Text: "old", TS: base},
+		{Channel: "#test", Nick: "b", Text: "newer", TS: base.Add(10 * time.Second)},
+	})
+
+	conn, r := bouncerClient(t, addr)
+	negotiateAndPass(t, conn, r, "batch draft/chathistory", "hunter2")
+	drainUntilEndOfWelcome(t, conn, r)
+
+	// `before` strictly excludes equal/newer entries — passing the ts
+	// of `newer` must omit it and return only `old`.
+	writeLine(t, conn, "CHATHISTORY BEFORE #test timestamp=2026-05-21T12:00:10Z 50")
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var historyLines []string
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if strings.HasPrefix(line, "BATCH -") {
+			break
+		}
+		if strings.Contains(line, "PRIVMSG #test") {
+			historyLines = append(historyLines, line)
+		}
+	}
+	require.Len(t, historyLines, 1)
+	assert.Contains(t, historyLines[0], ":old")
+}
+
+func TestChathistoryRejectsInvalidInputs(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#test")
+	b.AttachState(state, "turborg", "ident", "host")
+	attachStoreWithSeed(t, b, nil)
+
+	cases := []struct {
+		name string
+		cmd  string
+		code string
+	}{
+		{"too few params", "CHATHISTORY LATEST", "NEED_MORE_PARAMS"},
+		{"non-channel target", "CHATHISTORY LATEST alice * 50", "INVALID_TARGET"},
+		{"bad limit", "CHATHISTORY LATEST #test * abc", "INVALID_PARAMS"},
+		{"unknown subcommand", "CHATHISTORY AROUND #test * 50", "UNKNOWN_COMMAND"},
+		{"bad selector", "CHATHISTORY BEFORE #test msgid=xyz 50", "INVALID_PARAMS"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, r := bouncerClient(t, addr)
+			negotiateAndPass(t, conn, r, "draft/chathistory", "hunter2")
+			drainUntilEndOfWelcome(t, conn, r)
+
+			writeLine(t, conn, tc.cmd)
+			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			var sawFail bool
+			for {
+				line, err := r.ReadString('\n')
+				if err != nil {
+					break
+				}
+				if strings.HasPrefix(line, "FAIL CHATHISTORY "+tc.code) {
+					sawFail = true
+					break
+				}
+			}
+			assert.True(t, sawFail, "expected FAIL CHATHISTORY %s for %q", tc.code, tc.cmd)
+		})
+	}
+}
+
+// drainUntilEndOfWelcome reads until the welcome flush has settled so
+// CHATHISTORY tests start with a clean stream. The welcome sequence
+// always ends with either RPL_ENDOFNAMES (366) when channels are
+// joined or the BATCH/buffer trailer; we look for both.
+func drainUntilEndOfWelcome(t *testing.T, conn net.Conn, r *bufio.Reader) {
+	t.Helper()
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return
+		}
+		// 366 = RPL_ENDOFNAMES (state replay trailer), "end of buffer"
+		// or BATCH - = end of channel-log replay block.
+		if strings.Contains(line, " 366 ") ||
+			strings.Contains(line, "end of buffer") ||
+			strings.HasPrefix(line, "BATCH -") {
+			// Give the bouncer ~10ms to send anything else queued
+			// from the welcome path before we hand off to the test.
+			conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+			for {
+				if _, err := r.ReadString('\n'); err != nil {
+					return
+				}
+			}
+		}
+	}
 }
 
 // --- PING / PONG --------------------------------------------------------

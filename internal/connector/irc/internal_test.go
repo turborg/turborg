@@ -113,13 +113,13 @@ func TestCTCPHelpers(t *testing.T) {
 
 func TestCTCPReplyCovers(t *testing.T) {
 	cases := map[string]string{
-		"\x01VERSION\x01":        "VERSION turborg " + version.Version + " (https://github.com/turborg/turborg)",
-		"\x01PING 12345\x01":     "PING 12345",
-		"\x01CLIENTINFO\x01":     "CLIENTINFO VERSION PING TIME CLIENTINFO SOURCE USERINFO",
-		"\x01SOURCE\x01":         "SOURCE https://github.com/turborg/turborg",
-		"\x01USERINFO\x01":       "USERINFO turborg agent",
-		"\x01\x01":               "",  // empty inner
-		"\x01UNKNOWN\x01":        "",  // unrecognized
+		"\x01VERSION\x01":           "VERSION turborg " + version.Version + " (https://github.com/turborg/turborg)",
+		"\x01PING 12345\x01":        "PING 12345",
+		"\x01CLIENTINFO\x01":        "CLIENTINFO VERSION PING TIME CLIENTINFO SOURCE USERINFO",
+		"\x01SOURCE\x01":            "SOURCE https://github.com/turborg/turborg",
+		"\x01USERINFO\x01":          "USERINFO turborg agent",
+		"\x01\x01":                  "", // empty inner
+		"\x01UNKNOWN\x01":           "", // unrecognized
 		"\x01version lowercase\x01": "VERSION turborg " + version.Version + " (https://github.com/turborg/turborg)",
 	}
 	for in, want := range cases {
@@ -373,28 +373,12 @@ func TestAddrBeforeStart(t *testing.T) {
 	assert.Equal(t, "", b.Addr(), "Addr before Start is empty")
 }
 
-func TestRecordForReplayIgnoresNonChannel(t *testing.T) {
-	state := NewChannelState()
-	state.OnSelfJoin("#known")
-	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
-	require.NoError(t, err)
-	b.AttachState(state, "nick", "ident", "host")
-
-	// Non-PRIVMSG/NOTICE: noop.
-	b.recordForReplay("PING :x")
-	// Channel-targeted to an unknown channel: noop.
-	b.recordForReplay(":a!u@h PRIVMSG #unknown :hi")
-	// Non-channel target (DM): noop.
-	b.recordForReplay(":a!u@h PRIVMSG nick :hi")
-	// Channel we track: should be captured.
-	b.recordForReplay(":a!u@h PRIVMSG #known :hi")
-
-	b.logMu.Lock()
-	got := b.channelLog
-	b.logMu.Unlock()
-	require.Len(t, got, 1, "only the known-channel line should be captured: %v", got)
-	require.Equal(t, 1, len(got["#known"]))
-}
+// Recording-side filter logic (only channel-targeted PRIVMSG / NOTICE
+// counts as recordable history) used to live on the bouncer as
+// recordForReplay. That filter now lives on the runtime-wired EventBus
+// subscriber that feeds messages.Store; the bouncer is read-only on
+// the store. See `messages` package tests for the ring/cap behavior
+// and `runtime` package tests for the publish filter.
 
 // Direct handler tests via private API to cover guard-rail branches that
 // the integration tests don't naturally hit.
@@ -407,7 +391,7 @@ func TestHandlersIgnoreMalformedMessages(t *testing.T) {
 	c.handlePrivmsg(ctx, Message{}, "")
 	c.handlePart(ctx, Message{})
 	c.handleKick(ctx, Message{Params: []string{"#ch"}}) // missing victim
-	c.handleNickChange(ctx, Message{}) // no old
+	c.handleNickChange(ctx, Message{})                  // no old
 	c.handleTopic(ctx, Message{})
 	c.handleJoin(ctx, Message{}) // empty target
 
@@ -714,13 +698,27 @@ func TestSendBroadcastsThroughBouncerWhenAttached(t *testing.T) {
 	b.AttachState(c.state, "bot", "user", "host")
 	c.state.OnSelfJoin("#x")
 
-	// Send must call bouncer.BroadcastAsSelf — visible via the replay buffer.
+	// Connector.Send fans through bouncer.BroadcastAsSelf, which
+	// writes to every authenticated client. Attach a recording stub
+	// so we can observe the line landed.
+	rc := newRecordingConn()
+	bc := newBouncerClient(rc, slog.Default())
+	bc.setAuthenticated()
+	b.mu.Lock()
+	b.clients[bc] = struct{}{}
+	b.mu.Unlock()
+
 	require.NoError(t, c.Send(&agent.OutboundEnvelope{Channel: "#x", Text: "hi"}))
 
-	b.logMu.Lock()
-	defer b.logMu.Unlock()
-	require.Len(t, b.channelLog["#x"], 1,
-		"Send must record self-prefixed line into the bouncer's replay buffer")
+	got := rc.snapshot()
+	require.NotEmpty(t, got, "Send must fan a self-prefixed PRIVMSG to attached clients")
+	var sawPrivmsg bool
+	for _, line := range got {
+		if strings.Contains(line, "PRIVMSG #x :hi") {
+			sawPrivmsg = true
+		}
+	}
+	assert.True(t, sawPrivmsg, "attached client must see the PRIVMSG; got %v", got)
 }
 
 func TestHandlePrivmsgRoutesDMToSenderChannel(t *testing.T) {
@@ -898,8 +896,7 @@ func TestBroadcastSkipsUnauthenticatedClients(t *testing.T) {
 
 func TestUpstreamPrefixEmptyShortCircuitsBroadcastAsSelf(t *testing.T) {
 	// With no upstream nick, upstreamPrefix() returns "" and
-	// BroadcastAsSelf passes the line through untouched. recordForReplay
-	// runs with no state attached (early return).
+	// BroadcastAsSelf passes the line through untouched.
 	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
 	require.NoError(t, err)
 	// No AttachState call → state == nil, upstreamNick == "" → both
@@ -921,7 +918,7 @@ func TestUpstreamPrefixEmptyShortCircuitsBroadcastAsSelf(t *testing.T) {
 // recordingConn captures everything written to it so tests can assert
 // the bytes the bouncer emits to a client.
 type recordingConn struct {
-	mu    sync.Mutex
+	mu     sync.Mutex
 	writes [][]byte
 }
 
@@ -1152,21 +1149,64 @@ func TestHandleCapListAndEnd(t *testing.T) {
 	assert.True(t, gotAck, "CAP REQ via params (not trailing) must still ACK")
 }
 
-func TestRecordForReplayBoundsRing(t *testing.T) {
-	state := NewChannelState()
-	state.OnSelfJoin("#busy")
-	b, err := NewBouncer("p", "127.0.0.1", 0, nil, nil)
-	require.NoError(t, err)
-	b.AttachState(state, "nick", "ident", "host")
-
-	for i := 0; i < channelLogCap+50; i++ {
-		b.recordForReplay(":a!u@h PRIVMSG #busy :spam")
+func TestDecorateReplayLine(t *testing.T) {
+	ts := time.Date(2026, 5, 21, 12, 34, 56, 789_000_000, time.UTC)
+	entry := loggedLine{line: ":alice!u@h PRIVMSG #ch :hi", ts: ts}
+	taggedEntry := loggedLine{
+		line: "@time=2025-01-01T00:00:00.000Z;account=alice :alice!u@h PRIVMSG #ch :tagged",
+		ts:   ts,
 	}
-	b.logMu.Lock()
-	got := len(b.channelLog["#busy"])
-	b.logMu.Unlock()
-	assert.Equal(t, channelLogCap, got, "ring should cap at channelLogCap")
+
+	t.Run("no caps passes line through unchanged", func(t *testing.T) {
+		assert.Equal(t, entry.line, decorateReplayLine(entry, false, ""))
+	})
+
+	t.Run("server-time prepends time= tag", func(t *testing.T) {
+		got := decorateReplayLine(entry, true, "")
+		assert.Equal(t,
+			"@time=2026-05-21T12:34:56.789Z :alice!u@h PRIVMSG #ch :hi",
+			got)
+	})
+
+	t.Run("batch prepends batch= tag", func(t *testing.T) {
+		got := decorateReplayLine(entry, false, "abc123")
+		assert.Equal(t,
+			"@batch=abc123 :alice!u@h PRIVMSG #ch :hi",
+			got)
+	})
+
+	t.Run("both caps combine in one @-segment", func(t *testing.T) {
+		got := decorateReplayLine(entry, true, "abc123")
+		assert.Equal(t,
+			"@batch=abc123;time=2026-05-21T12:34:56.789Z :alice!u@h PRIVMSG #ch :hi",
+			got)
+	})
+
+	t.Run("existing upstream tags merge: time= preserved, our tags prepended", func(t *testing.T) {
+		got := decorateReplayLine(taggedEntry, true, "abc123")
+		// Upstream's `time=2025-01-01...` must survive; ours must NOT be
+		// duplicated when the line already has tags. Batch tag is
+		// always prepended.
+		assert.True(t, strings.HasPrefix(got, "@batch=abc123;"),
+			"merged line must start with batch tag, got %q", got)
+		assert.Contains(t, got, "time=2025-01-01T00:00:00.000Z",
+			"upstream's time= must survive merge, got %q", got)
+		assert.NotContains(t, got, "time=2026-05-21",
+			"our recorded ts must not overwrite upstream's time=, got %q", got)
+		assert.Contains(t, got, "account=alice",
+			"other upstream tags must survive merge, got %q", got)
+	})
+
+	t.Run("malformed tagged line (no body separator) passes through", func(t *testing.T) {
+		malformed := loggedLine{line: "@time=2025-01-01T00:00:00.000Z", ts: ts}
+		// No space → no body. decorateReplayLine returns it unchanged
+		// rather than producing an invalid frame.
+		assert.Equal(t, malformed.line, decorateReplayLine(malformed, true, "abc123"))
+	})
 }
+
+// Per-channel ring cap behavior moved with the storage seam — see
+// TestMemoryStoreRingCap in the messages package.
 
 func TestWatchdogPollInterval(t *testing.T) {
 	cases := []struct {

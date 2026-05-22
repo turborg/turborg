@@ -16,6 +16,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/connector/irc"
+	"github.com/turborg/turborg/internal/messages"
 )
 
 // Ring-buffer caps for replay on new client attach. Bumping these is a
@@ -79,25 +80,13 @@ type Options struct {
 	// using this agent — distinct from "bot is alive" log signal.
 	OnClientAttached func(reason string)
 
-	// MessageRecorder receives every recorded channel message so it
-	// can mirror it to a durable backend. SaaS deployments wire a
-	// messagesink-backed recorder that batches into a sidecar HTTP
-	// call; self-host leaves this nil and history stops at the
-	// in-memory ring (which is still served on (re)connect via
-	// replayBuffers).
-	MessageRecorder MessageRecorder
-}
-
-// MessageRecorder is the narrow seam between the gateway and a
-// durable message store. One method: the gateway hands off (channel,
-// nick, text, ts); the recorder owns msg_id generation, timestamp
-// formatting, transport, batching, and retries.
-//
-// Nil interface value = no-op (no durable mirror). To avoid the
-// typed-nil-interface gotcha, runtime constructs the recorder behind
-// a non-nil guard before assigning to Options.
-type MessageRecorder interface {
-	Submit(channel, nick, text string, ts time.Time)
+	// MessageStore is the read/write seam for channel history. The
+	// gateway calls Submit on every observed inbound + outbound
+	// channel message (so DB-backed deployments mirror durably) and
+	// Recent on attach + on the `history` WS op for scrollback. nil
+	// means "no history available" — clients still see live traffic,
+	// but replay and scrollback frames are empty.
+	MessageStore messages.Store
 }
 
 // Gateway is an HTTP server exposing /ws (WebSocket), /health, /metrics,
@@ -123,20 +112,21 @@ type Gateway struct {
 	// gateway doesn't leak handlers across lifecycle restarts.
 	stateSub *irc.Subscription
 
-	// Per-channel + server-log ring buffers replayed on (re)connect so
-	// a UI that closed mid-traffic sees what flowed in while it was
-	// offline.
-	logMu      sync.Mutex
-	serverLog  []map[string]any
-	channelLog map[string][]map[string]any
+	// Server-log ring of recent state-level notices (connection
+	// transitions, etc). Channel-message history lives in
+	// opts.MessageStore instead — the gateway no longer maintains a
+	// parallel channelLog ring, so the bouncer + WS gateway share one
+	// canonical history view.
+	logMu     sync.Mutex
+	serverLog []map[string]any
 
 	idleMu   sync.Mutex
 	idleStop chan struct{} // closed by cancelIdleTimer
 
 	metMu   sync.Mutex
 	metrics struct {
-		connections      uint64
-		authFailures     uint64
+		connections       uint64
+		authFailures      uint64
 		messagesForwarded uint64
 	}
 }
@@ -167,13 +157,12 @@ func New(bridge IRCBridge, sender Sender, opts Options) (*Gateway, error) {
 	// the runtime composer always passes an explicit port from
 	// TURBORG_GATEWAY_PORT (default 8765 in config.Settings).
 	g := &Gateway{
-		opts:       opts,
-		bridge:     bridge,
-		sender:     sender,
-		log:        opts.Log,
-		clients:    map[*client]struct{}{},
-		channelLog: map[string][]map[string]any{},
-		started:    time.Now(),
+		opts:    opts,
+		bridge:  bridge,
+		sender:  sender,
+		log:     opts.Log,
+		clients: map[*client]struct{}{},
+		started: time.Now(),
 	}
 	return g, nil
 }
@@ -456,25 +445,44 @@ func (g *Gateway) sendState(ctx context.Context, c *client) {
 }
 
 func (g *Gateway) replayBuffers(ctx context.Context, c *client) {
+	// Server log: a small ring of state-level notices the gateway
+	// itself produced (connection transitions, etc) — kept in-process
+	// because they're per-instance, not per-message.
 	g.logMu.Lock()
 	serverSnap := append([]map[string]any{}, g.serverLog...)
-	channelSnap := make([]map[string]any, 0)
-	for _, log := range g.channelLog {
-		channelSnap = append(channelSnap, log...)
-	}
 	g.logMu.Unlock()
-
 	for _, entry := range serverSnap {
 		dup := mapCopy(entry)
 		dup["replayed"] = true
 		g.sendTo(ctx, c, dup)
 	}
-	// Order channel replay by ts so the UI can dedupe by ts in IndexedDB.
-	sortByTS(channelSnap)
-	for _, entry := range channelSnap {
-		dup := mapCopy(entry)
-		dup["replayed"] = true
-		g.sendTo(ctx, c, dup)
+
+	// Channel-message history comes from the shared store. Per joined
+	// channel, fetch the last channelLogCap (default 200) entries and
+	// stream them oldest-first as `replayed: true` frames. The store
+	// returns newest-first; the loop walks in reverse so the UI sees
+	// chronological order.
+	store := g.opts.MessageStore
+	if store == nil {
+		return
+	}
+	for _, info := range g.bridge.State().JoinedChannels() {
+		msgs, err := store.Recent(ctx, info.Name, time.Time{}, channelLogCap)
+		if err != nil {
+			g.log.Debug("history fetch on attach", "channel", info.Name, "err", err)
+			continue
+		}
+		for i := len(msgs) - 1; i >= 0; i-- {
+			m := msgs[i]
+			g.sendTo(ctx, c, map[string]any{
+				"op":       "message",
+				"channel":  m.Channel,
+				"nick":     m.Nick,
+				"text":     m.Text,
+				"ts":       m.TS.Unix(),
+				"replayed": true,
+			})
+		}
 	}
 }
 
@@ -714,7 +722,82 @@ func (g *Gateway) dispatchInbound(ctx context.Context, c *client, p map[string]a
 		}
 		line = strings.TrimPrefix(line, "/")
 		_ = g.bridge.SendRaw(line)
+	case "history":
+		g.handleHistoryOp(ctx, c, p)
 	}
+}
+
+// handleHistoryOp answers a `{op: "history", channel, before, limit}`
+// scrollback request from a WS client. The infinite-scroll UI in the
+// reference + appui front-ends fires this when the user nears the top
+// of the channel pane. Wire shape:
+//
+//   inbound:  {op:"history", channel:"#x", before:"2026-05-21T12:00:00.000Z", limit:200}
+//   outbound: {op:"history_result", channel, messages:[{nick,text,ts,id}], has_more:bool}
+//
+// `before` and `limit` are both optional: empty `before` returns the
+// most recent `limit` messages (equivalent to the initial attach
+// replay's depth, but on demand). `limit` defaults to 200, capped to
+// 200 — the SAME cap the bouncer's CHATHISTORY enforces, so the two
+// surfaces agree on a single page size.
+func (g *Gateway) handleHistoryOp(ctx context.Context, c *client, p map[string]any) {
+	channel, _ := p["channel"].(string)
+	if channel == "" || !startsWithChannelSigil(channel) {
+		return
+	}
+	limit := 200
+	// JSON numbers unmarshal as float64 — no int branch needed.
+	if v, ok := p["limit"].(float64); ok && int(v) > 0 {
+		limit = int(v)
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	var before time.Time
+	if raw, ok := p["before"].(string); ok && raw != "" {
+		if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+			before = t
+		} else if t, err := time.Parse("2006-01-02T15:04:05.000Z", raw); err == nil {
+			before = t
+		}
+	}
+
+	store := g.opts.MessageStore
+	if store == nil {
+		g.sendTo(ctx, c, map[string]any{
+			"op": "history_result", "channel": channel,
+			"messages": []map[string]any{}, "has_more": false,
+		})
+		return
+	}
+	msgs, err := store.Recent(ctx, channel, before, limit)
+	if err != nil {
+		g.log.Debug("history op", "err", err, "channel", channel)
+		g.sendTo(ctx, c, map[string]any{
+			"op": "history_result", "channel": channel,
+			"messages": []map[string]any{}, "has_more": false,
+		})
+		return
+	}
+	out := make([]map[string]any, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, map[string]any{
+			"nick": m.Nick,
+			"text": m.Text,
+			"ts":   m.TS.Unix(),
+			"id":   m.ID,
+		})
+	}
+	// has_more is "the result hit the limit". Strictly speaking that
+	// can over-report (the next page might be empty), but the UI's
+	// next scroll-up will fire one more call and see the empty page,
+	// so worst case is a single redundant request.
+	g.sendTo(ctx, c, map[string]any{
+		"op":       "history_result",
+		"channel":  channel,
+		"messages": out,
+		"has_more": len(msgs) == limit,
+	})
 }
 
 // --- EventBus handlers ----------------------------------------------------
@@ -727,22 +810,17 @@ func (g *Gateway) onMessage(_ context.Context, ev *agent.Event) {
 	if env != nil {
 		channel, sender, text = env.Channel, env.Sender, env.Text
 	}
-	// Snapshot ts once so the wire payload (seconds for back-compat
-	// with the existing replay format) and the durable recorder
-	// (microsecond ISO for accounts-api) agree on the moment.
+	// Snapshot ts once so the wire payload (Unix seconds) and the
+	// durable store entry agree on the moment.
 	now := time.Now()
-	payload := map[string]any{
+	g.submitToStore(channel, sender, text, now)
+	g.broadcast(map[string]any{
 		"op":      "message",
 		"channel": channel,
 		"nick":    sender,
 		"text":    text,
 		"ts":      now.Unix(),
-	}
-	g.recordChannel(payload)
-	g.broadcast(payload)
-	if g.opts.MessageRecorder != nil {
-		g.opts.MessageRecorder.Submit(channel, sender, text, now)
-	}
+	})
 }
 
 func (g *Gateway) onMessageSent(_ context.Context, ev *agent.Event) {
@@ -769,18 +847,44 @@ func (g *Gateway) onMessageSent(_ context.Context, ev *agent.Event) {
 		sender = g.bridge.CurrentNick()
 	}
 	now := time.Now()
-	payload := map[string]any{
+	g.submitToStore(channel, sender, text, now)
+	g.broadcast(map[string]any{
 		"op":      "message",
 		"channel": channel,
 		"nick":    sender,
 		"text":    text,
 		"ts":      now.Unix(),
+	})
+}
+
+// submitToStore pushes a channel message into the configured store.
+// Filters at the gateway boundary: only channel-sigil targets are
+// stored (DMs aren't part of replay history). Errors are downgraded
+// to debug — failure to mirror must not break live broadcast.
+func (g *Gateway) submitToStore(channel, sender, text string, ts time.Time) {
+	if g.opts.MessageStore == nil || !startsWithChannelSigil(channel) {
+		return
 	}
-	g.recordChannel(payload)
-	g.broadcast(payload)
-	if g.opts.MessageRecorder != nil {
-		g.opts.MessageRecorder.Submit(channel, sender, text, now)
+	err := g.opts.MessageStore.Submit(context.Background(), messages.Message{
+		Channel: channel,
+		Nick:    sender,
+		Text:    text,
+		TS:      ts,
+	})
+	if err != nil {
+		g.log.Debug("message store submit", "err", err, "channel", channel)
 	}
+}
+
+func startsWithChannelSigil(s string) bool {
+	if s == "" {
+		return false
+	}
+	switch s[0] {
+	case '#', '&', '+', '!':
+		return true
+	}
+	return false
 }
 
 func (g *Gateway) onUserJoin(_ context.Context, ev *agent.Event) {
@@ -928,23 +1032,6 @@ func (g *Gateway) rejectSend(ctx context.Context, c *client, target, body, reaso
 	})
 }
 
-// --- replay buffer mgmt ---------------------------------------------------
-
-func (g *Gateway) recordChannel(payload map[string]any) {
-	channel, _ := payload["channel"].(string)
-	if channel == "" {
-		return
-	}
-	g.logMu.Lock()
-	defer g.logMu.Unlock()
-	bucket := g.channelLog[channel]
-	bucket = append(bucket, payload)
-	if len(bucket) > channelLogCap {
-		bucket = bucket[len(bucket)-channelLogCap:]
-	}
-	g.channelLog[channel] = bucket
-}
-
 // --- broadcast + send -----------------------------------------------------
 
 func (g *Gateway) broadcast(payload map[string]any) {
@@ -1061,25 +1148,4 @@ func mapCopy(in map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
-}
-
-func sortByTS(items []map[string]any) {
-	for i := 1; i < len(items); i++ {
-		for j := i; j > 0; j-- {
-			a, _ := items[j-1]["ts"].(int64)
-			b, _ := items[j]["ts"].(int64)
-			if a == 0 {
-				ai, _ := items[j-1]["ts"].(int)
-				a = int64(ai)
-			}
-			if b == 0 {
-				bi, _ := items[j]["ts"].(int)
-				b = int64(bi)
-			}
-			if a <= b {
-				break
-			}
-			items[j-1], items[j] = items[j], items[j-1]
-		}
-	}
 }

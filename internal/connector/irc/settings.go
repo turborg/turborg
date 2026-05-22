@@ -23,8 +23,8 @@ type Settings struct {
 	Username string `env:"USERNAME"`
 	RealName string `env:"REAL_NAME" envDefault:"turborg agent"`
 
-	ServerPassword    string `env:"SERVER_PASSWORD"`
-	NickServPassword  string `env:"NICKSERV_PASSWORD"`
+	ServerPassword   string `env:"SERVER_PASSWORD"`
+	NickServPassword string `env:"NICKSERV_PASSWORD"`
 
 	SASLUser     string `env:"SASL_USER"`
 	SASLPassword string `env:"SASL_PASSWORD"`
@@ -55,13 +55,21 @@ type Settings struct {
 	// hosted users.
 	QuitMessage string `env:"QUIT_MESSAGE" envDefault:"bye from turborg"`
 
-	BouncerPassword              string        `env:"BOUNCER_PASSWORD"`
-	BouncerHost                  string        `env:"BOUNCER_HOST" envDefault:"127.0.0.1"`
-	BouncerPort                  int           `env:"BOUNCER_PORT" envDefault:"31337"`
-	BouncerRatelimitEnabled      bool          `env:"BOUNCER_RATELIMIT_ENABLED" envDefault:"true"`
-	BouncerMaxFailedAttempts     int           `env:"BOUNCER_MAX_FAILED_ATTEMPTS" envDefault:"5"`
-	BouncerFailureWindowSeconds  int           `env:"BOUNCER_FAILURE_WINDOW_SECONDS" envDefault:"60"`
-	BouncerLockoutSeconds        int           `env:"BOUNCER_LOCKOUT_SECONDS" envDefault:"300"`
+	BouncerPassword             string `env:"BOUNCER_PASSWORD"`
+	BouncerHost                 string `env:"BOUNCER_HOST" envDefault:"127.0.0.1"`
+	BouncerPort                 int    `env:"BOUNCER_PORT" envDefault:"31337"`
+	BouncerRatelimitEnabled     bool   `env:"BOUNCER_RATELIMIT_ENABLED" envDefault:"true"`
+	BouncerMaxFailedAttempts    int    `env:"BOUNCER_MAX_FAILED_ATTEMPTS" envDefault:"5"`
+	BouncerFailureWindowSeconds int    `env:"BOUNCER_FAILURE_WINDOW_SECONDS" envDefault:"60"`
+	BouncerLockoutSeconds       int    `env:"BOUNCER_LOCKOUT_SECONDS" envDefault:"300"`
+	// BouncerWelcomeReplayDepth controls how many recent channel
+	// messages the bouncer ships per joined channel on each fresh
+	// client attach. Bumping it lets IRC clients without
+	// `draft/chathistory` support (HexChat 2.16 et al) see a deeper
+	// backfill on attach, at the cost of a slower welcome on every
+	// reconnect. Capped at 2000 by the bouncer to keep welcome
+	// bursts bounded.
+	BouncerWelcomeReplayDepth int `env:"BOUNCER_WELCOME_REPLAY_DEPTH" envDefault:"200"`
 
 	CTCPAutoReply     bool `env:"CTCP_AUTO_REPLY" envDefault:"true"`
 	CTCPMaxPerWindow  int  `env:"CTCP_MAX_PER_WINDOW" envDefault:"3"`
