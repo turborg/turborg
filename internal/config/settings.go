@@ -138,6 +138,18 @@ type Settings struct {
 	// summary delivered through IRC itself.
 	OwnerDMNudgeEvery int `env:"OWNER_DM_NUDGE_EVERY"`
 
+	// IgnoredNicks is the operator's (or, in SaaS, the end user's) chat-
+	// ignore list. Senders matching one of these nicks (case-insensitive)
+	// are denied early in the command guard — !commands never dispatch,
+	// future LLM triggers will skip them too. Distinct from the per-tier
+	// PlanCapabilities knobs above: this is per-USER policy, surfaced via
+	// the sidecar's IgnoredNicks SpawnRequest field. Hot-update path:
+	// /update-env recreates the container with the new CSV.
+	//
+	// Empty = no ignores. CSV in env (TURBORG_IGNORED_NICKS=alice,bob);
+	// whitespace + case are normalized at guard-build time.
+	IgnoredNicks []string `env:"IGNORED_NICKS" envSeparator:","`
+
 	// ActivityURL is an optional webhook the agent POSTs to whenever
 	// meaningful runtime activity occurs: the bot sending a message, a
 	// bouncer client attaching, or a WS gateway client completing the

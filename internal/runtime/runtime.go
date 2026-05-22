@@ -454,6 +454,14 @@ func BuildCommandGuard(s *config.Settings, ircCfg *irc.Settings) agent.CommandGu
 		mode = "none"
 	}
 
+	// Pre-normalize the user's ignore set once at guard build. Each
+	// inbound !command check then does an O(1) map lookup instead of
+	// re-lowercasing the whole list per message. Built before
+	// ownerCheck so an ignored sender is denied even when they happen
+	// to also be the configured owner (security stance: explicit
+	// ignore is the strongest signal, and the user opted into it).
+	ignoredSenders := buildIgnoredSet(s.IgnoredNicks)
+
 	ownerNick := strings.ToLower(strings.TrimSpace(s.OwnerNick))
 	// account-tag values are case-insensitive in practice — IRC services
 	// vary on whether they preserve nick case or normalize. Lowercase
@@ -483,6 +491,13 @@ func BuildCommandGuard(s *config.Settings, ircCfg *irc.Settings) agent.CommandGu
 	}
 
 	return func(env *agent.InboundEnvelope) bool {
+		// Ignored senders are denied first — cheaper check, strongest
+		// signal (the user explicitly asked us to treat this nick as
+		// non-existent). Mode-based owner checks and throttling never
+		// observe them.
+		if isIgnoredSender(ignoredSenders, env) {
+			return false
+		}
 		if !ownerCheck(env, mode, botNick, ownerNick, ownerAccount, ownerHostmask) {
 			return false
 		}
@@ -491,6 +506,43 @@ func BuildCommandGuard(s *config.Settings, ircCfg *irc.Settings) agent.CommandGu
 		}
 		return throttle.Allow(throttleScope(env))
 	}
+}
+
+// buildIgnoredSet normalises the configured ignore list into a fast
+// lookup set. Lowercase + trim + drop empties. Returns nil when no
+// usable entries — callers short-circuit on the nil set so the no-op
+// case stays branch-free.
+func buildIgnoredSet(raw []string) map[string]struct{} {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(raw))
+	for _, n := range raw {
+		lower := strings.ToLower(strings.TrimSpace(n))
+		if lower == "" {
+			continue
+		}
+		out[lower] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// isIgnoredSender returns true when the envelope's sender nick is in
+// the user-configured ignore set. Nil set (no ignores configured) is
+// the hot-path: returns false without allocating.
+func isIgnoredSender(set map[string]struct{}, env *agent.InboundEnvelope) bool {
+	if set == nil || env == nil {
+		return false
+	}
+	sender := strings.ToLower(strings.TrimSpace(env.Sender))
+	if sender == "" {
+		return false
+	}
+	_, hit := set[sender]
+	return hit
 }
 
 // ownerCheck applies the per-mode identity test. Returns true only when

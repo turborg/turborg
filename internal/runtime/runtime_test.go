@@ -353,6 +353,52 @@ func TestGuardThrottleAnonScopeWhenAccountAndSenderEmpty(t *testing.T) {
 	assert.False(t, g(agent.NewInbound("irc", "#ch", "", "!x")))
 }
 
+func TestGuardIgnoresSenderDeniesEvenInSelfMode(t *testing.T) {
+	// Edge case: the operator's ignore list contains a nick that's ALSO
+	// configured as the owner (via self-mode mirror of bot nick). Explicit
+	// ignore must win — that's the contract the user opted into when they
+	// hit /ignore. Self-mode would otherwise allow them.
+	s := &config.Settings{
+		OwnerMode:    "self",
+		IgnoredNicks: []string{"stefan"},
+	}
+	g := runtime.BuildCommandGuard(s, &irc.Settings{Nick: "Stefan"})
+	require.NotNil(t, g)
+	assert.False(t, g(agent.NewInbound("irc", "#ch", "Stefan", "!ping")),
+		"explicit ignore beats self-mode owner match")
+}
+
+func TestGuardIgnoresSenderCaseAndWhitespaceNormalized(t *testing.T) {
+	// IRC nicks are case-insensitive; the ignore set is built with
+	// lowercase + trim, and the guard re-lowercases the sender on
+	// every check. Whitespace-only / empty entries in the configured
+	// list are filtered out at build time.
+	s := &config.Settings{
+		OwnerMode:    "self",
+		IgnoredNicks: []string{"Alice", "  BOB  ", "", "carol"},
+	}
+	g := runtime.BuildCommandGuard(s, &irc.Settings{Nick: "bot"})
+	require.NotNil(t, g)
+	assert.False(t, g(agent.NewInbound("irc", "#ch", "alice", "!x")))
+	assert.False(t, g(agent.NewInbound("irc", "#ch", "BOB", "!x")))
+	assert.False(t, g(agent.NewInbound("irc", "#ch", "  carol", "!x")))
+	// Not on the list — falls through to owner-mode check (self vs "bot");
+	// dave is denied for the owner reason, not the ignore reason. Either
+	// way: denied.
+	assert.False(t, g(agent.NewInbound("irc", "#ch", "dave", "!x")))
+}
+
+func TestGuardEmptyIgnoredNicksIsNoOp(t *testing.T) {
+	// No ignores configured: guard behaviour is exactly as it was
+	// before the section existed. Self-mode allows the bot's own nick.
+	s := &config.Settings{
+		OwnerMode: "self",
+	}
+	g := runtime.BuildCommandGuard(s, &irc.Settings{Nick: "bot"})
+	require.NotNil(t, g)
+	assert.True(t, g(agent.NewInbound("irc", "#ch", "bot", "!x")))
+}
+
 func TestHostmaskHelperPatternBehaviors(t *testing.T) {
 	// Indirectly exercised through external-mode tests above, but a
 	// dedicated set of cases here pins the wildcard semantics.
