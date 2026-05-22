@@ -573,7 +573,7 @@ func (c *Connector) bringUp(ctx context.Context) error {
 			return fmt.Errorf("irc JOIN %s: %w", w.Name, err)
 		}
 	}
-	if c.settings.NickServPassword != "" {
+	if c.settings.NickServEnabled() {
 		c.log.Info("irc identifying with NickServ")
 		if err := cli.WriteLine(
 			fmt.Sprintf("%s NickServ :IDENTIFY %s", CmdPrivmsg, c.settings.NickServPassword),

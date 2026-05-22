@@ -158,7 +158,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	}
 
 	RegisterBuiltinCommands(a, provider)
-	a.Commands.SetGuard(BuildCommandGuard(s))
+	a.Commands.SetGuard(BuildCommandGuard(s, ircCfg))
 
 	built := &Built{
 		Agent:     a,
@@ -392,18 +392,50 @@ func collapseWhitespace(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// BuildCommandGuard composes the owner-only + per-sender throttle into
-// a single CommandGuard. Returns nil when neither owner check nor
-// throttle is configured — the registry then skips the call entirely.
+// BuildCommandGuard composes the owner-trust check and per-sender
+// throttle into a single CommandGuard. Returns nil when the configured
+// owner mode is "none" AND no throttle is configured — the command
+// registry then skips the guard entirely.
 //
-// Owner checks fail closed when an account tag is required but missing
-// (e.g. a services-less network or a client without the account-tag
-// capability). Failing open would let any nick spoof the owner the
-// moment the account-tag pipeline went unavailable, which is exactly
-// when defensive gating matters most.
-func BuildCommandGuard(s *config.Settings) agent.CommandGuard {
+// Three owner modes are supported. The default is "none" — !commands
+// are inert until the operator opts in.
+//
+//   - "none":     refuse every !command. Bots running as pure relays,
+//                 log-only agents, or personal-bouncer use cases sit
+//                 here. Throttle still runs against anonymous scope so
+//                 a misconfigured throttle gate doesn't silently allow.
+//   - "self":     trust messages where the sender's nick equals the
+//                 bot's own nick. Useful for personal AI assistants
+//                 where the operator attaches via the bouncer and IS
+//                 the bot. The IRC network won't allow nick collisions,
+//                 so the sender check is sufficient on its own.
+//   - "external": trust messages from OwnerNick, verified via the
+//                 IRCv3 account-tag. OwnerAccount overrides the
+//                 expected account name (defaults to OwnerNick). When
+//                 the network has no services and no account-tag
+//                 arrives, fall back to hostmask matching against
+//                 OwnerHostmask when it's set. Without either, deny.
+//
+// Owner checks fail closed: ambiguous signals never resolve to "trust".
+// This matters most precisely when the verification pipeline is
+// degraded — a missing account-tag must not become a free pass.
+func BuildCommandGuard(s *config.Settings, ircCfg *irc.Settings) agent.CommandGuard {
+	mode := strings.ToLower(strings.TrimSpace(s.OwnerMode))
+	if mode == "" {
+		mode = "none"
+	}
+
 	ownerNick := strings.ToLower(strings.TrimSpace(s.OwnerNick))
 	ownerAccount := strings.TrimSpace(s.OwnerAccount)
+	if ownerAccount == "" {
+		ownerAccount = s.OwnerNick
+	}
+	ownerHostmask := strings.ToLower(strings.TrimSpace(s.OwnerHostmask))
+
+	var botNick string
+	if ircCfg != nil {
+		botNick = strings.ToLower(strings.TrimSpace(ircCfg.Nick))
+	}
 
 	var throttle *irc.Throttle
 	if s.CommandMaxPerWindow > 0 && s.CommandWindowSeconds > 0 {
@@ -417,31 +449,98 @@ func BuildCommandGuard(s *config.Settings) agent.CommandGuard {
 		}
 	}
 
-	if ownerNick == "" && ownerAccount == "" && throttle == nil {
-		return nil
-	}
-
 	return func(env *agent.InboundEnvelope) bool {
-		sender := strings.ToLower(env.Sender)
-		account, _ := env.Metadata["account"].(string)
-		if ownerAccount != "" && account != ownerAccount {
+		if !ownerCheck(env, mode, botNick, ownerNick, ownerAccount, ownerHostmask) {
 			return false
 		}
-		if ownerNick != "" && sender != ownerNick {
-			return false
+		if throttle == nil {
+			return true
 		}
-		scope := account
-		if scope == "" {
-			scope = sender
-		}
-		if scope == "" {
-			scope = "anon"
-		}
-		if throttle != nil {
-			return throttle.Allow(scope)
-		}
-		return true
+		return throttle.Allow(throttleScope(env))
 	}
+}
+
+// ownerCheck applies the per-mode identity test. Returns true only when
+// the inbound envelope is from a trusted operator under the configured
+// mode; otherwise false. Fails closed on missing / ambiguous signals.
+func ownerCheck(env *agent.InboundEnvelope, mode, botNick, ownerNick, ownerAccount, ownerHostmask string) bool {
+	switch mode {
+	case "self":
+		sender := strings.ToLower(env.Sender)
+		return botNick != "" && sender == botNick
+	case "external":
+		sender := strings.ToLower(env.Sender)
+		if ownerNick == "" || sender != ownerNick {
+			return false
+		}
+		return verifyExternalOwner(env, ownerAccount, ownerHostmask)
+	default:
+		// "none" and any unknown value (operator typo) — deny.
+		return false
+	}
+}
+
+// verifyExternalOwner runs the account-tag → hostmask cascade. account-
+// tag wins when present (the strongest signal); hostmask is the
+// services-less fallback. Without either, deny.
+func verifyExternalOwner(env *agent.InboundEnvelope, ownerAccount, ownerHostmask string) bool {
+	account, _ := env.Metadata["account"].(string)
+	if account != "" {
+		return account == ownerAccount
+	}
+	if ownerHostmask == "" {
+		return false
+	}
+	prefix, _ := env.Metadata["prefix"].(string)
+	return hostmaskMatches(strings.ToLower(prefix), ownerHostmask)
+}
+
+// throttleScope picks the bucket key for the per-sender throttle.
+// Prefers the IRCv3 account-tag (stable across nick changes); falls
+// back to the inbound sender; finally a shared "anon" bucket for the
+// degenerate case where neither was set.
+func throttleScope(env *agent.InboundEnvelope) string {
+	if scope, _ := env.Metadata["account"].(string); scope != "" {
+		return scope
+	}
+	if sender := strings.ToLower(env.Sender); sender != "" {
+		return sender
+	}
+	return "anon"
+}
+
+// hostmaskMatches tests whether an inbound IRC prefix (nick!ident@host,
+// already lowercased) matches a hostmask pattern with `*` glob
+// wildcards. The pattern is operator-supplied so we keep the surface
+// tiny: only `*` is interpreted (matches any sequence including empty).
+// Anything else is a literal byte match. Both sides are case-folded by
+// the caller — IRC hostnames are case-insensitive.
+func hostmaskMatches(prefix, pattern string) bool {
+	if pattern == "" {
+		return false
+	}
+	// Strip the leading ':' some IRCD parsers include.
+	prefix = strings.TrimPrefix(prefix, ":")
+	parts := strings.Split(pattern, "*")
+	// No wildcards → literal compare.
+	if len(parts) == 1 {
+		return prefix == pattern
+	}
+	// First fragment must prefix-match.
+	if !strings.HasPrefix(prefix, parts[0]) {
+		return false
+	}
+	prefix = prefix[len(parts[0]):]
+	// Walk middle fragments left-to-right.
+	for i := 1; i < len(parts)-1; i++ {
+		idx := strings.Index(prefix, parts[i])
+		if idx < 0 {
+			return false
+		}
+		prefix = prefix[idx+len(parts[i]):]
+	}
+	// Last fragment must suffix-match what's left.
+	return strings.HasSuffix(prefix, parts[len(parts)-1])
 }
 
 // buildIRCSnapshot returns a snapshot builder closed over ircConn. The

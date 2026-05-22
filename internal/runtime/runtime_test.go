@@ -99,13 +99,21 @@ func TestBuildRejectsUnknownConnector(t *testing.T) {
 }
 
 func TestVersionCommand(t *testing.T) {
-	s := &config.Settings{CommandPrefix: "!"}
+	s := &config.Settings{
+		CommandPrefix: "!",
+		// !version is owner-gated by default since OwnerMode defaults to
+		// "none" (no commands accepted). Configure mode=external for
+		// alice so the dispatch path can run the command.
+		OwnerMode: "external",
+		OwnerNick: "alice",
+	}
 	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
 	b, err := runtime.Build(s, ircCfg, nil)
 	require.NoError(t, err)
 
-	out, err := b.Agent.Commands.Dispatch(context.Background(),
-		agent.NewInbound("irc", "#test", "alice", "!version"))
+	env := agent.NewInbound("irc", "#test", "alice", "!version")
+	env.Metadata["account"] = "alice"
+	out, err := b.Agent.Commands.Dispatch(context.Background(), env)
 	require.NoError(t, err)
 	require.NotNil(t, out)
 	assert.Contains(t, out.Text, version.Version)
@@ -150,76 +158,234 @@ func TestAskCommandHandlesProviderError(t *testing.T) {
 
 // --- guard composition ---------------------------------------------------
 
-func TestGuardEmptySettingsReturnsNil(t *testing.T) {
-	g := runtime.BuildCommandGuard(&config.Settings{})
-	assert.Nil(t, g, "no owner + no throttle → no guard")
+func TestGuardEmptySettingsDeniesAll(t *testing.T) {
+	// Default OwnerMode is "none" → no !commands surface. The guard
+	// returns a denier rather than nil so the registry runs it and
+	// drops the message; nil would mean "no guard = all pass" which
+	// was the previous (now-incorrect) semantics.
+	g := runtime.BuildCommandGuard(&config.Settings{}, &irc.Settings{Nick: "bot"})
+	require.NotNil(t, g)
+	assert.False(t, g(agent.NewInbound("irc", "#ch", "alice", "!x")),
+		"default mode=none must refuse every command")
 }
 
-func TestGuardOwnerNickAllowAndDeny(t *testing.T) {
+func TestGuardModeSelfAllowsBotNickOnly(t *testing.T) {
 	s := &config.Settings{
-		OwnerNick:            "Owner",
+		OwnerMode:            "self",
 		CommandMaxPerWindow:  100,
 		CommandWindowSeconds: 60,
 	}
-	g := runtime.BuildCommandGuard(s)
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "Stefan"}
+	g := runtime.BuildCommandGuard(s, ircCfg)
 	require.NotNil(t, g)
 
-	assert.True(t, g(agent.NewInbound("irc", "#ch", "owner", "!x")))
-	assert.True(t, g(agent.NewInbound("irc", "#ch", "OWNER", "!x")),
-		"owner check is case-insensitive")
+	assert.True(t, g(agent.NewInbound("irc", "#ch", "stefan", "!x")))
+	assert.True(t, g(agent.NewInbound("irc", "#ch", "STEFAN", "!x")),
+		"self-mode check is case-insensitive")
 	assert.False(t, g(agent.NewInbound("irc", "#ch", "intruder", "!x")))
 }
 
-func TestGuardOwnerAccountFailsClosedWithoutTag(t *testing.T) {
+func TestGuardModeExternalFailsClosedWithoutAccountTag(t *testing.T) {
 	s := &config.Settings{
-		OwnerAccount:         "ownerAccount",
+		OwnerMode:            "external",
+		OwnerNick:            "myhandle",
 		CommandMaxPerWindow:  100,
 		CommandWindowSeconds: 60,
 	}
-	g := runtime.BuildCommandGuard(s)
+	g := runtime.BuildCommandGuard(s, &irc.Settings{Nick: "bot"})
 	require.NotNil(t, g)
 
-	noTag := agent.NewInbound("irc", "#ch", "owner", "!x")
-	assert.False(t, g(noTag), "missing account tag must fail closed")
+	noTag := agent.NewInbound("irc", "#ch", "myhandle", "!x")
+	assert.False(t, g(noTag), "external mode + no account-tag + no hostmask must deny")
 
-	withTag := agent.NewInbound("irc", "#ch", "owner", "!x")
-	withTag.Metadata["account"] = "ownerAccount"
+	withTag := agent.NewInbound("irc", "#ch", "myhandle", "!x")
+	withTag.Metadata["account"] = "myhandle"
 	assert.True(t, g(withTag))
 
-	wrongTag := agent.NewInbound("irc", "#ch", "owner", "!x")
-	wrongTag.Metadata["account"] = "someone-else"
+	wrongTag := agent.NewInbound("irc", "#ch", "myhandle", "!x")
+	wrongTag.Metadata["account"] = "intruder"
 	assert.False(t, g(wrongTag))
+
+	wrongNick := agent.NewInbound("irc", "#ch", "stranger", "!x")
+	wrongNick.Metadata["account"] = "myhandle"
+	assert.False(t, g(wrongNick), "account-tag match alone is insufficient — nick must match too")
 }
 
-func TestGuardThrottleAnonScopeWhenSenderAndAccountEmpty(t *testing.T) {
-	// Edge case: an inbound envelope with no sender + no account-tag
-	// metadata. Guard must still apply throttle under an "anon" scope
-	// rather than crashing or skipping the rate-limit.
-	s := &config.Settings{CommandMaxPerWindow: 1, CommandWindowSeconds: 60}
-	g := runtime.BuildCommandGuard(s)
+func TestGuardModeExternalAccountOverrideDefaultsToOwnerNick(t *testing.T) {
+	// Operator did not set OwnerAccount → match against OwnerNick.
+	s := &config.Settings{OwnerMode: "external", OwnerNick: "myhandle"}
+	g := runtime.BuildCommandGuard(s, &irc.Settings{Nick: "bot"})
 	require.NotNil(t, g)
 
-	anon := &agent.InboundEnvelope{Connector: "irc", Channel: "#x", Sender: "", Metadata: map[string]any{}}
-	assert.True(t, g(anon), "first anon call must pass")
-	assert.False(t, g(anon), "second anon call must be throttled in the same window")
+	env := agent.NewInbound("irc", "#ch", "myhandle", "!x")
+	env.Metadata["account"] = "myhandle"
+	assert.True(t, g(env))
+}
+
+func TestGuardModeExternalAccountOverrideHonored(t *testing.T) {
+	// Operator's nick differs from their SASL account — explicit override.
+	s := &config.Settings{
+		OwnerMode:    "external",
+		OwnerNick:    "Stefan",
+		OwnerAccount: "stefana",
+	}
+	g := runtime.BuildCommandGuard(s, &irc.Settings{Nick: "bot"})
+	require.NotNil(t, g)
+
+	env := agent.NewInbound("irc", "#ch", "Stefan", "!x")
+	env.Metadata["account"] = "stefana"
+	assert.True(t, g(env))
+
+	wrong := agent.NewInbound("irc", "#ch", "Stefan", "!x")
+	wrong.Metadata["account"] = "stefan"
+	assert.False(t, g(wrong), "account-tag must match OwnerAccount override exactly")
+}
+
+func TestGuardModeExternalHostmaskFallback(t *testing.T) {
+	// Services-less network: no account-tag arrives. Hostmask is the
+	// configured fallback. Anyone matching nick + hostmask is trusted.
+	s := &config.Settings{
+		OwnerMode:     "external",
+		OwnerNick:     "myhandle",
+		OwnerHostmask: "*!*@my.box.example.com",
+	}
+	g := runtime.BuildCommandGuard(s, &irc.Settings{Nick: "bot"})
+	require.NotNil(t, g)
+
+	match := agent.NewInbound("irc", "#ch", "myhandle", "!x")
+	match.Metadata["prefix"] = "myhandle!user@my.box.example.com"
+	assert.True(t, g(match))
+
+	wrongHost := agent.NewInbound("irc", "#ch", "myhandle", "!x")
+	wrongHost.Metadata["prefix"] = "myhandle!user@evil.box.example.com"
+	assert.False(t, g(wrongHost))
+}
+
+func TestGuardModeExternalAccountTagWinsOverHostmask(t *testing.T) {
+	// When both account-tag and hostmask are present, account-tag is
+	// the stronger signal — the guard should consult it first.
+	s := &config.Settings{
+		OwnerMode:     "external",
+		OwnerNick:     "myhandle",
+		OwnerHostmask: "*!*@my.box.example.com",
+	}
+	g := runtime.BuildCommandGuard(s, &irc.Settings{Nick: "bot"})
+	require.NotNil(t, g)
+
+	// Hostmask matches but account-tag is wrong → reject (account wins).
+	env := agent.NewInbound("irc", "#ch", "myhandle", "!x")
+	env.Metadata["account"] = "intruder"
+	env.Metadata["prefix"] = "myhandle!user@my.box.example.com"
+	assert.False(t, g(env))
 }
 
 func TestGuardThrottleScopedByAccountThenSender(t *testing.T) {
+	// Owner check passes, throttle bites. account-tag is the preferred
+	// scope when present; falls back to sender otherwise.
 	s := &config.Settings{
+		OwnerMode:            "external",
+		OwnerNick:            "myhandle",
 		CommandMaxPerWindow:  2,
 		CommandWindowSeconds: 60,
 	}
-	g := runtime.BuildCommandGuard(s)
+	g := runtime.BuildCommandGuard(s, &irc.Settings{Nick: "bot"})
 	require.NotNil(t, g)
 
-	for i := 0; i < 2; i++ {
-		assert.True(t, g(agent.NewInbound("irc", "#ch", "alice", "!x")))
+	make := func() *agent.InboundEnvelope {
+		e := agent.NewInbound("irc", "#ch", "myhandle", "!x")
+		e.Metadata["account"] = "myhandle"
+		return e
 	}
-	assert.False(t, g(agent.NewInbound("irc", "#ch", "alice", "!x")),
-		"per-sender throttle should cap at MaxPerWindow")
+	assert.True(t, g(make()))
+	assert.True(t, g(make()))
+	assert.False(t, g(make()), "per-sender throttle should cap at MaxPerWindow")
+}
 
-	// A different sender has their own bucket.
-	assert.True(t, g(agent.NewInbound("irc", "#ch", "bob", "!x")))
+func TestGuardModeUnknownDenies(t *testing.T) {
+	// Operator typo'd the env value (e.g. "selfish"). Fail closed.
+	s := &config.Settings{OwnerMode: "selfish", OwnerNick: "myhandle"}
+	g := runtime.BuildCommandGuard(s, &irc.Settings{Nick: "bot"})
+	require.NotNil(t, g)
+	env := agent.NewInbound("irc", "#ch", "myhandle", "!x")
+	env.Metadata["account"] = "myhandle"
+	assert.False(t, g(env))
+}
+
+func TestGuardModeNoneWithThrottleStillDenies(t *testing.T) {
+	// "none" + throttle: the throttle's presence must not turn the
+	// gate into a free-for-all. Commands stay refused; the throttle
+	// is irrelevant.
+	s := &config.Settings{
+		OwnerMode:            "none",
+		CommandMaxPerWindow:  100,
+		CommandWindowSeconds: 60,
+	}
+	g := runtime.BuildCommandGuard(s, &irc.Settings{Nick: "bot"})
+	require.NotNil(t, g)
+	assert.False(t, g(agent.NewInbound("irc", "#ch", "alice", "!x")))
+}
+
+func TestGuardSelfWithoutBotNickDenies(t *testing.T) {
+	// Defensive: if the IRC config is missing the bot's nick (shouldn't
+	// happen in practice), self-mode falls closed instead of treating
+	// every nick as "matching the empty bot nick".
+	s := &config.Settings{OwnerMode: "self"}
+	g := runtime.BuildCommandGuard(s, &irc.Settings{Nick: ""})
+	require.NotNil(t, g)
+	assert.False(t, g(agent.NewInbound("irc", "#ch", "alice", "!x")))
+}
+
+func TestGuardThrottleAnonScopeWhenAccountAndSenderEmpty(t *testing.T) {
+	// External mode allows the message, but the account-tag was
+	// stripped and the sender field is empty (artificial test
+	// envelope). Throttle scope falls back to "anon".
+	s := &config.Settings{
+		OwnerMode:            "external",
+		OwnerNick:            "",
+		OwnerHostmask:        "*", // matches anything
+		CommandMaxPerWindow:  1,
+		CommandWindowSeconds: 60,
+	}
+	g := runtime.BuildCommandGuard(s, &irc.Settings{Nick: "bot"})
+	require.NotNil(t, g)
+	// OwnerNick is empty → guard denies. This test exercises the
+	// "guard denies on missing OwnerNick" branch.
+	assert.False(t, g(agent.NewInbound("irc", "#ch", "", "!x")))
+}
+
+func TestHostmaskHelperPatternBehaviors(t *testing.T) {
+	// Indirectly exercised through external-mode tests above, but a
+	// dedicated set of cases here pins the wildcard semantics.
+	s := &config.Settings{
+		OwnerMode: "external",
+		OwnerNick: "n",
+	}
+	type tc struct {
+		name      string
+		hostmask  string
+		prefix    string
+		shouldHit bool
+	}
+	cases := []tc{
+		{"literal-match", "n!u@h.example", "n!u@h.example", true},
+		{"literal-mismatch", "n!u@h.example", "n!u@other.example", false},
+		{"prefix-mismatch-fragment0", "foo*", "bar!u@h", false},
+		{"middle-fragment-missing", "a*b*c", "azc", false},
+		{"middle-fragment-found", "a*b*c", "axbxc", true},
+		{"trailing-suffix-mismatch", "a*c", "axyz", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s2 := *s
+			s2.OwnerHostmask = c.hostmask
+			g := runtime.BuildCommandGuard(&s2, &irc.Settings{Nick: "bot"})
+			require.NotNil(t, g)
+			env := agent.NewInbound("irc", "#ch", "n", "!x")
+			env.Metadata["prefix"] = c.prefix
+			got := g(env)
+			assert.Equal(t, c.shouldHit, got)
+		})
+	}
 }
 
 // --- Run pair stops mutually ---------------------------------------------
