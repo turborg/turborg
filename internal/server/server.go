@@ -6,13 +6,24 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"time"
 )
+
+// defaultQuarantineBase is the first backoff step a tenant waits after a
+// panic before the supervisor revives it (doubled per consecutive failure).
+const defaultQuarantineBase = time.Second
 
 // Server is the pooled runtime: it reconciles the live set of running
 // Tenants against a TenantSource. One instance per process.
 type Server struct {
 	source TenantSource
 	log    *slog.Logger
+
+	// quarantineBase is the first crash-backoff step handed to each tenant.
+	quarantineBase time.Duration
+	// workFactory builds a tenant's work body. Defaults to the production
+	// agent run; overridable in tests to inject panics or controllable work.
+	workFactory func(*Tenant) func(context.Context) error
 
 	mu      sync.Mutex
 	tenants map[string]*Tenant
@@ -21,9 +32,11 @@ type Server struct {
 // New builds a Server backed by the given tenant source.
 func New(source TenantSource, log *slog.Logger) *Server {
 	return &Server{
-		source:  source,
-		log:     log,
-		tenants: make(map[string]*Tenant),
+		source:         source,
+		log:            log,
+		quarantineBase: defaultQuarantineBase,
+		workFactory:    func(t *Tenant) func(context.Context) error { return t.defaultWork() },
+		tenants:        make(map[string]*Tenant),
 	}
 }
 
@@ -90,7 +103,7 @@ func (s *Server) upsert(ctx context.Context, spec TenantSpec) {
 		existing.update(spec)
 		return
 	}
-	s.tenants[spec.TurborgID] = startTenant(ctx, spec, s.log)
+	s.tenants[spec.TurborgID] = startTenant(ctx, spec, s.log, s.quarantineBase, s.workFactory)
 }
 
 // remove detaches a tenant, draining its goroutine. No-op when absent.
@@ -142,6 +155,17 @@ func (s *Server) Has(id string) bool {
 	defer s.mu.Unlock()
 	_, ok := s.tenants[id]
 	return ok
+}
+
+// Status returns a tenant's supervision phase, and whether it is attached.
+func (s *Server) Status(id string) (TenantStatus, bool) {
+	s.mu.Lock()
+	t, ok := s.tenants[id]
+	s.mu.Unlock()
+	if !ok {
+		return StatusRunning, false
+	}
+	return t.Status(), true
 }
 
 // TenantIDs returns the attached tenant ids, sorted for stable output.
