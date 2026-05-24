@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -71,10 +72,8 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 		return err
 	}
 
-	path := envOr("TURBORG_TENANTS_FILE", defaultTenantsFile)
-	source := &server.FileSource{Path: path}
-
-	log.Info("turborg-server starting", "version", version.Version, "tenants_file", path)
+	source, desc := selectSource(log)
+	log.Info("turborg-server starting", "version", version.Version, "source", desc)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -85,6 +84,22 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 	}
 	log.Info("turborg-server exited cleanly")
 	return nil
+}
+
+// selectSource picks the tenant source from the environment. When
+// TURBORG_CONTROL_PLANE_URL is set, the hosted HTTP feed (accounts-api) is
+// used; otherwise tenants come from the local JSON file (OSS / self-host).
+func selectSource(log *slog.Logger) (server.TenantSource, string) {
+	if base := os.Getenv("TURBORG_CONTROL_PLANE_URL"); base != "" {
+		return &server.HTTPSource{
+			BaseURL: base,
+			Bearer:  os.Getenv("TURBORG_CONTROL_PLANE_TOKEN"),
+			HostID:  os.Getenv("TURBORG_HOST_ID"),
+			Log:     log,
+		}, "http:" + base
+	}
+	path := envOr("TURBORG_TENANTS_FILE", defaultTenantsFile)
+	return &server.FileSource{Path: path}, "file:" + path
 }
 
 func envOr(key, fallback string) string {
