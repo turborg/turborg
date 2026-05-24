@@ -2,8 +2,12 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
+
+	"github.com/turborg/turborg/internal/agent"
+	"github.com/turborg/turborg/internal/connector/irc"
 )
 
 // Tenant is one isolated agent inside the pooled process. M1 is lifecycle
@@ -40,14 +44,52 @@ func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger) *Ten
 	return t
 }
 
-// run is the tenant's supervised lifecycle. M1: no connector behaviour —
-// it logs attach, blocks until cancellation, then logs detach. Later
-// milestones replace the idle wait with the connector run loop.
+// run is the tenant's supervised lifecycle. M2: build a per-tenant agent,
+// attach this tenant's connectors to it, and run it under the tenant's
+// context. The agent + its connectors + their event bus are entirely
+// tenant-owned — nothing is shared with other tenants (the isolation rule).
+//
+// If the agent run loop returns before cancellation (e.g. a tenant with no
+// runnable connectors), the tenant still idles until cancelled so the
+// Server's view of attached tenants stays consistent.
 func (t *Tenant) run(ctx context.Context) {
 	defer close(t.done)
+
+	a := agent.New(t.log)
+	t.buildConnectors(a)
+
 	t.log.Info("tenant attached", "connectors", t.connectorTypes())
-	<-ctx.Done()
+	if err := a.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		t.log.Error("tenant agent stopped with error", "err", err)
+	}
+	if ctx.Err() == nil {
+		<-ctx.Done()
+	}
 	t.log.Info("tenant detaching")
+}
+
+// buildConnectors constructs this tenant's connectors from its spec and
+// registers them on the tenant-owned agent. Unsupported types are logged and
+// skipped (pooled mode ships connectors incrementally). A connector whose
+// spec is invalid is skipped rather than failing the whole tenant.
+func (t *Tenant) buildConnectors(a *agent.Agent) {
+	t.mu.Lock()
+	connectors := t.spec.Connectors
+	t.mu.Unlock()
+
+	for _, cs := range connectors {
+		switch cs.Type {
+		case "irc":
+			settings, err := settingsFromConnectorSpec(cs)
+			if err != nil {
+				t.log.Error("skipping invalid irc connector", "err", err)
+				continue
+			}
+			a.AddConnector(irc.New(settings, t.log, nil))
+		default:
+			t.log.Warn("connector type not supported in pooled mode yet", "type", cs.Type)
+		}
+	}
 }
 
 // update applies a new desired spec to a running tenant. M1 swaps the stored
