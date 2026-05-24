@@ -28,13 +28,26 @@ type ConnectorSpec struct {
 // TurborgID — never a runtime identifier. Wire-compatible with the sidecar
 // TenantSpec so an HTTPSource (M5) can decode the same JSON.
 type TenantSpec struct {
-	TurborgID     string          `json:"turborg_id"`
-	ShardID       int             `json:"shard_id,omitempty"`
-	RuntimeMode   string          `json:"runtime_mode"`
-	UserUUID      string          `json:"user_uuid"`
-	PlanCode      string          `json:"plan_code"`
-	CommandPrefix string          `json:"command_prefix,omitempty"`
-	Connectors    []ConnectorSpec `json:"connectors"`
+	TurborgID        string            `json:"turborg_id"`
+	ShardID          int               `json:"shard_id,omitempty"`
+	RuntimeMode      string            `json:"runtime_mode"`
+	UserUUID         string            `json:"user_uuid"`
+	PlanCode         string            `json:"plan_code"`
+	CommandPrefix    string            `json:"command_prefix,omitempty"`
+	Connectors       []ConnectorSpec   `json:"connectors"`
+	PlanCapabilities *PlanCapabilities `json:"plan_capabilities,omitempty"`
+}
+
+// PlanCapabilities is the subset of accounts-api's plan-tier caps the pooled
+// runtime enforces per tenant (M4). Mirrors the sidecar PlanCapabilities wire
+// shape; container mode delegates these to cgroups + the connector's env,
+// pooled mode enforces them in-process. 0 = unrestricted by convention.
+type PlanCapabilities struct {
+	NickLocked            bool `json:"nick_locked"`
+	RealnameLocked        bool `json:"realname_locked"`
+	MaxChannels           int  `json:"max_channels"`
+	OutboundMsgsPerWindow int  `json:"outbound_msgs_per_window"`
+	OutboundWindowSeconds int  `json:"outbound_window_seconds"`
 }
 
 // TenantEventKind distinguishes an attach/update from a detach.

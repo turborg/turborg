@@ -197,6 +197,7 @@ func (t *Tenant) defaultWork() func(context.Context) error {
 func (t *Tenant) buildConnectors(a *agent.Agent) {
 	t.mu.Lock()
 	connectors := t.spec.Connectors
+	caps := t.spec.PlanCapabilities
 	t.mu.Unlock()
 
 	for _, cs := range connectors {
@@ -207,7 +208,12 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 				t.log.Error("skipping invalid irc connector", "err", err)
 				continue
 			}
-			a.AddConnector(irc.New(settings, t.log, nil))
+			conn := irc.New(settings, t.log, nil)
+			if err := applyPlanLimits(conn, caps); err != nil {
+				t.log.Error("skipping irc connector: invalid plan limits", "err", err)
+				continue
+			}
+			a.AddConnector(conn)
 		default:
 			t.log.Warn("connector type not supported in pooled mode yet", "type", cs.Type)
 		}
