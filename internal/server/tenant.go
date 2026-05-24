@@ -12,6 +12,7 @@ import (
 
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/connector/irc"
+	"github.com/turborg/turborg/internal/safe"
 )
 
 // TenantStatus is the supervised lifecycle phase of a tenant.
@@ -89,7 +90,7 @@ func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger, quar
 		status:         StatusRunning,
 	}
 	t.work = workFactory(t)
-	go t.supervise(ctx)
+	safe.Go("supervise/"+spec.TurborgID, func() { t.supervise(ctx) })
 	return t
 }
 

@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/turborg/turborg/internal/safe"
 )
 
 // ConnectorSpec describes one connector instance a tenant runs. Mirrors the
@@ -110,10 +112,10 @@ func (f *FileSource) Initial(_ context.Context) ([]TenantSpec, error) {
 // cancelled. Filesystem-watch-driven hot reload is a later milestone.
 func (f *FileSource) Watch(ctx context.Context) (<-chan TenantEvent, error) {
 	ch := make(chan TenantEvent)
-	go func() {
+	safe.Go("filesource-watch", func() {
 		<-ctx.Done()
 		close(ch)
-	}()
+	})
 	return ch, nil
 }
 
@@ -137,9 +139,9 @@ func (s *StaticSource) Watch(ctx context.Context) (<-chan TenantEvent, error) {
 		return s.Events, nil
 	}
 	ch := make(chan TenantEvent)
-	go func() {
+	safe.Go("staticsource-watch", func() {
 		<-ctx.Done()
 		close(ch)
-	}()
+	})
 	return ch, nil
 }

@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"reflect"
 	"time"
+
+	"github.com/turborg/turborg/internal/safe"
 )
 
 // HTTPSource feeds tenants from the hosted control plane (accounts-api),
@@ -58,7 +60,7 @@ func (h *HTTPSource) Watch(ctx context.Context) (<-chan TenantEvent, error) {
 	}
 
 	out := make(chan TenantEvent)
-	go h.poll(ctx, out, known)
+	safe.Go("httpsource-poll", func() { h.poll(ctx, out, known) })
 	return out, nil
 }
 

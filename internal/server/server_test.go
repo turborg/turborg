@@ -10,12 +10,15 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/turborg/turborg/internal/safe"
 	"go.uber.org/goleak"
 )
 
 // goleak guards the core M1 promise: attach/detach and shutdown drain every
-// tenant goroutine — no leaks.
+// tenant goroutine — no leaks. RecoverPolicy matches the pooled runtime (and
+// keeps an unexpected goroutine panic from os.Exit-ing the test binary).
 func TestMain(m *testing.M) {
+	safe.SetPanicPolicy(safe.RecoverPolicy)
 	goleak.VerifyTestMain(m)
 }
 

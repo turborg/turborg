@@ -19,6 +19,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 	"github.com/turborg/turborg/internal/logging"
+	"github.com/turborg/turborg/internal/safe"
 	"github.com/turborg/turborg/internal/server"
 	"github.com/turborg/turborg/internal/version"
 )
@@ -71,6 +72,10 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 	if err != nil {
 		return err
 	}
+
+	// Pooled runtime: a panicking goroutine must not take down the process
+	// (and every other tenant in it). Recover + log instead of exiting.
+	safe.SetPanicPolicy(safe.RecoverPolicy)
 
 	source, desc := selectSource(log)
 	log.Info("turborg-server starting", "version", version.Version, "source", desc)

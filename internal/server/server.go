@@ -7,6 +7,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/turborg/turborg/internal/safe"
 )
 
 // defaultQuarantineBase is the first backoff step a tenant waits after a
@@ -133,10 +135,10 @@ func (s *Server) shutdown() {
 	var wg sync.WaitGroup
 	for _, t := range tenants {
 		wg.Add(1)
-		go func(t *Tenant) {
+		safe.Go("drain/"+t.ID, func() {
 			defer wg.Done()
 			t.stop()
-		}(t)
+		})
 	}
 	wg.Wait()
 	s.log.Info("pooled server drained", "tenants", len(tenants))
