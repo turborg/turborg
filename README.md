@@ -3,7 +3,7 @@
 **A Go framework for chat-network agents — an IRC bouncer + browser UI + bot orchestrator in one static binary. Optional LLM hookup for AI features.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Go ≥1.25](https://img.shields.io/badge/go-%E2%89%A51.25-00ADD8.svg)](https://go.dev/dl/)
+[![Go ≥1.26](https://img.shields.io/badge/go-%E2%89%A51.26-00ADD8.svg)](https://go.dev/dl/)
 [![CI](https://github.com/turborg/turborg/actions/workflows/ci.yml/badge.svg)](https://github.com/turborg/turborg/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/badge/coverage-95%25-brightgreen.svg)](.testcoverage.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/turborg/turborg)](https://goreportcard.com/report/github.com/turborg/turborg)
@@ -184,7 +184,7 @@ make cover-gate            # enforce per-package + total thresholds (.testcovera
 make lint                  # golangci-lint run ./...
 ```
 
-CI runs the same gates plus a Go 1.25/1.26 test matrix and a build smoke test. **Total coverage gate: ≥ 95%.**
+CI runs the same gates plus a Go 1.26 test job and a build smoke test. **Total coverage gate: ≥ 95%.**
 
 ## Contributing
 
