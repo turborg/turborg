@@ -15,6 +15,7 @@ import (
 
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/messages"
+	"github.com/turborg/turborg/internal/safe"
 	"github.com/turborg/turborg/internal/version"
 	"golang.org/x/sync/errgroup"
 )
@@ -1256,7 +1257,7 @@ func (c *Connector) runEscalationWatchdog(ctx context.Context) <-chan struct{} {
 		return done
 	}
 
-	go func() {
+	safe.Go("irc-escalation-watchdog", func() {
 		defer close(done)
 
 		var (
@@ -1333,7 +1334,7 @@ func (c *Connector) runEscalationWatchdog(ctx context.Context) <-chan struct{} {
 				return
 			}
 		}
-	}()
+	})
 
 	return done
 }
