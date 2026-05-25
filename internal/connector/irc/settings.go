@@ -40,6 +40,12 @@ type Settings struct {
 
 	Channels []string `env:"CHANNELS" envSeparator:","`
 
+	// DialTimeout bounds the TCP+TLS connect itself. HandshakeTimeout
+	// covers the post-connect registration reads, not the dial, so a node
+	// that accepts the TCP connection then stalls the TLS handshake (e.g.
+	// a server zero-windowing us under connection throttling) needs this
+	// separate bound or the connect hangs indefinitely.
+	DialTimeout        time.Duration `env:"DIAL_TIMEOUT"         envDefault:"20s"`
 	HandshakeTimeout   time.Duration `env:"HANDSHAKE_TIMEOUT"    envDefault:"30s"`
 	ReadIdleTimeout    time.Duration `env:"READ_IDLE_TIMEOUT"    envDefault:"300s"`
 	ClientPingInterval time.Duration `env:"CLIENT_PING_INTERVAL" envDefault:"120s"`

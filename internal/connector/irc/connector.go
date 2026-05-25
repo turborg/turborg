@@ -533,7 +533,18 @@ func (c *Connector) bringUp(ctx context.Context) error {
 	)
 	c.machine.Transition(UpstreamStateConnecting)
 
-	cli, err := Dial(ctx, c.settings.Hostname, c.settings.Port, c.settings.UseTLS)
+	// Bound the dial so a node that accepts the TCP connection then stalls
+	// the TLS handshake can't hang the connect forever; on timeout it errors
+	// into the supervisor's backoff + DNS-re-resolve reconnect loop, which
+	// rotates to a healthy node. HandshakeTimeout covers only the post-connect
+	// registration reads, so the dial needs its own deadline.
+	dialTimeout := c.settings.DialTimeout
+	if dialTimeout <= 0 {
+		dialTimeout = 20 * time.Second
+	}
+	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
+	cli, err := Dial(dctx, c.settings.Hostname, c.settings.Port, c.settings.UseTLS)
+	cancel()
 	if err != nil {
 		c.classifyFallback(err)
 		return err
