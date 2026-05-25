@@ -23,7 +23,6 @@ edits will survive but the bot will keep adding new entries above.
 * **messages:** durable message mirror via MessageRecorder ([#24](https://github.com/turborg/turborg/issues/24)) ([a8b5420](https://github.com/turborg/turborg/commit/a8b54203308622eb5ab88e5025a66a91ba15c356))
 * **messages:** shared Store + WS history op + IRCv3 CHATHISTORY + tagged replay ([#27](https://github.com/turborg/turborg/issues/27)) ([8c8278b](https://github.com/turborg/turborg/commit/8c8278bdaa3ff8a9fe26247184f5c40518bf1951))
 * **runtime:** owner-mode + auth-mode for !commands authorization ([#28](https://github.com/turborg/turborg/issues/28)) ([1ed046f](https://github.com/turborg/turborg/commit/1ed046fcfaabb8a37dde777918d8fd4f6369fc7b))
-* **runtime:** TURBORG_IGNORED_NICKS gates !commands at the guard ([cf14265](https://github.com/turborg/turborg/commit/cf142653facb51d76a89df737d3c4f8efe33fb73))
 * **runtime:** TURBORG_IGNORED_NICKS gates !commands at the guard ([863c806](https://github.com/turborg/turborg/commit/863c8069269b6fec93a5059d7b0714fe573c8a55))
 * **server:** pooled multi-tenant runtime (M1–M5, M7, M8) ([#30](https://github.com/turborg/turborg/issues/30)) ([d3152e2](https://github.com/turborg/turborg/commit/d3152e23d180708b7313baac338c7762f9b0ac78))
 * **statepush:** state webhook emitter — debounced per-connector snapshots ([#18](https://github.com/turborg/turborg/issues/18)) ([6aa2fc4](https://github.com/turborg/turborg/commit/6aa2fc4155b75649804dc766c2b4c38708ad3bee))
