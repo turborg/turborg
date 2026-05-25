@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.2.0](https://github.com/turborg/turborg/compare/v0.1.2...v0.2.0) (2026-05-25)
+
+
+### ⚠ BREAKING CHANGES
+
+* **gateway:** Anything setting TURBORG_WEB_PASSWORD, TURBORG_WEB_HOST, TURBORG_WEB_PORT, TURBORG_WEB_MAX_FAILED_ATTEMPTS, TURBORG_WEB_FAILURE_WINDOW_SECONDS, TURBORG_WEB_LOCKOUT_SECONDS, or TURBORG_WEB_IDLE_SHUTDOWN_SECONDS must rename to TURBORG_IRC_WEB_*. Without TURBORG_IRC_WEB_PASSWORD, irc.Settings.WebEnabled() returns false and the WS gateway silently does not start.
+
+### Features
+
+* bouncer rejection feedback — state machine, channel-targeted NOTICEs, WS state events ([#17](https://github.com/turborg/turborg/issues/17)) ([ee669e6](https://github.com/turborg/turborg/commit/ee669e69e82ac7e7c3dcff2ec6292830a8fa29b1))
+* **config:** operator policy envs for network / identity / throttle limits ([#15](https://github.com/turborg/turborg/issues/15)) ([675ad77](https://github.com/turborg/turborg/commit/675ad77126f9d3c5913c87ec4204648cd6c44d17))
+* **connector/irc:** active PING/PONG roundtrip watchdog ([#19](https://github.com/turborg/turborg/issues/19)) ([55c9a9c](https://github.com/turborg/turborg/commit/55c9a9cfd9a822e5ec208bf6889f8b4e59c2bce0))
+* **irc:** configurable QUIT body via TURBORG_IRC_QUIT_MESSAGE ([#20](https://github.com/turborg/turborg/issues/20)) ([6a15462](https://github.com/turborg/turborg/commit/6a154629fecb8d3480c72d5892261fbb01b850d3))
+* **messages:** durable message mirror via MessageRecorder ([#24](https://github.com/turborg/turborg/issues/24)) ([a8b5420](https://github.com/turborg/turborg/commit/a8b54203308622eb5ab88e5025a66a91ba15c356))
+* **messages:** shared Store + WS history op + IRCv3 CHATHISTORY + tagged replay ([#27](https://github.com/turborg/turborg/issues/27)) ([8c8278b](https://github.com/turborg/turborg/commit/8c8278bdaa3ff8a9fe26247184f5c40518bf1951))
+* **runtime:** owner-mode + auth-mode for !commands authorization ([#28](https://github.com/turborg/turborg/issues/28)) ([1ed046f](https://github.com/turborg/turborg/commit/1ed046fcfaabb8a37dde777918d8fd4f6369fc7b))
+* **runtime:** TURBORG_IGNORED_NICKS gates !commands at the guard ([863c806](https://github.com/turborg/turborg/commit/863c8069269b6fec93a5059d7b0714fe573c8a55))
+* **server:** pooled multi-tenant runtime (M1–M5, M7, M8) ([#30](https://github.com/turborg/turborg/issues/30)) ([d3152e2](https://github.com/turborg/turborg/commit/d3152e23d180708b7313baac338c7762f9b0ac78))
+* **statepush:** state webhook emitter — debounced per-connector snapshots ([#18](https://github.com/turborg/turborg/issues/18)) ([6aa2fc4](https://github.com/turborg/turborg/commit/6aa2fc4155b75649804dc766c2b4c38708ad3bee))
+
+
+### Bug Fixes
+
+* **irc:** bound the upstream dial with DialTimeout ([#31](https://github.com/turborg/turborg/issues/31)) ([8a271ff](https://github.com/turborg/turborg/commit/8a271ff2534518cf03f883006f556346710d8bd0))
+* **irc:** remove unsynchronized slice read from NOTICE test assertion ([#34](https://github.com/turborg/turborg/issues/34)) ([aec3321](https://github.com/turborg/turborg/commit/aec33213b061e9866f4b5f84dcdbc0e4983d4307))
+* **irc:** surface service/user NOTICEs in the web UI ([#32](https://github.com/turborg/turborg/issues/32)) ([b5cbab0](https://github.com/turborg/turborg/commit/b5cbab0d57ef95471f6cd15f0ad977fcb1364828))
+* upstream reconnect sync (backoff, members, gateway initial state) + devirc dev tool ([#25](https://github.com/turborg/turborg/issues/25)) ([1c88ee5](https://github.com/turborg/turborg/commit/1c88ee5748888f83bce5a9ca782f1eda49e88c31))
+
+
+### Refactoring
+
+* **gateway:** move WS gateway env to TURBORG_GATEWAY_* ([#14](https://github.com/turborg/turborg/issues/14)) ([5c989b8](https://github.com/turborg/turborg/commit/5c989b8642c29e3c1f01243dd405a92dc547b106))
+
 ## [0.1.2](https://github.com/turborg/turborg/compare/v0.1.1...v0.1.2) (2026-05-14)
 
 
