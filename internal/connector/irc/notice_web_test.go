@@ -42,7 +42,7 @@ func TestServiceNoticeReachesGatewayButCTCPDoesNot(t *testing.T) {
 			}
 		}
 		return false
-	}, 2*time.Second, 10*time.Millisecond, "service NOTICE should reach the gateway with sender; got %v", notices)
+	}, 2*time.Second, 10*time.Millisecond, "service NOTICE should reach the gateway with sender")
 
 	mu.Lock()
 	before := len(notices)
