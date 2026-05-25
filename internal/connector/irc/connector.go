@@ -1481,15 +1481,25 @@ func (c *Connector) dispatchLine(ctx context.Context, line string) {
 		// sees the reason in the chat surface too.
 		c.publishServerNotice(ctx, "error", serverNoticeText(msg))
 	case CmdNotice:
-		// Server-originated NOTICE (no `!user@host` in the prefix) —
-		// pre-registration "NOTICE AUTH :*** Looking up your
-		// hostname" lines, services bot greetings, etc. — flow into
-		// the server tab. Client-originated NOTICEs (with a user
-		// hostmask prefix) are intentionally left unhandled here:
-		// the bot has no PRIVMSG-equivalent path for NOTICE today,
-		// and silently dropping matches the pre-existing behaviour.
-		if isServerPrefix(msg.Prefix) {
+		// NOTICEs surface in the status/server tab so the web UI shows them
+		// like an attached IRC client does:
+		//   - server-prefixed (no `!user@host`): pre-reg "Looking up your
+		//     hostname", server/services info lines.
+		//   - service/user-prefixed (NickServ, ChanServ, a user's /notice):
+		//     real messages the user expects to see — prefix with the sender.
+		// CTCP notices (\x01..\x01) are machine replies to VERSION/PING/TIME,
+		// not chat, so they're skipped.
+		switch {
+		case isServerPrefix(msg.Prefix):
 			c.publishServerNotice(ctx, "notice", serverNoticeText(msg))
+		case isCTCP(msg.Trailing):
+			// machine metadata, not chat — drop
+		default:
+			body := serverNoticeText(msg)
+			if sender := Nick(msg.Prefix); sender != "" {
+				body = sender + ": " + body
+			}
+			c.publishServerNotice(ctx, "notice", body)
 		}
 	case CmdPrivmsg:
 		c.handlePrivmsg(ctx, msg, line)
