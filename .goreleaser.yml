@@ -18,6 +18,24 @@ builds:
       - amd64
       - arm64
 
+  # The pooled multi-tenant runtime, shipped in the SAME image as /turborg
+  # (the sidecar PoolManager runs it via an entrypoint override). Without this
+  # build the published image only has /turborg and pooled hosts can't boot.
+  - id: turborg-server
+    main: ./cmd/turborg-server
+    binary: turborg-server
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/turborg/turborg/internal/version.Version={{.Version}}
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
 archives:
   - id: default
     formats:
