@@ -80,10 +80,27 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 	source, desc := selectSource(log)
 	log.Info("turborg-server starting", "version", version.Version, "source", desc)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	ctx, cancel := context.WithCancel(sigCtx)
+	defer cancel()
 
 	srv := server.New(source, log)
+
+	// Pooled bouncer ingress: one PROXY-v2 router fronts every tenant (HAProxy
+	// terminates TLS and forwards the SNI as the PROXY authority). Runs
+	// alongside the tenant supervisor; a bind failure cancels the process so we
+	// fail fast rather than serve tenants nobody can attach to. Empty addr
+	// disables it (e.g. a file-source self-host that doesn't expose a bouncer).
+	if routerAddr := os.Getenv("TURBORG_BOUNCER_ROUTER_ADDR"); routerAddr != "" {
+		safe.Go("bouncer-router", func() {
+			if err := srv.ServeBouncerRouter(ctx, routerAddr); err != nil && !errors.Is(err, context.Canceled) {
+				log.Error("bouncer router stopped", "err", err)
+				cancel()
+			}
+		})
+	}
+
 	if err := srv.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("pooled server: %w", err)
 	}

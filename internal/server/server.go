@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"sort"
 	"sync"
 	"time"
@@ -157,6 +158,21 @@ func (s *Server) Has(id string) bool {
 	defer s.mu.Unlock()
 	_, ok := s.tenants[id]
 	return ok
+}
+
+// RouteBouncerConn hands one accepted client connection to the named tenant's
+// bouncer. Returns false (and does not touch the conn) when no such tenant is
+// attached, so the router can close it with an explanatory log. The actual
+// bouncer delivery (and closing on a between-runs tenant) is the tenant's job.
+func (s *Server) RouteBouncerConn(turborgID string, conn net.Conn) bool {
+	s.mu.Lock()
+	t, ok := s.tenants[turborgID]
+	s.mu.Unlock()
+	if !ok {
+		return false
+	}
+	t.ServeBouncerConn(conn)
+	return true
 }
 
 // Status returns a tenant's supervision phase, and whether it is attached.
