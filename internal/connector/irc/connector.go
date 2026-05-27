@@ -65,7 +65,11 @@ type Connector struct {
 
 	state   *ChannelState
 	bouncer *Bouncer
-	ctcp    *Throttle
+	// bouncerListenerless brings the bouncer up without its own TCP listener
+	// (pooled runtime): the pool's SNI/PROXY-v2 router feeds connections in via
+	// ServeBouncerConn. Default false = dedicated mode (bouncer binds a port).
+	bouncerListenerless bool
+	ctcp                *Throttle
 
 	// wanted is the "channels I want to be in" set the reconnect
 	// supervisor replays JOINs from. Seeded at construction from the
@@ -322,6 +326,26 @@ func (c *Connector) SetMessageStore(s messages.Store) { c.messageStore = s }
 // Forwarded to the bouncer at startBouncer time. Pass 0 to leave the
 // default in place.
 func (c *Connector) SetBouncerWelcomeReplayDepth(n int) { c.bouncerWelcomeReplayDepth = n }
+
+// SetBouncerListenerless selects the pooled-runtime bouncer path: the bouncer
+// comes up without binding a TCP port and is fed connections by the pool's
+// SNI/PROXY-v2 router via ServeBouncerConn, instead of its own accept loop.
+// Must be called before Start. Default (false) keeps dedicated mode, where the
+// bouncer binds its own host port.
+func (c *Connector) SetBouncerListenerless(v bool) { c.bouncerListenerless = v }
+
+// ServeBouncerConn hands one already-accepted client connection to this
+// connector's bouncer — the pooled router's entry point once it has resolved
+// which tenant a connection belongs to. Closes the connection if the bouncer
+// isn't up yet (router raced connector start); the router retries on the
+// client's reconnect.
+func (c *Connector) ServeBouncerConn(conn net.Conn) {
+	if b := c.bouncer; b != nil {
+		b.ServeConn(conn)
+		return
+	}
+	_ = conn.Close()
+}
 
 // SetUpstreamWarnHook installs the callback the escalation watchdog
 // fires when a transient outage persists past UpstreamWarnAfter. Pass
@@ -730,7 +754,12 @@ func (c *Connector) startBouncer(ctx context.Context) error {
 			})
 		})
 	}
-	if err := b.Start(ctx); err != nil {
+	start := b.Start
+	if c.bouncerListenerless {
+		// Pooled: no own port; the pool router feeds conns via ServeBouncerConn.
+		start = b.StartListenerless
+	}
+	if err := start(ctx); err != nil {
 		return err
 	}
 	c.bouncer = b
