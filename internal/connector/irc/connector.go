@@ -78,6 +78,11 @@ type Connector struct {
 	// JOIN/PART commands routed through the bouncer.
 	wanted *WantedChannels
 
+	// storm is the reconnect circuit breaker: after too many reconnects in a
+	// window it forces a long cooldown so a flapping tenant can't keep
+	// hammering the upstream network / shared egress IP. See reconnect_storm.go.
+	storm *reconnectStorm
+
 	// clientLimits is the operator-policy struct the bouncer consults
 	// before forwarding client-originated commands upstream. Held here
 	// so runtime.Build can hand it to the connector before Start; it
@@ -237,7 +242,19 @@ func New(s *Settings, log *slog.Logger, events *agent.EventBus) *Connector {
 		machine:     NewUpstreamStateMachine(log),
 		wanted:      NewWantedChannels(s.NormalizedChannels()),
 		currentNick: s.Nick,
+		storm: newReconnectStorm(
+			defaultReconnectStormWindow,
+			defaultReconnectStormMax,
+			defaultReconnectStormCooldown,
+		),
 	}
+}
+
+// SetReconnectStorm overrides the reconnect-storm circuit-breaker thresholds.
+// A non-positive maxAttempts disables it (the supervisor uses plain backoff).
+// Must be called before Run; tests use it to trip the breaker on tight timings.
+func (c *Connector) SetReconnectStorm(window time.Duration, maxAttempts int, cooldown time.Duration) {
+	c.storm = newReconnectStorm(window, maxAttempts, cooldown)
 }
 
 // WantedChannels returns the connector's wanted-channels set. Used by
@@ -1101,8 +1118,10 @@ func (c *Connector) Run(ctx context.Context) error {
 
 		// Recoverable: sleep with backoff, then bring upstream back up.
 		// runCtx cancels mid-sleep when the watchdog transitions to
-		// paused_idle — that surfaces as runCtx.Done.
-		delay := backoff.Next()
+		// paused_idle — that surfaces as runCtx.Done. The storm breaker swaps
+		// in a long cooldown once reconnects pile up in its window, so a
+		// persistent flapper stops hammering the network / egress IP.
+		delay := c.storm.nextDelay(time.Now(), backoff.Next(), c.log)
 		c.log.Info("irc reconnecting", "state", c.machine.State(), "after", delay, "err", err)
 		select {
 		case <-runCtx.Done():
