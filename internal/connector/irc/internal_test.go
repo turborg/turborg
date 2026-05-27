@@ -186,6 +186,7 @@ func connectorWithBus(t *testing.T, eventType agent.EventType) (*Connector, <-ch
 func TestHandleWhoisNumericAccumulatesAndFlushesOnEnd(t *testing.T) {
 	c, ch := connectorWithBus(t, agent.EventWhoisResult)
 	ctx := context.Background()
+	c.markWhoisRequested("alice") // web-originated WHOIS registers; bouncer ones don't
 
 	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisUser, Params: []string{"me", "alice", "~uid", "host.tld", "*"}, Trailing: "Alice Wonderland"})
 	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisServer, Params: []string{"me", "alice", "ergo.test"}, Trailing: "Test Server"})
@@ -230,11 +231,11 @@ func TestHandleWhoisNumericAccumulatesAndFlushesOnEnd(t *testing.T) {
 func TestHandleWhoisNoSuchNick(t *testing.T) {
 	c, ch := connectorWithBus(t, agent.EventWhoisResult)
 	ctx := context.Background()
+	c.markWhoisRequested("phantom") // web-originated WHOIS registers intent
 
-	// Open a whois that the server will fail. The handler buffers
-	// nothing until at least one numeric arrives; simulate a 401
-	// straight away — common when the user types /whois on a nick
-	// the server has never seen.
+	// Open a whois that the server will fail. Simulate a 401 straight
+	// away — common when the user types /whois on a nick the server has
+	// never seen.
 	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisUser, Params: []string{"me", "phantom", "~u", "h", "*"}, Trailing: "P"})
 	c.handleWhoisNoSuchNick(ctx, "phantom", "No such nick/channel")
 
@@ -278,9 +279,28 @@ func TestHandleListNumericAggregatesAcrossBatch(t *testing.T) {
 	assert.Equal(t, 12, channels[2]["users"])
 }
 
+func TestHandleWhoisNumericIgnoresUnregisteredTarget(t *testing.T) {
+	// A bouncer-forwarded WHOIS bypasses SendRaw, so it never registers intent.
+	// Its reply numerics must NOT publish EventWhoisResult (no web modal) — they
+	// only fan out to bouncer clients via the separate Broadcast path.
+	c, ch := connectorWithBus(t, agent.EventWhoisResult)
+	ctx := context.Background()
+	// Deliberately NO markWhoisRequested("mallory").
+
+	c.handleWhoisNumeric(ctx, Message{Command: RplWhoisUser, Params: []string{"me", "mallory", "~m", "h.tld", "*"}, Trailing: "M"})
+	c.handleWhoisNumeric(ctx, Message{Command: RplEndOfWhois, Params: []string{"me", "mallory"}, Trailing: "End of /WHOIS list"})
+
+	select {
+	case ev := <-ch:
+		t.Fatalf("unregistered (bouncer) WHOIS must not emit to web: %+v", ev)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestHandleWhoNumericAggregatesPerTarget(t *testing.T) {
 	c, ch := connectorWithBus(t, agent.EventWhoResult)
 	ctx := context.Background()
+	c.markWhoRequested("#test")
 
 	// /who #test
 	c.handleWhoNumeric(ctx, Message{
@@ -313,6 +333,8 @@ func TestHandleWhoNumericTwoTargetsInFlight(t *testing.T) {
 	// member lists into each other.
 	c, ch := connectorWithBus(t, agent.EventWhoResult)
 	ctx := context.Background()
+	c.markWhoRequested("#a")
+	c.markWhoRequested("#b")
 
 	c.handleWhoNumeric(ctx, Message{Command: RplWhoReply, Params: []string{"me", "#a", "~a", "h", "s", "alice", "H"}, Trailing: "0 A"})
 	c.handleWhoNumeric(ctx, Message{Command: RplWhoReply, Params: []string{"me", "#b", "~b", "h", "s", "bob", "H"}, Trailing: "0 B"})
