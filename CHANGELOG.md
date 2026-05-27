@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.2.2](https://github.com/turborg/turborg/compare/v0.2.1...v0.2.2) (2026-05-27)
+
+
+### Bug Fixes
+
+* **irc:** per-client WHOIS/WHO; surface the bot's own CTCP replies ([#36](https://github.com/turborg/turborg/issues/36)) ([5a39245](https://github.com/turborg/turborg/commit/5a39245fc1f296e3b440e64812373e33f39251ee))
+
 ## [0.2.1](https://github.com/turborg/turborg/compare/v0.2.0...v0.2.1) (2026-05-27)
 
 
