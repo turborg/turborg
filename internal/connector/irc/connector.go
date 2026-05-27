@@ -1487,13 +1487,20 @@ func (c *Connector) dispatchLine(ctx context.Context, line string) {
 		//     hostname", server/services info lines.
 		//   - service/user-prefixed (NickServ, ChanServ, a user's /notice):
 		//     real messages the user expects to see — prefix with the sender.
-		// CTCP notices (\x01..\x01) are machine replies to VERSION/PING/TIME,
-		// not chat, so they're skipped.
+		// CTCP notices (\x01..\x01) are replies to VERSION/PING/TIME etc.
+		// We surface them (decoded, delimiters stripped) so a user who fired
+		// a /ctcp sees the answer in the web UI, like an attached client would.
 		switch {
 		case isServerPrefix(msg.Prefix):
 			c.publishServerNotice(ctx, "notice", serverNoticeText(msg))
 		case isCTCP(msg.Trailing):
-			// machine metadata, not chat — drop
+			if inner := strings.Trim(msg.Trailing, ctcpDelim); inner != "" {
+				body := "[CTCP] " + inner
+				if sender := Nick(msg.Prefix); sender != "" {
+					body = sender + ": " + body
+				}
+				c.publishServerNotice(ctx, "notice", body)
+			}
 		default:
 			body := serverNoticeText(msg)
 			if sender := Nick(msg.Prefix); sender != "" {

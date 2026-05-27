@@ -34,6 +34,12 @@ var forwardable = map[string]bool{
 	CmdKick:    true,
 	CmdNick:    true,
 	CmdNames:   true,
+	// Read-only lookups attached clients expect to work (e.g. /whois in
+	// HexChat). Their reply numerics already fan out to clients via
+	// shouldFanOutToBouncer; without forwarding the command itself the
+	// query never reaches upstream and the client just sees nothing.
+	CmdWhois: true,
+	CmdWho:   true,
 }
 
 // requiresTarget marks commands that need a channel/user param. NICK is
@@ -47,6 +53,10 @@ var requiresTarget = map[string]bool{
 	CmdTopic:   true,
 	CmdKick:    true,
 	CmdNames:   true,
+	// Require a target so a bare WHOIS/WHO (which would query everything /
+	// list all visible users upstream) is dropped rather than forwarded.
+	CmdWhois: true,
+	CmdWho:   true,
 }
 
 func isWellFormed(m Message) bool {
