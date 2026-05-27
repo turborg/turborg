@@ -37,6 +37,68 @@ func TestTurborgIDFromAuthority(t *testing.T) {
 
 	_, err = turborgIDFromAuthority(authorityHeader(""))
 	require.Error(t, err, "a header with no AUTHORITY TLV is an error, not a silent empty id")
+
+	_, err = turborgIDFromAuthority(authorityHeader(".bouncer.irc.staging.xshellz.com"))
+	require.Error(t, err, "an authority with an empty leading label has no turborg_id")
+}
+
+// TestRouteBouncerConnNonProxyConnCloses: a connection that isn't a
+// *proxyproto.Conn (no header to read) is closed rather than leaked.
+func TestRouteBouncerConnNonProxyConnCloses(t *testing.T) {
+	s := New(nil, slog.Default())
+	srv, cli := net.Pipe()
+	t.Cleanup(func() { _ = cli.Close() })
+
+	s.routeBouncerConn(srv)
+
+	_ = cli.SetReadDeadline(time.Now().Add(time.Second))
+	_, err := cli.Read(make([]byte, 1))
+	assert.Error(t, err, "a non-PROXY connection must be closed")
+}
+
+// TestBouncerRouterNoAuthorityClosesConn drives the accept path with a valid
+// PROXY v2 header that carries no AUTHORITY TLV: the router can't resolve a
+// tenant and closes the connection.
+func TestBouncerRouterNoAuthorityClosesConn(t *testing.T) {
+	s := New(nil, slog.Default())
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.serveBouncerRouter(ctx, ln) }()
+
+	conn, err := net.Dial("tcp", addr)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	_, err = authorityHeader("").WriteTo(conn) // valid v2 header, no AUTHORITY TLV
+	require.NoError(t, err)
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, err = conn.Read(make([]byte, 1))
+	assert.Error(t, err, "a header with no authority resolves to no tenant and is closed")
+}
+
+// TestServeBouncerRouterBindsAndStops covers the bind+delegate wrapper and a
+// clean shutdown on context cancel.
+func TestServeBouncerRouterBindsAndStops(t *testing.T) {
+	s := New(nil, slog.Default())
+	ctx, cancel := context.WithCancel(context.Background())
+
+	errc := make(chan error, 1)
+	go func() { errc <- s.ServeBouncerRouter(ctx, "127.0.0.1:0") }()
+
+	time.Sleep(50 * time.Millisecond) // let the listener bind
+	cancel()
+
+	select {
+	case err := <-errc:
+		assert.ErrorIs(t, err, context.Canceled, "router returns ctx.Err() on cancel")
+	case <-time.After(2 * time.Second):
+		t.Fatal("router did not stop on context cancel")
+	}
 }
 
 func TestRouteBouncerConnLookup(t *testing.T) {

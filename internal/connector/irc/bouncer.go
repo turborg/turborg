@@ -35,6 +35,11 @@ const (
 	// connection. The read loop reaps a client that sends nothing (not even a
 	// PONG) for pingInterval+pongGrace.
 	defaultClientPongGrace = 30 * time.Second
+	// clientWriteTimeout bounds a single write to an attached client. A client
+	// that stops reading must not pin the writing goroutine — critical in the
+	// pooled runtime, where one shared goroutine fans an upstream line out to
+	// every attached client. On timeout the write errors and the client drops.
+	clientWriteTimeout = 30 * time.Second
 )
 
 // forwardable is the set of commands that bouncer clients are allowed to
@@ -199,7 +204,19 @@ func (b *BouncerClient) sendLine(line string) error {
 	}
 	b.wmu.Lock()
 	defer b.wmu.Unlock()
-	_, err := b.conn.Write([]byte(strings.TrimRight(line, "\r\n") + "\r\n"))
+	return writeWithTimeout(b.conn, []byte(strings.TrimRight(line, "\r\n")+"\r\n"), clientWriteTimeout)
+}
+
+// writeWithTimeout writes data with a bounded deadline — the slow-consumer
+// guard. A client that stops reading fills the socket buffer and would
+// otherwise pin the writing goroutine indefinitely; in the pooled runtime that
+// goroutine is often a shared fan-out delivering one upstream line to every
+// attached client, so one stalled consumer must not stall the rest. On timeout
+// the write errors and the caller drops the client.
+func writeWithTimeout(conn net.Conn, data []byte, timeout time.Duration) error {
+	_ = conn.SetWriteDeadline(time.Now().Add(timeout))
+	_, err := conn.Write(data)
+	_ = conn.SetWriteDeadline(time.Time{})
 	return err
 }
 

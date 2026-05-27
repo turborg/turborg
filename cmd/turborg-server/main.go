@@ -14,7 +14,10 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime/debug"
+	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
@@ -77,6 +80,11 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 	// (and every other tenant in it). Recover + log instead of exiting.
 	safe.SetPanicPolicy(safe.RecoverPolicy)
 
+	// Soft memory limit so GC defends the pool under pressure rather than
+	// letting one tenant push the shared process to an OOM kill that drops
+	// every tenant. The watchdog (server) observes; this bounds.
+	applyMemoryLimit(log)
+
 	source, desc := selectSource(log)
 	log.Info("turborg-server starting", "version", version.Version, "source", desc)
 
@@ -101,11 +109,40 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 		})
 	}
 
+	// Pool watchdog: periodic heap/goroutine/tenant sampling for observability
+	// and early warning (escalates to Warn above TURBORG_HEAP_WARN_BYTES). 0
+	// interval disables it.
+	if interval := envIntOr("TURBORG_WATCHDOG_INTERVAL_SECONDS", 60); interval > 0 {
+		heapWarn := envUint64Or("TURBORG_HEAP_WARN_BYTES", 0)
+		safe.Go("watchdog", func() {
+			srv.RunWatchdog(ctx, time.Duration(interval)*time.Second, heapWarn)
+		})
+	}
+
 	if err := srv.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("pooled server: %w", err)
 	}
 	log.Info("turborg-server exited cleanly")
 	return nil
+}
+
+// applyMemoryLimit sets the Go soft memory limit (GOMEMLIMIT) from
+// TURBORG_GOMEMLIMIT_BYTES when present. The sidecar derives it from the pool
+// container's memory allocation so GC works harder near the ceiling instead of
+// the kernel OOM-killing a process that holds every pooled tenant. Unset keeps
+// Go's default (the runtime still honours a natively-set GOMEMLIMIT env).
+func applyMemoryLimit(log *slog.Logger) {
+	v := os.Getenv("TURBORG_GOMEMLIMIT_BYTES")
+	if v == "" {
+		return
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		log.Warn("ignoring invalid TURBORG_GOMEMLIMIT_BYTES", "value", v)
+		return
+	}
+	debug.SetMemoryLimit(n)
+	log.Info("GOMEMLIMIT applied", "bytes", n)
 }
 
 // selectSource picks the tenant source from the environment. When
@@ -129,4 +166,32 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// envIntOr reads a non-negative integer env var, falling back to def when
+// unset, empty, or unparseable.
+func envIntOr(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return def
+	}
+	return n
+}
+
+// envUint64Or reads an unsigned integer env var (e.g. a byte count), falling
+// back to def when unset, empty, or unparseable.
+func envUint64Or(key string, def uint64) uint64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseUint(v, 10, 64)
+	if err != nil {
+		return def
+	}
+	return n
 }
