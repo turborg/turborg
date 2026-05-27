@@ -19,7 +19,7 @@ edits will survive but the bot will keep adding new entries above.
 
 ### Bug Fixes
 
-* **irc:** forward WHOIS/WHO over the bouncer; surface CTCP notices on web ([f74baba](https://github.com/turborg/turborg/commit/f74baba3a39694468a994bd25ce3bd7d39666d7f))
+* **irc:** forward WHOIS/WHO over the bouncer; surface CTCP notices on web ([6f8c850](https://github.com/turborg/turborg/commit/6f8c85012301217be0530d20e726af4e443c0ed8))
 
 ## [0.2.0](https://github.com/turborg/turborg/compare/v0.1.2...v0.2.0) (2026-05-25)
 
