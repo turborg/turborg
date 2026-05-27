@@ -7,6 +7,10 @@ LABEL org.opencontainers.image.source="https://github.com/turborg/turborg"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 COPY turborg /turborg
+# Pooled multi-tenant runtime — same image, started via an entrypoint override
+# by the sidecar PoolManager. GoReleaser stages both build binaries into the
+# docker context.
+COPY turborg-server /turborg-server
 
 EXPOSE 8765
 
