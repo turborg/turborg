@@ -580,6 +580,59 @@ func TestBouncerForwardsPostAuth(t *testing.T) {
 	}, time.Second, 10*time.Millisecond, "post-auth message should be forwarded")
 }
 
+// WHOIS from an attached client (e.g. /whois in HexChat) must reach upstream;
+// its reply numerics already fan out to clients via shouldFanOutToBouncer. A
+// bare WHOIS (no target) is dropped by the requiresTarget guard.
+func TestBouncerForwardsWhois(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	var upstream []string
+	var mu sync.Mutex
+	b.AttachUpstream(func(line string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		upstream = append(upstream, line)
+		return nil
+	})
+
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#test")
+	b.AttachState(state, "turborg", "ident", "host")
+
+	conn, r := bouncerClient(t, addr)
+	_, _ = r.ReadString('\n')
+	writeLine(t, conn, "PASS hunter2")
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		if strings.Contains(line, "366") {
+			break
+		}
+	}
+
+	writeLine(t, conn, "WHOIS somenick")
+	writeLine(t, conn, "WHOIS") // bare — must be dropped
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, l := range upstream {
+			if strings.Contains(l, "WHOIS somenick") {
+				return true
+			}
+		}
+		return false
+	}, time.Second, 10*time.Millisecond, "WHOIS with a target should be forwarded")
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, l := range upstream {
+		require.NotEqual(t, "WHOIS", strings.TrimSpace(l), "bare WHOIS must be dropped")
+	}
+}
+
 func TestBouncerCallsObserverOnForwardedPrivmsg(t *testing.T) {
 	b, addr := freshBouncer(t, "hunter2")
 	b.AttachUpstream(func(string) error { return nil })

@@ -33,7 +33,10 @@ func TestIsWellFormed(t *testing.T) {
 		{"privmsg with target", Message{Command: CmdPrivmsg, Params: []string{"#ch"}, Trailing: "hi"}, true},
 		{"privmsg empty target", Message{Command: CmdPrivmsg, Params: []string{""}, Trailing: "hi"}, false},
 		{"join no target", Message{Command: CmdJoin}, false},
-		{"unknown command always ok", Message{Command: "WHOIS"}, true},
+		{"unknown command always ok", Message{Command: "FOOBAR"}, true},
+		{"whois without target", Message{Command: CmdWhois}, false},
+		{"whois with target", Message{Command: CmdWhois, Params: []string{"someone"}}, true},
+		{"who without target", Message{Command: CmdWho}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
