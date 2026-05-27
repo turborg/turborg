@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.2.3](https://github.com/turborg/turborg/compare/v0.2.2...v0.2.3) (2026-05-27)
+
+
+### Documentation
+
+* **changelog:** point 0.2.1 whois/CTCP entry at the current commit SHA ([6887a7a](https://github.com/turborg/turborg/commit/6887a7a0c35c0329043ba9ffe1360cbf58de80db))
+
 ## [0.2.2](https://github.com/turborg/turborg/compare/v0.2.1...v0.2.2) (2026-05-27)
 
 
