@@ -10,7 +10,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/connector/irc"
+	"github.com/turborg/turborg/tests/fixtures/fakeirc"
 )
 
 // TestBouncerListenerlessServeConn is the pooled-runtime seam: a bouncer
@@ -54,6 +56,62 @@ func TestBouncerListenerlessServeConn(t *testing.T) {
 		}
 	}
 	assert.True(t, got001, "PASS over a served connection must reach the 001 welcome")
+}
+
+// TestConnectorListenerlessBouncerServesRoutedConn is the end-to-end pooled
+// path: a connector started in listenerless mode binds no bouncer port, yet a
+// connection delivered through ServeBouncerConn (as the pool router would,
+// after PROXY-v2 tenant resolution) gets the live bouncer's handshake.
+func TestConnectorListenerlessBouncerServesRoutedConn(t *testing.T) {
+	fs := fakeirc.New(t)
+	defer fs.Close()
+
+	conn := irc.New(&irc.Settings{
+		Hostname:        "127.0.0.1",
+		Port:            fs.Port(),
+		Nick:            "turborg",
+		Username:        "turborg",
+		RealName:        "turborg",
+		Channels:        []string{"#test"},
+		BouncerPassword: "hunter2",
+	}, nil, nil)
+	conn.SetBouncerListenerless(true)
+
+	a := agent.New(nil)
+	a.AddConnector(conn)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = a.Run(ctx) }()
+
+	require.True(t, fs.WaitFor(containsPrefix("JOIN #test"), 2*time.Second),
+		"connector did not register; received: %v", fs.Received())
+
+	srv, cli := net.Pipe()
+	t.Cleanup(func() { _ = cli.Close() })
+	go conn.ServeBouncerConn(srv) // ServeConn blocks on the client read loop
+
+	r := bufio.NewReader(cli)
+	_ = cli.SetReadDeadline(time.Now().Add(2 * time.Second))
+	notice, err := r.ReadString('\n')
+	require.NoError(t, err)
+	assert.Contains(t, notice, "NOTICE AUTH",
+		"a listenerless connector's bouncer must serve a routed connection end-to-end")
+}
+
+// TestConnectorServeBouncerConnBeforeStartCloses: the connector's pooled
+// entry point closes a routed connection when its bouncer isn't up yet (router
+// raced connector start), rather than leaking it or panicking.
+func TestConnectorServeBouncerConnBeforeStartCloses(t *testing.T) {
+	conn := irc.New(&irc.Settings{BouncerPassword: "hunter2"}, nil, nil)
+	conn.SetBouncerListenerless(true) // pooled mode; still not Started, so bouncer is nil
+
+	srv, cli := net.Pipe()
+	t.Cleanup(func() { _ = cli.Close() })
+	conn.ServeBouncerConn(srv)
+
+	_ = cli.SetReadDeadline(time.Now().Add(time.Second))
+	_, err := cli.Read(make([]byte, 1))
+	assert.Error(t, err, "ServeBouncerConn before the bouncer is up must close the conn")
 }
 
 // TestBouncerServeConnAfterStopClosesConn: a connection handed to a stopped

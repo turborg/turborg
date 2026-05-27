@@ -875,11 +875,12 @@ type brokenConn struct {
 	closeErr error
 }
 
-func (b *brokenConn) Write(_ []byte) (int, error) { return 0, errBrokenWrite }
-func (b *brokenConn) Read(p []byte) (int, error)  { return 0, errBrokenWrite }
-func (b *brokenConn) Close() error                { return b.closeErr }
-func (b *brokenConn) RemoteAddr() net.Addr        { return fakeAddr{} }
-func (b *brokenConn) LocalAddr() net.Addr         { return fakeAddr{} }
+func (b *brokenConn) Write(_ []byte) (int, error)        { return 0, errBrokenWrite }
+func (b *brokenConn) Read(p []byte) (int, error)         { return 0, errBrokenWrite }
+func (b *brokenConn) Close() error                       { return b.closeErr }
+func (b *brokenConn) RemoteAddr() net.Addr               { return fakeAddr{} }
+func (b *brokenConn) LocalAddr() net.Addr                { return fakeAddr{} }
+func (b *brokenConn) SetWriteDeadline(_ time.Time) error { return nil }
 
 type fakeAddr struct{}
 
