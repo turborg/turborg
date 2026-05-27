@@ -22,6 +22,21 @@ import (
 // https://ircv3.net/specs/extensions/server-time
 const serverTimeLayout = "2006-01-02T15:04:05.000Z"
 
+const (
+	// defaultClientPingInterval is how often the bouncer PINGs each attached
+	// client. Two jobs: (1) keep an idle connection's bytes flowing so a NAT
+	// or proxy idle timeout — e.g. the HAProxy SNI router's tunnel timeout —
+	// never reaps a live-but-quiet attachment; (2) detect a dead client
+	// within ~one interval instead of leaving a phantom attached. Kept well
+	// under typical NAT idle windows (~60–120s).
+	defaultClientPingInterval = 60 * time.Second
+	// defaultClientPongGrace pads the read deadline past the ping interval so
+	// a client has time to answer before silence is treated as a dead
+	// connection. The read loop reaps a client that sends nothing (not even a
+	// PONG) for pingInterval+pongGrace.
+	defaultClientPongGrace = 30 * time.Second
+)
+
 // forwardable is the set of commands that bouncer clients are allowed to
 // send upstream. Anything else is silently dropped post-auth.
 var forwardable = map[string]bool{
@@ -289,6 +304,15 @@ type Bouncer struct {
 	// AttachWelcomeReplayDepth; defaults to defaultReplayDepthOnAttach.
 	welcomeReplayMu    sync.RWMutex
 	welcomeReplayDepth int
+
+	// keepalive timings for the server→client PING that holds idle
+	// attachments open and reaps dead ones. Defaults set in NewBouncer;
+	// override (e.g. short intervals in tests) via AttachClientKeepalive.
+	// A non-positive pingInterval disables the keepalive entirely, restoring
+	// the plain block-forever read loop.
+	keepaliveMu  sync.RWMutex
+	pingInterval time.Duration
+	pongGrace    time.Duration
 }
 
 func NewBouncer(password, host string, port int, rl *RateLimiter, log *slog.Logger) (*Bouncer, error) {
@@ -309,7 +333,26 @@ func NewBouncer(password, host string, port int, rl *RateLimiter, log *slog.Logg
 		log:          log,
 		clients:      map[*BouncerClient]struct{}{},
 		upstreamHost: "turborg",
+		pingInterval: defaultClientPingInterval,
+		pongGrace:    defaultClientPongGrace,
 	}, nil
+}
+
+// AttachClientKeepalive overrides the server→client PING interval and the
+// pong grace period. A non-positive interval disables the keepalive (the
+// read loop blocks forever, as it did before keepalive existed). Call
+// before Start; tests use it to drive the loop on millisecond timings.
+func (b *Bouncer) AttachClientKeepalive(interval, grace time.Duration) {
+	b.keepaliveMu.Lock()
+	defer b.keepaliveMu.Unlock()
+	b.pingInterval = interval
+	b.pongGrace = grace
+}
+
+func (b *Bouncer) clientKeepalive() (interval, grace time.Duration) {
+	b.keepaliveMu.RLock()
+	defer b.keepaliveMu.RUnlock()
+	return b.pingInterval, b.pongGrace
 }
 
 // AttachMessageStore wires the bouncer to a shared messages.Store.
@@ -591,15 +634,57 @@ func (b *Bouncer) handleClient(ctx context.Context, client *BouncerClient) {
 			"and reconnect. (HexChat: Network List → Edit → Password.)",
 	)
 
+	// Keepalive: PING the client on an interval so an idle attachment keeps
+	// bytes flowing (no NAT/proxy idle reap) and a dead one is detected. The
+	// read deadline below is the reaper — any inbound line, the client's PONG
+	// included, resets it; pingInterval+pongGrace of total silence ends the
+	// loop. A non-positive interval disables both, keeping the old behaviour.
+	interval, grace := b.clientKeepalive()
+	if interval > 0 {
+		pingCtx, stopPing := context.WithCancel(ctx)
+		defer stopPing()
+		b.wg.Add(1)
+		go b.pingClientLoop(pingCtx, client, interval)
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return
+		}
+		if interval > 0 {
+			// Errors here only mean the conn is already gone; the readLine
+			// below will surface it, so don't special-case the deadline set.
+			_ = client.conn.SetReadDeadline(time.Now().Add(interval + grace))
 		}
 		line, err := client.readLine()
 		if err != nil {
 			return
 		}
 		b.handleLine(client, line)
+	}
+}
+
+// pingClientLoop sends a server PING to one attached client every interval
+// until ctx is cancelled (the client's handleClient returned, or the bouncer
+// is stopping). The PONG it provokes — like any inbound line — resets the
+// read deadline in handleClient, so a live client stays attached while a dead
+// one trips the deadline and gets reaped. A send error means the conn is
+// already broken; the read side will observe it and clean up, so the loop
+// just exits.
+func (b *Bouncer) pingClientLoop(ctx context.Context, client *BouncerClient, interval time.Duration) {
+	defer b.wg.Done()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			token := fmt.Sprintf("tb-%d", time.Now().UnixNano())
+			if err := client.sendLine(CmdPing + " :" + token); err != nil {
+				return
+			}
+		}
 	}
 }
 
@@ -621,6 +706,11 @@ func (b *Bouncer) handleLine(client *BouncerClient, line string) {
 			cookie = msg.Params[0]
 		}
 		_ = client.sendLine(":turborg-bouncer PONG turborg-bouncer :" + cookie)
+		return
+	case CmdPong:
+		// The client's reply to our keepalive PING (pingClientLoop). It has
+		// already done its job — receiving any line reset the read deadline
+		// in handleClient — so just consume it. Never forward upstream.
 		return
 	case CmdCap:
 		// CAP is handled regardless of auth state — it can arrive
