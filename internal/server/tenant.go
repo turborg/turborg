@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"reflect"
 	"runtime/debug"
 	"sync"
@@ -71,6 +72,11 @@ type Tenant struct {
 	quarantineUntil time.Time
 	// runCancel cancels the in-flight work run so update() can restart it.
 	runCancel context.CancelFunc
+	// ircConn is the live IRC connector for the current run, captured in
+	// buildConnectors and cleared when the run ends. The bouncer router reaches
+	// it via ServeBouncerConn to deliver an attached client to this tenant. nil
+	// between runs (quarantined / restarting) → an inbound conn is closed.
+	ircConn *irc.Connector
 }
 
 // startTenant launches a self-supervising tenant under a child of parent.
@@ -215,7 +221,14 @@ func (t *Tenant) defaultWork() func(context.Context) error {
 		a := agent.New(t.log)
 		t.buildConnectors(a)
 		t.log.Info("tenant attached", "connectors", t.connectorTypes())
-		return a.Run(ctx)
+		err := a.Run(ctx)
+		// Run ended (ctx cancelled / restart) — the connector's bouncer is
+		// stopping, so drop the routing handle. A late inbound conn then closes
+		// cleanly instead of hitting a torn-down bouncer.
+		t.mu.Lock()
+		t.ircConn = nil
+		t.mu.Unlock()
+		return err
 	}
 }
 
@@ -242,7 +255,14 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 				t.log.Error("skipping irc connector: invalid plan limits", "err", err)
 				continue
 			}
+			// Pooled runtime: the bouncer must not bind its own port — the pool
+			// router feeds it connections via ServeBouncerConn after PROXY-v2
+			// tenant resolution.
+			conn.SetBouncerListenerless(true)
 			a.AddConnector(conn)
+			t.mu.Lock()
+			t.ircConn = conn
+			t.mu.Unlock()
 		default:
 			t.log.Warn("connector type not supported in pooled mode yet", "type", cs.Type)
 		}
@@ -285,6 +305,22 @@ func (t *Tenant) update(spec TenantSpec) {
 func (t *Tenant) stop() {
 	t.cancel()
 	<-t.done
+}
+
+// ServeBouncerConn delivers one already-accepted client connection to this
+// tenant's live IRC bouncer (the pooled router calls it after resolving the
+// tenant from the PROXY-v2 authority). Closes the connection when the tenant
+// has no running IRC connector (between runs / quarantined / no IRC connector
+// configured); the client reconnects and the router retries.
+func (t *Tenant) ServeBouncerConn(conn net.Conn) {
+	t.mu.Lock()
+	c := t.ircConn
+	t.mu.Unlock()
+	if c == nil {
+		_ = conn.Close()
+		return
+	}
+	c.ServeBouncerConn(conn)
 }
 
 // connectorTypes lists the configured connector types, for logging.

@@ -240,7 +240,12 @@ type Bouncer struct {
 	clients  map[*BouncerClient]struct{}
 	listener net.Listener
 	cancel   context.CancelFunc
-	wg       sync.WaitGroup
+	// runCtx is the cancelable context every client handler runs under,
+	// captured at Start/StartListenerless and cleared at Stop. The listener
+	// path passes it to acceptLoop; the listenerless path hands it to each
+	// ServeConn so injected connections share the same lifecycle.
+	runCtx context.Context
+	wg     sync.WaitGroup
 
 	upstreamMu    sync.RWMutex
 	upstreamNick  string
@@ -517,18 +522,39 @@ func (b *Bouncer) upstreamPrefix() string {
 // listener is ready (so callers can race a client connect against
 // Start). Stop must be called to release resources.
 func (b *Bouncer) Start(ctx context.Context) error {
-	addr := fmt.Sprintf("%s:%d", b.host, b.port)
-	l, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("bouncer listen %s: %w", addr, err)
+	return b.start(ctx, true)
+}
+
+// StartListenerless brings the bouncer up without binding a TCP listener:
+// connections are delivered by the caller via ServeConn instead of an accept
+// loop. This is the pooled-runtime path — one turborg-server process fronts
+// every tenant behind a single SNI/PROXY-v2 router, so per-tenant bouncers
+// must not each bind a port. Dedicated mode still uses Start (own host port).
+// Everything past the listener — auth, replay, state surfacing, keepalive —
+// is identical across both, so the bouncer behaviour is one source of truth.
+func (b *Bouncer) StartListenerless(ctx context.Context) error {
+	return b.start(ctx, false)
+}
+
+func (b *Bouncer) start(ctx context.Context, listen bool) error {
+	var l net.Listener
+	if listen {
+		addr := fmt.Sprintf("%s:%d", b.host, b.port)
+		var err error
+		l, err = net.Listen("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("bouncer listen %s: %w", addr, err)
+		}
 	}
-	b.mu.Lock()
-	b.listener = l
-	machine := b.machine
-	b.mu.Unlock()
 
 	bctx, cancel := context.WithCancel(ctx)
+
+	b.mu.Lock()
+	b.listener = l
 	b.cancel = cancel
+	b.runCtx = bctx
+	machine := b.machine
+	b.mu.Unlock()
 
 	if machine != nil {
 		sub := machine.Subscribe(b.onUpstreamStateChange)
@@ -537,11 +563,39 @@ func (b *Bouncer) Start(ctx context.Context) error {
 		b.mu.Unlock()
 	}
 
-	b.wg.Add(1)
-	go b.acceptLoop(bctx, l)
-
-	b.log.Info("bouncer listening", "host", b.host, "port", b.port)
+	if listen {
+		b.wg.Add(1)
+		go b.acceptLoop(bctx, l)
+		b.log.Info("bouncer listening", "host", b.host, "port", b.port)
+	} else {
+		b.log.Info("bouncer ready (listenerless; served via ServeConn)")
+	}
 	return nil
+}
+
+// ServeConn handles one already-accepted client connection instead of one
+// taken from the bouncer's own listener — the pooled router calls this after
+// reading the PROXY-v2 header and resolving which tenant the connection is
+// for. The bouncer must have been brought up first (Start or
+// StartListenerless). Blocks until the client disconnects, so callers run it
+// per-connection in their own goroutine. A nil run context (never started, or
+// already stopped) closes the connection rather than leaking it.
+func (b *Bouncer) ServeConn(conn net.Conn) {
+	b.mu.Lock()
+	ctx := b.runCtx
+	b.mu.Unlock()
+	if ctx == nil {
+		_ = conn.Close()
+		return
+	}
+
+	client := newBouncerClient(conn, b.log)
+	b.mu.Lock()
+	b.clients[client] = struct{}{}
+	b.mu.Unlock()
+
+	b.wg.Add(1)
+	b.handleClient(ctx, client)
 }
 
 // Stop closes every active client, the listener, and waits for in-flight
@@ -559,6 +613,7 @@ func (b *Bouncer) Stop() error {
 	b.clients = map[*BouncerClient]struct{}{}
 	b.listener = nil
 	b.cancel = nil
+	b.runCtx = nil
 	b.stateSub = nil
 	b.mu.Unlock()
 
