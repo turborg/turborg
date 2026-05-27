@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.3.0](https://github.com/turborg/turborg/compare/v0.2.3...v0.3.0) (2026-05-27)
+
+
+### Features
+
+* **irc:** bouncer pings attached clients to keep idle attachments alive ([#39](https://github.com/turborg/turborg/issues/39)) ([e36d97f](https://github.com/turborg/turborg/commit/e36d97f0d08293c9cddbebb5e0238f33e80ac205))
+* **irc:** reconnect-storm circuit breaker ([#43](https://github.com/turborg/turborg/issues/43)) ([2d4f386](https://github.com/turborg/turborg/commit/2d4f38620241c29a8608eb465302e43ade7830ea))
+* pooled bouncer ingress (M6 — SNI/PROXY-v2 routing) ([#41](https://github.com/turborg/turborg/issues/41)) ([d5b9edc](https://github.com/turborg/turborg/commit/d5b9edcd54d4c2881a49dab01a2b0b7df4b65238))
+* **server,irc:** pooled resource governance — GOMEMLIMIT, watchdog, slow-consumer ([#42](https://github.com/turborg/turborg/issues/42)) ([fa3b52b](https://github.com/turborg/turborg/commit/fa3b52b6ed22905a2ea0a3a0fd9f80f07b44c8bc))
+
 ## [0.2.3](https://github.com/turborg/turborg/compare/v0.2.2...v0.2.3) (2026-05-27)
 
 
