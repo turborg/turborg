@@ -433,7 +433,31 @@ func (c *Connector) SendRaw(line string) error {
 	if cli == nil {
 		return errors.New("irc: not connected")
 	}
+	// WHOIS/WHO sent through SendRaw are WEB-originated (the gateway forwards
+	// client ops here). Register the target so the reply numerics are
+	// accumulated + published as EventWhois/WhoResult for the web UI. Bouncer
+	// clients' queries bypass SendRaw (their own upstream closure, see
+	// AttachUpstream), so they fan out to the IRC client but never pop a web
+	// modal — they're per-client request/response, not shared state.
+	c.registerWebQuery(line)
 	return cli.WriteLine(line)
+}
+
+// registerWebQuery marks a WHOIS/WHO target as web-requested so its reply is
+// surfaced to the web UI. No-op for any other command.
+func (c *Connector) registerWebQuery(line string) {
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return
+	}
+	switch strings.ToUpper(fields[0]) {
+	case CmdWhois:
+		// WHOIS [server] target — the queried nick is the last field.
+		c.markWhoisRequested(fields[len(fields)-1])
+	case CmdWho:
+		// WHO target [flags] — the target/mask is the first arg.
+		c.markWhoRequested(fields[1])
+	}
 }
 
 func (c *Connector) Send(env *agent.OutboundEnvelope) error {
@@ -1682,6 +1706,11 @@ func (c *Connector) handlePrivmsg(ctx context.Context, msg Message, raw string) 
 		if c.settings.CTCPAutoReply && c.ctcp != nil && c.ctcp.Allow(strings.ToLower(sender)) {
 			if reply := ctcpReply(text); reply != "" {
 				_ = c.client.WriteLine(fmt.Sprintf("%s %s :\x01%s\x01", CmdNotice, sender, reply))
+				// Surface our own reply in the web UI. Otherwise the bot
+				// answers silently and the user only sees it from an attached
+				// IRC client (the reply is outbound, so nothing else publishes
+				// it). Mirrors how incoming CTCP notices are shown.
+				c.publishServerNotice(ctx, "notice", fmt.Sprintf("[CTCP] replied to %s: %s", sender, reply))
 			}
 		}
 		return
@@ -1962,10 +1991,26 @@ func (c *Connector) handleWhoisNumeric(ctx context.Context, msg Message) {
 		return
 	}
 	targetNick := msg.Params[1]
-	b := c.whoisBuilderFor(targetNick)
+	b, ok := c.whoisBuilderLookup(targetNick)
+	if !ok {
+		// No web-originated WHOIS for this nick — bouncer-forwarded or
+		// unsolicited. The numerics already fanned out to bouncer clients;
+		// don't pop a web modal.
+		return
+	}
 	if b.nick == "" {
 		b.nick = targetNick
 	}
+	if applyWhoisNumeric(b, msg) {
+		// RPL_ENDOFWHOIS — the response is complete; snapshot + publish.
+		c.publishWhoisResult(ctx, targetNick, b, "")
+	}
+}
+
+// applyWhoisNumeric folds one WHOIS numeric into the builder. Returns true on
+// RPL_ENDOFWHOIS (318), telling the caller to publish + clear. Pure (no IO) —
+// extracted so handleWhoisNumeric stays under the cyclomatic-complexity gate.
+func applyWhoisNumeric(b *whoisBuilder, msg Message) bool {
 	switch msg.Command {
 	case RplWhoisUser:
 		// 311 mynick target user host * :realname
@@ -2008,8 +2053,9 @@ func (c *Connector) handleWhoisNumeric(ctx context.Context, msg Message) {
 	case RplWhoisSecure:
 		b.secure = true
 	case RplEndOfWhois:
-		c.publishWhoisResult(ctx, targetNick, b, "")
+		return true
 	}
+	return false
 }
 
 // handleWhoisNoSuchNick finalises an in-flight whois with an error and
@@ -2025,22 +2071,30 @@ func (c *Connector) handleWhoisNoSuchNick(ctx context.Context, targetNick, reaso
 	c.publishWhoisResult(ctx, targetNick, b, reason)
 }
 
-// whoisBuilderFor returns (creating if needed) the in-flight builder
-// for the target nick. Concurrent /whois calls on different nicks are
-// safely isolated by the map.
-func (c *Connector) whoisBuilderFor(targetNick string) *whoisBuilder {
+// markWhoisRequested registers an in-flight WHOIS for a web-originated query,
+// so handleWhoisNumeric accumulates + publishes its reply. Bouncer-forwarded
+// WHOIS are intentionally NOT registered. Concurrent /whois on different nicks
+// are isolated by the map.
+func (c *Connector) markWhoisRequested(targetNick string) {
 	key := strings.ToLower(targetNick)
 	c.whoisMu.Lock()
 	defer c.whoisMu.Unlock()
 	if c.whoisInFlight == nil {
 		c.whoisInFlight = make(map[string]*whoisBuilder)
 	}
-	b, ok := c.whoisInFlight[key]
-	if !ok {
-		b = &whoisBuilder{}
-		c.whoisInFlight[key] = b
+	if _, ok := c.whoisInFlight[key]; !ok {
+		c.whoisInFlight[key] = &whoisBuilder{}
 	}
-	return b
+}
+
+// whoisBuilderLookup returns the in-flight builder for a target, or (nil,
+// false) when no web-originated WHOIS registered it (so the reply is ignored
+// for web emission).
+func (c *Connector) whoisBuilderLookup(targetNick string) (*whoisBuilder, bool) {
+	c.whoisMu.Lock()
+	defer c.whoisMu.Unlock()
+	b, ok := c.whoisInFlight[strings.ToLower(targetNick)]
+	return b, ok
 }
 
 func (c *Connector) publishWhoisResult(ctx context.Context, targetNick string, b *whoisBuilder, errReason string) {
@@ -2170,7 +2224,11 @@ func (c *Connector) handleWhoNumeric(ctx context.Context, msg Message) {
 				entry.realName = msg.Trailing
 			}
 		}
-		b := c.whoBuilderFor(target)
+		b, ok := c.whoBuilderLookup(target)
+		if !ok {
+			// bouncer-forwarded WHO — no web emission.
+			return
+		}
 		b.users = append(b.users, entry)
 	case RplEndOfWho:
 		// 315 mynick target :End of /WHO list
@@ -2185,7 +2243,8 @@ func (c *Connector) handleWhoNumeric(ctx context.Context, msg Message) {
 		}
 		c.whoMu.Unlock()
 		if !ok {
-			b = &whoBuilder{target: target}
+			// bouncer-forwarded WHO — no web emission.
+			return
 		}
 		users := make([]map[string]any, 0, len(b.users))
 		for _, u := range b.users {
@@ -2215,19 +2274,28 @@ func (c *Connector) handleWhoNumeric(ctx context.Context, msg Message) {
 	}
 }
 
-func (c *Connector) whoBuilderFor(target string) *whoBuilder {
+// markWhoRequested registers an in-flight WHO for a web-originated query. As
+// with WHOIS, bouncer-forwarded WHO are NOT registered, so handleWhoNumeric
+// ignores their replies for web emission.
+func (c *Connector) markWhoRequested(target string) {
 	key := strings.ToLower(target)
 	c.whoMu.Lock()
 	defer c.whoMu.Unlock()
 	if c.whoInFlight == nil {
 		c.whoInFlight = make(map[string]*whoBuilder)
 	}
-	b, ok := c.whoInFlight[key]
-	if !ok {
-		b = &whoBuilder{target: target}
-		c.whoInFlight[key] = b
+	if _, ok := c.whoInFlight[key]; !ok {
+		c.whoInFlight[key] = &whoBuilder{target: target}
 	}
-	return b
+}
+
+// whoBuilderLookup returns the in-flight builder for a target, or (nil, false)
+// when no web-originated WHO registered it.
+func (c *Connector) whoBuilderLookup(target string) (*whoBuilder, bool) {
+	c.whoMu.Lock()
+	defer c.whoMu.Unlock()
+	b, ok := c.whoInFlight[strings.ToLower(target)]
+	return b, ok
 }
 
 func (c *Connector) handleTopic(ctx context.Context, msg Message) {
