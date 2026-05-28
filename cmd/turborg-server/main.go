@@ -109,6 +109,19 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 		})
 	}
 
+	// Pooled web-shell ingress: one HTTP router fronts every tenant's `/ws`
+	// gateway (the sidecar proxy forwards `/c/<turborg_id>` here when the tenant
+	// has no dedicated container). Same fail-fast contract as the bouncer router.
+	// Empty addr disables it (e.g. a file-source self-host with no web shell).
+	if gatewayAddr := os.Getenv("TURBORG_GATEWAY_ROUTER_ADDR"); gatewayAddr != "" {
+		safe.Go("web-gateway-router", func() {
+			if err := srv.ServeWebGatewayRouter(ctx, gatewayAddr); err != nil && !errors.Is(err, context.Canceled) {
+				log.Error("web gateway router stopped", "err", err)
+				cancel()
+			}
+		})
+	}
+
 	// Pool watchdog: periodic heap/goroutine/tenant sampling for observability
 	// and early warning (escalates to Warn above TURBORG_HEAP_WARN_BYTES). 0
 	// interval disables it.
