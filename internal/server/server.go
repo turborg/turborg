@@ -41,6 +41,11 @@ type Server struct {
 	// to each tenant's agent wiring. Nil → !ask is not registered.
 	llmProvider llm.Provider
 
+	// activity coalesces per-tenant activity into a coarse bulk heartbeat to the
+	// control plane so last_active_at refreshes and the idle reaper spares
+	// actively-used pooled tenants. Nil when no control plane is configured.
+	activity *activityAggregator
+
 	mu      sync.Mutex
 	tenants map[string]*Tenant
 }
@@ -63,6 +68,7 @@ func New(source TenantSource, log *slog.Logger) *Server {
 func (s *Server) SetControlPlane(url, token string) {
 	s.controlPlaneURL = url
 	s.controlPlaneToken = token
+	s.activity = newActivityAggregator(url, token, s.log)
 }
 
 // SetLLM installs the shared LLM provider that powers !ask for every tenant.
@@ -76,6 +82,10 @@ func (s *Server) SetLLM(p llm.Provider) {
 // streamed events until ctx is cancelled, at which point it drains all
 // tenants and returns ctx.Err().
 func (s *Server) Run(ctx context.Context) error {
+	// Pooled activity heartbeat flusher (no-op when no control plane). Exits
+	// when ctx is cancelled, alongside the tenants.
+	safe.Go("activity-flush", func() { s.activity.run(ctx) })
+
 	initial, err := s.source.Initial(ctx)
 	if err != nil {
 		return err
@@ -135,7 +145,7 @@ func (s *Server) upsert(ctx context.Context, spec TenantSpec) {
 		existing.update(spec)
 		return
 	}
-	s.tenants[spec.TurborgID] = startTenant(ctx, spec, s.log, s.quarantineBase, s.workFactory, s.controlPlaneURL, s.controlPlaneToken, s.llmProvider)
+	s.tenants[spec.TurborgID] = startTenant(ctx, spec, s.log, s.quarantineBase, s.workFactory, s.controlPlaneURL, s.controlPlaneToken, s.llmProvider, s.activity)
 }
 
 // remove detaches a tenant, draining its goroutine. No-op when absent.

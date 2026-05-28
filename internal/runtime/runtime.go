@@ -93,6 +93,15 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	store, sink := buildMessageStore(s, log)
 	_ = sink // referenced for lifecycle parity; closing happens with the agent
 
+	// Dedicated activity transport: a per-event POST to the local sidecar via
+	// the Notifier. Only wired when configured; the pooled runtime supplies its
+	// own coalescing hook instead (per-event POSTs to the control plane don't
+	// scale across a pool).
+	var activityHook func(string)
+	if notifier.Enabled() {
+		activityHook = notifier.Hook
+	}
+
 	// The connector-agnostic, transport-independent wiring — builtins, owner
 	// guard, throttles, nudge, store submitters. The pooled runtime calls this
 	// same WireCommon from its tenant builder, so the two modes can't drift.
@@ -119,7 +128,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		OwnerDMNudgeEvery:         s.OwnerDMNudgeEvery,
 		BouncerWelcomeReplayDepth: ircCfg.BouncerWelcomeReplayDepth,
 		LLM:                       provider,
-		Activity:                  notifier,
+		ActivityHook:              activityHook,
 		Store:                     store,
 	}, log); err != nil {
 		return nil, err

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/turborg/turborg/internal/activity"
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/llm"
@@ -50,8 +49,12 @@ type CommonParams struct {
 	// pooled tenants (a stateless HTTP client) and per-process for dedicated.
 	LLM llm.Provider
 
-	// Activity notifier. Nil or disabled → activity hooks are not attached.
-	Activity *activity.Notifier
+	// ActivityHook fires on connector activity (bouncer attach, message
+	// traffic). Nil → activity hooks are not attached. Dedicated passes its
+	// Notifier.Hook (a per-event POST to the local sidecar); pooled passes a
+	// hook that marks the tenant active in the pool's coalescing aggregator
+	// (a per-event POST per tenant would hammer the control plane).
+	ActivityHook func(reason string)
 
 	// Store backs bouncer welcome replay + web-shell scrollback + CHATHISTORY.
 	// Nil → no store wiring (no submitters, connector keeps its zero value).
@@ -94,9 +97,9 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 	a.Commands.SetMaxDynamic(p.CustomCommandsMax)
 	ircConn.SetClientLimits(p.Limits)
 
-	if p.Activity != nil && p.Activity.Enabled() {
-		ircConn.SetActivityHook(p.Activity.Hook)
-		ircConn.SetBouncerAttachHook(p.Activity.Hook)
+	if p.ActivityHook != nil {
+		ircConn.SetActivityHook(p.ActivityHook)
+		ircConn.SetBouncerAttachHook(p.ActivityHook)
 	}
 
 	if p.OutboundMaxPerWindow > 0 && p.OutboundWindowSeconds > 0 {
