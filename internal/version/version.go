@@ -10,4 +10,4 @@ package version
 // so the linker can override it with `-X` at build time — `-X` is a
 // no-op on consts. Source-of-truth value here is bumped by release-please
 // on the marker line.
-var Version = "0.5.0" // x-release-please-version
+var Version = "0.6.0" // x-release-please-version
