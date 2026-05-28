@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.8.1](https://github.com/turborg/turborg/compare/v0.8.0...v0.8.1) (2026-05-28)
+
+
+### Bug Fixes
+
+* **irc:** degrade gracefully on a failed initial connect ([#59](https://github.com/turborg/turborg/issues/59)) ([0fdbe7c](https://github.com/turborg/turborg/commit/0fdbe7cb2ec806a757b5483099e1a5a5693fd6f3))
+
 ## [0.8.0](https://github.com/turborg/turborg/compare/v0.7.0...v0.8.0) (2026-05-28)
 
 
