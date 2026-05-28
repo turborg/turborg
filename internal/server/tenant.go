@@ -14,6 +14,9 @@ import (
 
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/connector/irc"
+	"github.com/turborg/turborg/internal/llm"
+	"github.com/turborg/turborg/internal/messages"
+	"github.com/turborg/turborg/internal/runtime"
 	"github.com/turborg/turborg/internal/safe"
 	"github.com/turborg/turborg/internal/statepush"
 	"github.com/turborg/turborg/internal/web"
@@ -96,13 +99,17 @@ type Tenant struct {
 	// <url>/turborgs/<id>/state). Set once at construction.
 	controlPlaneURL   string
 	controlPlaneToken string
+
+	// llmProvider is the shared !ask provider handed down from the Server.
+	// Nil → !ask is not registered for this tenant.
+	llmProvider llm.Provider
 }
 
 // startTenant launches a self-supervising tenant under a child of parent.
 // workFactory builds the body to run (and re-run after a panic) from the
 // constructed Tenant; quarantineBase is the first backoff step (doubled per
 // consecutive failure, capped).
-func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger, quarantineBase time.Duration, workFactory func(*Tenant) func(context.Context) error, controlPlaneURL, controlPlaneToken string) *Tenant {
+func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger, quarantineBase time.Duration, workFactory func(*Tenant) func(context.Context) error, controlPlaneURL, controlPlaneToken string, llmProvider llm.Provider) *Tenant {
 	ctx, cancel := context.WithCancel(parent)
 	t := &Tenant{
 		ID:                spec.TurborgID,
@@ -115,6 +122,7 @@ func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger, quar
 		status:            StatusRunning,
 		controlPlaneURL:   controlPlaneURL,
 		controlPlaneToken: controlPlaneToken,
+		llmProvider:       llmProvider,
 	}
 	t.work = workFactory(t)
 	safe.Go("supervise/"+spec.TurborgID, func() { t.supervise(ctx) })
@@ -239,7 +247,12 @@ func (t *Tenant) Failures() int {
 // each (re)start so a revived tenant gets a fresh agent.
 func (t *Tenant) defaultWork() func(context.Context) error {
 	return func(ctx context.Context) error {
-		a := agent.New(t.log)
+		t.mu.Lock()
+		prefix := t.spec.CommandPrefix
+		t.mu.Unlock()
+		// NewWithPrefix defaults an empty prefix to "!", matching the dedicated
+		// path (where the env default fills it) so free tenants behave the same.
+		a := agent.NewWithPrefix(t.log, prefix)
 		t.buildConnectors(a)
 		t.log.Info("tenant attached", "connectors", t.connectorTypes())
 		err := a.Run(ctx)
@@ -287,15 +300,23 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			// web shell sees the full event stream (not just plain messages,
 			// which arrive via the agent's inbound drain regardless).
 			conn := irc.New(settings, t.log, a.Events)
-			if err := applyPlanLimits(conn, caps); err != nil {
-				t.log.Error("skipping irc connector: invalid plan limits", "err", err)
-				continue
-			}
 			// Pooled runtime: the bouncer must not bind its own port — the pool
 			// router feeds it connections via ServeBouncerConn after PROXY-v2
-			// tenant resolution.
+			// tenant resolution. Set before WireCommon adds the connector.
 			conn.SetBouncerListenerless(true)
-			a.AddConnector(conn)
+
+			// The shared, connector-agnostic wiring — identical to the dedicated
+			// runtime, which calls the same runtime.WireCommon. Gives pooled
+			// tenants builtins (!ping/!version/!ask), the owner command guard,
+			// plan limits + outbound throttle, and message-store submitters, so
+			// the two modes can't drift. Owner-trust config travels in the
+			// connector config (the feed reuses the same connectorList() shape
+			// the dedicated spawn payload does).
+			if err := runtime.WireCommon(a, conn, t.commonParams(cs, caps, settings.Nick), t.log); err != nil {
+				t.log.Error("skipping irc connector: wiring failed", "err", err)
+				continue
+			}
+
 			t.mu.Lock()
 			t.ircConn = conn
 			t.mu.Unlock()
@@ -329,6 +350,46 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 		default:
 			t.log.Warn("connector type not supported in pooled mode yet", "type", cs.Type)
 		}
+	}
+}
+
+// commonParams maps a tenant's IRC connector spec + plan caps onto the
+// runtime.CommonParams the shared agent wiring consumes. Owner-trust fields
+// live in the connector config (the feed reuses the dedicated connectorList()
+// shape); identity limits + the outbound throttle come from the plan caps; the
+// LLM provider is the pool-process-wide shared one.
+//
+// Fields the pooled feed doesn't carry yet — custom-commands cap, per-sender
+// command throttle, owner-DM nudge interval, ignored nicks, and a durable
+// message store — default to their zero values here (builtins-only, no
+// throttle, no nudge, in-process MemoryStore). Phase 3 extends the feed +
+// control plane to fill them, at which point this is the single place to map
+// them through.
+func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick string) runtime.CommonParams {
+	var limits irc.ClientLimits
+	var outMax, outWin int
+	if caps != nil {
+		limits = irc.ClientLimits{
+			NickLocked:     caps.NickLocked,
+			RealnameLocked: caps.RealnameLocked,
+			MaxChannels:    caps.MaxChannels,
+		}
+		outMax, outWin = caps.OutboundMsgsPerWindow, caps.OutboundWindowSeconds
+	}
+	return runtime.CommonParams{
+		Limits: limits,
+		Owner: runtime.GuardParams{
+			OwnerMode:     stringField(cs.Config, "owner_mode"),
+			OwnerNick:     stringField(cs.Config, "owner_nick"),
+			OwnerAccount:  stringField(cs.Config, "owner_account"),
+			OwnerHostmask: stringField(cs.Config, "owner_hostmask"),
+			BotNick:       botNick,
+		},
+		OutboundMaxPerWindow:  outMax,
+		OutboundWindowSeconds: outWin,
+		OwnerNick:             stringField(cs.Config, "owner_nick"),
+		LLM:                   t.llmProvider,
+		Store:                 messages.NewMemoryStore(0),
 	}
 }
 

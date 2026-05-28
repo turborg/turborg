@@ -25,7 +25,6 @@ import (
 	"github.com/turborg/turborg/internal/config"
 	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/llm"
-	"github.com/turborg/turborg/internal/llm/anthropic"
 	"github.com/turborg/turborg/internal/messages"
 	"github.com/turborg/turborg/internal/messagesink"
 	"github.com/turborg/turborg/internal/statepush"
@@ -70,54 +69,16 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	}
 
 	a := agent.NewWithPrefix(log, s.CommandPrefix)
-	a.Commands.SetMaxDynamic(s.CustomCommandsMax)
 
 	notifier := activity.New(s.ActivityURL, s.ActivityToken, log)
-
 	ircConn := irc.New(ircCfg, log, a.Events)
-	ircConn.SetClientLimits(irc.ClientLimits{
-		NickLocked:     s.NickLocked,
-		RealnameLocked: s.RealnameLocked,
-		MaxChannels:    s.MaxChannels,
-	})
-	if notifier.Enabled() {
-		// Bind the notifier into the connector + bouncer. The Hook method
-		// keeps the IRC package free of an activity-package import — it
-		// only sees a func(string).
-		ircConn.SetActivityHook(notifier.Hook)
-		ircConn.SetBouncerAttachHook(notifier.Hook)
-	}
 
-	// Per-target outbound throttle, when configured. Single instance
-	// shared between the bouncer (consults for attached-client PRIVMSG)
-	// and the WS gateway (consults for `say` op) so a user with both
-	// surfaces open shares one bucket per target.
-	if s.OutboundMaxPerWindow > 0 && s.OutboundWindowSeconds > 0 {
-		t, err := irc.NewThrottle(
-			s.OutboundMaxPerWindow,
-			time.Duration(s.OutboundWindowSeconds)*time.Second,
-			nil,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("runtime: outbound throttle: %w", err)
-		}
-		ircConn.SetOutboundThrottle(t)
-	}
-
-	// Owner-DM nudge: when the operator has set both a target owner nick
-	// and a positive interval, the connector DMs the owner every N
-	// outbound PRIVMSGs with a usage summary. Daily counter resets at
-	// UTC midnight inside the nudge itself.
-	if nudge := irc.NewOwnerNudge(s.OwnerNick, s.OwnerDMNudgeEvery); nudge != nil {
-		ircConn.SetOwnerNudge(nudge)
-	}
-
-	// State-webhook emitter. Mirrors authoritative per-connector
-	// state (current connection status + joined channels + preferred
-	// nick) to the configured STATE_WEBHOOK_URL endpoint whenever
-	// that state changes. When STATE_WEBHOOK_URL is unset the
-	// emitter is an inert no-op (no goroutine, no PUTs); the
-	// snapshot builder closure is harmless either way.
+	// State-webhook emitter (transport: PUT to STATE_WEBHOOK_URL, which the
+	// sidecar mirrors to accounts-api). Mirrors authoritative per-connector
+	// state whenever it changes; inert no-op when STATE_WEBHOOK_URL is unset.
+	// Wired before WireCommon so the connector's change hooks are observed from
+	// boot. This is the dedicated transport; the pooled runtime POSTs directly
+	// to the control plane instead.
 	stateClient := statepush.NewClient(s.StateWebhookURL, s.StateWebhookToken, log)
 	stateEmitter := statepush.NewEmitter(
 		stateClient,
@@ -127,25 +88,42 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	)
 	wireStatePushEmitter(ircConn, stateEmitter)
 
-	// Build the shared messages.Store before connectors register
-	// for events, so the IRC connector's bouncer + the gateway both
-	// see the same store. The store also picks up Submit calls from
-	// the EventBus subscriber wired further down.
+	// Shared message store, built before WireCommon so the connector's bouncer
+	// and the gateway see the same instance.
 	store, sink := buildMessageStore(s, log)
-	ircConn.SetMessageStore(store)
-	ircConn.SetBouncerWelcomeReplayDepth(clampReplayDepth(ircCfg.BouncerWelcomeReplayDepth))
-
-	a.AddConnector(ircConn)
-
-	// Single EventBus subscriber feeds the store for every channel
-	// message the agent observes. Filters at submit-time: only
-	// channel-sigil targets count (DMs don't enter replay history).
-	if store != nil {
-		botNick := ircConn.CurrentNick
-		a.Events.Subscribe(agent.EventMessage, makeStoreSubmitter(store, botNick, log))
-		a.Events.Subscribe(agent.EventMessageSent, makeStoreSubmitter(store, botNick, log))
-	}
 	_ = sink // referenced for lifecycle parity; closing happens with the agent
+
+	// The connector-agnostic, transport-independent wiring — builtins, owner
+	// guard, throttles, nudge, store submitters. The pooled runtime calls this
+	// same WireCommon from its tenant builder, so the two modes can't drift.
+	if err := WireCommon(a, ircConn, CommonParams{
+		CustomCommandsMax: s.CustomCommandsMax,
+		Limits: irc.ClientLimits{
+			NickLocked:     s.NickLocked,
+			RealnameLocked: s.RealnameLocked,
+			MaxChannels:    s.MaxChannels,
+		},
+		Owner: GuardParams{
+			OwnerMode:            s.OwnerMode,
+			OwnerNick:            s.OwnerNick,
+			OwnerAccount:         s.OwnerAccount,
+			OwnerHostmask:        s.OwnerHostmask,
+			IgnoredNicks:         s.IgnoredNicks,
+			BotNick:              ircCfg.Nick,
+			CommandMaxPerWindow:  s.CommandMaxPerWindow,
+			CommandWindowSeconds: s.CommandWindowSeconds,
+		},
+		OutboundMaxPerWindow:      s.OutboundMaxPerWindow,
+		OutboundWindowSeconds:     s.OutboundWindowSeconds,
+		OwnerNick:                 s.OwnerNick,
+		OwnerDMNudgeEvery:         s.OwnerDMNudgeEvery,
+		BouncerWelcomeReplayDepth: ircCfg.BouncerWelcomeReplayDepth,
+		LLM:                       provider,
+		Activity:                  notifier,
+		Store:                     store,
+	}, log); err != nil {
+		return nil, err
+	}
 
 	if len(s.Connectors) > 1 {
 		for _, name := range s.Connectors {
@@ -157,9 +135,6 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 			return nil, fmt.Errorf("runtime: connector %q listed in TURBORG_CONNECTORS but not yet implemented in Go", name)
 		}
 	}
-
-	RegisterBuiltinCommands(a, provider)
-	a.Commands.SetGuard(BuildCommandGuard(s, ircCfg))
 
 	built := &Built{
 		Agent:     a,
@@ -205,18 +180,7 @@ func applyOperatorPolicy(s *config.Settings, ircCfg *irc.Settings) error {
 }
 
 func buildLLM(s *config.Settings) (llm.Provider, error) {
-	if !s.AnthropicEnabled() {
-		return nil, nil //nolint:nilnil // explicit "no provider" signal
-	}
-	p, err := anthropic.New(anthropic.Settings{
-		APIKey:            s.AnthropicAPIKey,
-		Model:             s.AnthropicModel,
-		CacheSystemPrompt: true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("runtime: anthropic: %w", err)
-	}
-	return p, nil
+	return NewAnthropicProvider(s.AnthropicAPIKey, s.AnthropicModel)
 }
 
 func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, log *slog.Logger, notifier *activity.Notifier, store messages.Store) (*web.Gateway, error) {
@@ -449,63 +413,20 @@ func collapseWhitespace(s string) string {
 // This matters most precisely when the verification pipeline is
 // degraded — a missing account-tag must not become a free pass.
 func BuildCommandGuard(s *config.Settings, ircCfg *irc.Settings) agent.CommandGuard {
-	mode := strings.ToLower(strings.TrimSpace(s.OwnerMode))
-	if mode == "" {
-		mode = "none"
-	}
-
-	// Pre-normalize the user's ignore set once at guard build. Each
-	// inbound !command check then does an O(1) map lookup instead of
-	// re-lowercasing the whole list per message. Built before
-	// ownerCheck so an ignored sender is denied even when they happen
-	// to also be the configured owner (security stance: explicit
-	// ignore is the strongest signal, and the user opted into it).
-	ignoredSenders := buildIgnoredSet(s.IgnoredNicks)
-
-	ownerNick := strings.ToLower(strings.TrimSpace(s.OwnerNick))
-	// account-tag values are case-insensitive in practice — IRC services
-	// vary on whether they preserve nick case or normalize. Lowercase
-	// both sides so "StephenS" matches whether the server sends
-	// "StephenS" or "stephens".
-	ownerAccount := strings.ToLower(strings.TrimSpace(s.OwnerAccount))
-	if ownerAccount == "" {
-		ownerAccount = strings.ToLower(strings.TrimSpace(s.OwnerNick))
-	}
-	ownerHostmask := strings.ToLower(strings.TrimSpace(s.OwnerHostmask))
-
 	var botNick string
 	if ircCfg != nil {
-		botNick = strings.ToLower(strings.TrimSpace(ircCfg.Nick))
+		botNick = ircCfg.Nick
 	}
-
-	var throttle *irc.Throttle
-	if s.CommandMaxPerWindow > 0 && s.CommandWindowSeconds > 0 {
-		t, err := irc.NewThrottle(
-			s.CommandMaxPerWindow,
-			time.Duration(s.CommandWindowSeconds)*time.Second,
-			nil,
-		)
-		if err == nil {
-			throttle = t
-		}
-	}
-
-	return func(env *agent.InboundEnvelope) bool {
-		// Ignored senders are denied first — cheaper check, strongest
-		// signal (the user explicitly asked us to treat this nick as
-		// non-existent). Mode-based owner checks and throttling never
-		// observe them.
-		if isIgnoredSender(ignoredSenders, env) {
-			return false
-		}
-		if !ownerCheck(env, mode, botNick, ownerNick, ownerAccount, ownerHostmask) {
-			return false
-		}
-		if throttle == nil {
-			return true
-		}
-		return throttle.Allow(throttleScope(env))
-	}
+	return BuildCommandGuardFromParams(GuardParams{
+		OwnerMode:            s.OwnerMode,
+		OwnerNick:            s.OwnerNick,
+		OwnerAccount:         s.OwnerAccount,
+		OwnerHostmask:        s.OwnerHostmask,
+		IgnoredNicks:         s.IgnoredNicks,
+		BotNick:              botNick,
+		CommandMaxPerWindow:  s.CommandMaxPerWindow,
+		CommandWindowSeconds: s.CommandWindowSeconds,
+	})
 }
 
 // buildIgnoredSet normalises the configured ignore list into a fast
