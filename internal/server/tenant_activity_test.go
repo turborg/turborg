@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -19,8 +20,10 @@ type recordedReq struct {
 }
 
 type recordingDoer struct {
-	mu   sync.Mutex
-	reqs []recordedReq
+	mu     sync.Mutex
+	reqs   []recordedReq
+	status int   // 0 → 200
+	err    error // when set, Do returns it (records the attempt first)
 }
 
 func (d *recordingDoer) Do(req *http.Request) (*http.Response, error) {
@@ -31,8 +34,16 @@ func (d *recordingDoer) Do(req *http.Request) (*http.Response, error) {
 		auth: req.Header.Get("Authorization"),
 		body: string(body),
 	})
+	err := d.err
+	status := d.status
 	d.mu.Unlock()
-	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}"))}, nil
+	if err != nil {
+		return nil, err
+	}
+	if status == 0 {
+		status = http.StatusOK
+	}
+	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader("{}"))}, nil
 }
 
 func (d *recordingDoer) count() int {
@@ -103,4 +114,38 @@ func TestActivityAggregatorRunExitsOnCancel(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("run did not exit on context cancellation")
 	}
+}
+
+func TestActivityAggregatorRunFlushesOnTick(t *testing.T) {
+	agg := newActivityAggregator("https://cp.example", "tok", nil)
+	doer := &recordingDoer{}
+	agg.client = doer
+	agg.interval = 5 * time.Millisecond // tick fast so the ticker branch runs
+	agg.Mark("t1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { agg.run(ctx); close(done) }()
+
+	require.Eventually(t, func() bool { return doer.count() >= 1 }, time.Second, 2*time.Millisecond,
+		"the ticker should drive at least one flush")
+	cancel()
+	<-done
+}
+
+func TestActivityAggregatorFlushToleratesClientError(t *testing.T) {
+	agg := newActivityAggregator("https://cp.example", "tok", nil)
+	agg.client = &recordingDoer{err: errors.New("connection refused")}
+	agg.Mark("t1")
+
+	require.NotPanics(t, func() { agg.flush(context.Background()) })
+}
+
+func TestActivityAggregatorFlushToleratesNon2xx(t *testing.T) {
+	agg := newActivityAggregator("https://cp.example", "tok", nil)
+	agg.client = &recordingDoer{status: http.StatusInternalServerError}
+	agg.Mark("t1")
+
+	require.NotPanics(t, func() { agg.flush(context.Background()) })
 }
