@@ -94,6 +94,11 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 	defer cancel()
 
 	srv := server.New(source, log)
+	// Point each tenant's connector-state emitter at the control plane (the same
+	// accounts-api base the HTTP feed uses). Empty on the file-source/OSS path →
+	// state-sync stays off. The receiver authorizes via the host token + host-
+	// owns check, so the control-plane token suffices.
+	srv.SetControlPlane(os.Getenv("TURBORG_CONTROL_PLANE_URL"), os.Getenv("TURBORG_CONTROL_PLANE_TOKEN"))
 
 	// Pooled bouncer ingress: one PROXY-v2 router fronts every tenant (HAProxy
 	// terminates TLS and forwards the SNI as the PROXY authority). Runs

@@ -56,10 +56,11 @@ var retryBackoffs = []time.Duration{1 * time.Second, 2 * time.Second}
 // auth and a small retry policy. Construct one per emitter (or share
 // — Put is safe for concurrent use).
 type Client struct {
-	url   string
-	token string
-	http  HTTPDoer
-	log   *slog.Logger
+	url    string
+	method string
+	token  string
+	http   HTTPDoer
+	log    *slog.Logger
 
 	// authErrLogMu / lastAuthErrLog rate-limit the warning emitted on
 	// 401/403 responses so a misconfigured token doesn't flood the log
@@ -74,14 +75,26 @@ type Client struct {
 // defaultHTTPTimeout per attempt; install an HTTPDoer via
 // SetHTTPClient for tests that want to capture requests.
 func NewClient(url, token string, log *slog.Logger) *Client {
+	return NewClientWithMethod(url, token, http.MethodPut, log)
+}
+
+// NewClientWithMethod is NewClient with an explicit HTTP method. The dedicated
+// path PUTs to the sidecar (which re-POSTs to accounts-api), but the pooled
+// runtime POSTs per-tenant state straight to accounts-api's
+// /v1/internal/turborgs/<id>/state receiver (a POST route), so it needs POST.
+func NewClientWithMethod(url, token, method string, log *slog.Logger) *Client {
 	if log == nil {
 		log = slog.Default()
 	}
+	if method == "" {
+		method = http.MethodPut
+	}
 	return &Client{
-		url:   url,
-		token: token,
-		http:  &http.Client{Timeout: defaultHTTPTimeout},
-		log:   log,
+		url:    url,
+		method: method,
+		token:  token,
+		http:   &http.Client{Timeout: defaultHTTPTimeout},
+		log:    log,
 	}
 }
 
@@ -152,7 +165,7 @@ func (c *Client) Put(ctx context.Context, body any) error {
 func (c *Client) attempt(ctx context.Context, body []byte) (bool, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, defaultHTTPTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPut, c.url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(reqCtx, c.method, c.url, bytes.NewReader(body))
 	if err != nil {
 		// Bad URL or context-level failure — not retryable.
 		return true, fmt.Errorf("statepush: build request: %w", err)
