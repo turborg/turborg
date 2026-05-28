@@ -62,6 +62,41 @@ func TestLoadSettingsDefaults(t *testing.T) {
 	assert.Equal(t, "bye from turborg", s.EffectiveQuitMessage())
 }
 
+func TestApplyDefaultsFillsHandBuiltSettings(t *testing.T) {
+	// A spec-built Settings (only the required + spec fields set) gets the same
+	// operational defaults the env loader applies.
+	s := &irc.Settings{Hostname: "irc.example", Nick: "bot", UseTLS: false}
+	s.ApplyDefaults()
+
+	assert.Equal(t, 6697, s.Port)
+	assert.Equal(t, "turborg agent", s.RealName)
+	assert.True(t, s.CTCPAutoReply, "CTCP auto-reply defaults on")
+	assert.Equal(t, 3, s.CTCPMaxPerWindow)
+	assert.Equal(t, 20*time.Second, s.DialTimeout)
+	assert.Equal(t, 300*time.Second, s.ReadIdleTimeout)
+	assert.Equal(t, 120*time.Second, s.ClientPingInterval)
+	assert.Equal(t, 30*time.Second, s.PongTimeout)
+	assert.Equal(t, 10*time.Minute, s.UpstreamWarnAfter)
+	assert.Equal(t, 200, s.BouncerWelcomeReplayDepth)
+	assert.NoError(t, s.Validate(), "defaulted settings satisfy cross-field validation")
+}
+
+func TestApplyDefaultsPreservesSetValues(t *testing.T) {
+	// Non-zero fields the builder already set are left alone (the bools are the
+	// documented exception — forced on for the spec path).
+	s := &irc.Settings{
+		Hostname: "irc.example", Nick: "bot",
+		Port: 6667, RealName: "custom", DialTimeout: 5 * time.Second,
+		CTCPMaxPerWindow: 9,
+	}
+	s.ApplyDefaults()
+
+	assert.Equal(t, 6667, s.Port)
+	assert.Equal(t, "custom", s.RealName)
+	assert.Equal(t, 5*time.Second, s.DialTimeout)
+	assert.Equal(t, 9, s.CTCPMaxPerWindow)
+}
+
 func TestEffectiveQuitMessageFallsBackWhenEmpty(t *testing.T) {
 	// Tests that build Settings by hand (bypassing LoadSettings + envDefault)
 	// still get a sensible fallback rather than an empty trailing parameter.
