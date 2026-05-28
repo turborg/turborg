@@ -74,6 +74,10 @@ type PlanCapabilities struct {
 	CTCPMaxPerWindow         int `json:"ctcp_max_per_window"`
 	CTCPWindowSeconds        int `json:"ctcp_window_seconds"`
 	BouncerMaxFailedAttempts int `json:"bouncer_max_failed_attempts"`
+	// QuitMessage is the per-tier IRC QUIT brand (e.g. "turborg.com — free,
+	// xshellz.com"), applied to the tenant's connector. Empty → the connector
+	// default. Mirrors the value the sidecar emits for dedicated.
+	QuitMessage string `json:"quit_message"`
 }
 
 // TenantEventKind distinguishes an attach/update from a detach.

@@ -122,12 +122,6 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 		log.Info("llm provider enabled", "model", model)
 	}
 
-	// Host-wide IRC QUIT brand, applied to every tenant. The sidecar sets this
-	// from its SIDECAR_TURBORG_IRC_QUIT_MESSAGE host config (the same value it
-	// injects into dedicated containers). Empty → each connector keeps its
-	// "bye from turborg" default.
-	srv.SetDefaultQuitMessage(os.Getenv("TURBORG_IRC_QUIT_MESSAGE"))
-
 	// Pooled bouncer ingress: one PROXY-v2 router fronts every tenant (HAProxy
 	// terminates TLS and forwards the SNI as the PROXY authority). Runs
 	// alongside the tenant supervisor; a bind failure cancels the process so we
