@@ -42,6 +42,24 @@ func TestSettingsFromConnectorSpec(t *testing.T) {
 	require.Equal(t, "p", s.SASLPassword)
 }
 
+func TestSettingsWiresBouncerPasswordFromSecrets(t *testing.T) {
+	// The spec carries bouncer_password in secrets; settingsFromConnectorSpec
+	// must read it so the (listenerless) bouncer the SNI router feeds is enabled.
+	cs := ircConfig(nil)
+	cs.Secrets = map[string]any{"bouncer_password": "bnc-pass"}
+
+	s, err := settingsFromConnectorSpec(cs)
+	require.NoError(t, err)
+	require.Equal(t, "bnc-pass", s.BouncerPassword)
+	require.True(t, s.BouncerEnabled(), "bouncer enables when the spec carries a password")
+}
+
+func TestSettingsBouncerDisabledWithoutPassword(t *testing.T) {
+	s, err := settingsFromConnectorSpec(ircConfig(nil)) // no bouncer_password secret
+	require.NoError(t, err)
+	require.False(t, s.BouncerEnabled(), "no password → bouncer stays off (upstream-only)")
+}
+
 func TestSettingsRealNameDefaults(t *testing.T) {
 	s, err := settingsFromConnectorSpec(ircConfig(nil))
 	require.NoError(t, err)
