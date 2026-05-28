@@ -29,6 +29,12 @@ type Server struct {
 	// agent run; overridable in tests to inject panics or controllable work.
 	workFactory func(*Tenant) func(context.Context) error
 
+	// controlPlaneURL/Token point each pooled tenant's connector-state emitter
+	// at accounts-api's /v1/internal/turborgs/<id>/state receiver. Empty URL
+	// (the OSS/file-source path) leaves state-sync off — the emitter is inert.
+	controlPlaneURL   string
+	controlPlaneToken string
+
 	mu      sync.Mutex
 	tenants map[string]*Tenant
 }
@@ -42,6 +48,15 @@ func New(source TenantSource, log *slog.Logger) *Server {
 		workFactory:    func(t *Tenant) func(context.Context) error { return t.defaultWork() },
 		tenants:        make(map[string]*Tenant),
 	}
+}
+
+// SetControlPlane configures where pooled tenants POST their connector-state
+// snapshots — accounts-api's internal receiver (TURBORG_CONTROL_PLANE_URL).
+// Call before Run. An empty url leaves state-sync off (each tenant's emitter is
+// inert), matching the OSS/file-source deployment that has no control plane.
+func (s *Server) SetControlPlane(url, token string) {
+	s.controlPlaneURL = url
+	s.controlPlaneToken = token
 }
 
 // Run boots every tenant from the source's initial snapshot, then applies
@@ -107,7 +122,7 @@ func (s *Server) upsert(ctx context.Context, spec TenantSpec) {
 		existing.update(spec)
 		return
 	}
-	s.tenants[spec.TurborgID] = startTenant(ctx, spec, s.log, s.quarantineBase, s.workFactory)
+	s.tenants[spec.TurborgID] = startTenant(ctx, spec, s.log, s.quarantineBase, s.workFactory, s.controlPlaneURL, s.controlPlaneToken)
 }
 
 // remove detaches a tenant, draining its goroutine. No-op when absent.

@@ -15,6 +15,7 @@ import (
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/safe"
+	"github.com/turborg/turborg/internal/statepush"
 	"github.com/turborg/turborg/internal/web"
 )
 
@@ -85,23 +86,35 @@ type Tenant struct {
 	// browser client. nil between runs / when the tenant has no web shell → an
 	// inbound WS request is closed with 404.
 	gateway *web.Gateway
+	// stateEmitter mirrors this tenant's connector state (upstream status,
+	// channels, nick) to the control plane on every transition, so accounts-api
+	// drives appui's connector pill for pooled tenants the same way it does for
+	// dedicated. Inert when no control plane is configured; Stop()ped at run end.
+	stateEmitter *statepush.Emitter
+
+	// controlPlaneURL/Token are where the state emitter POSTs (per tenant:
+	// <url>/turborgs/<id>/state). Set once at construction.
+	controlPlaneURL   string
+	controlPlaneToken string
 }
 
 // startTenant launches a self-supervising tenant under a child of parent.
 // workFactory builds the body to run (and re-run after a panic) from the
 // constructed Tenant; quarantineBase is the first backoff step (doubled per
 // consecutive failure, capped).
-func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger, quarantineBase time.Duration, workFactory func(*Tenant) func(context.Context) error) *Tenant {
+func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger, quarantineBase time.Duration, workFactory func(*Tenant) func(context.Context) error, controlPlaneURL, controlPlaneToken string) *Tenant {
 	ctx, cancel := context.WithCancel(parent)
 	t := &Tenant{
-		ID:             spec.TurborgID,
-		log:            log.With("turborg_id", spec.TurborgID),
-		quarantineBase: quarantineBase,
-		cancel:         cancel,
-		done:           make(chan struct{}),
-		restartCh:      make(chan struct{}, 1),
-		spec:           spec,
-		status:         StatusRunning,
+		ID:                spec.TurborgID,
+		log:               log.With("turborg_id", spec.TurborgID),
+		quarantineBase:    quarantineBase,
+		cancel:            cancel,
+		done:              make(chan struct{}),
+		restartCh:         make(chan struct{}, 1),
+		spec:              spec,
+		status:            StatusRunning,
+		controlPlaneURL:   controlPlaneURL,
+		controlPlaneToken: controlPlaneToken,
 	}
 	t.work = workFactory(t)
 	safe.Go("supervise/"+spec.TurborgID, func() { t.supervise(ctx) })
@@ -230,17 +243,21 @@ func (t *Tenant) defaultWork() func(context.Context) error {
 		t.buildConnectors(a)
 		t.log.Info("tenant attached", "connectors", t.connectorTypes())
 		err := a.Run(ctx)
-		// Run ended (ctx cancelled / restart) — the connector's bouncer and the
-		// web gateway are stopping, so drop both routing handles. A late inbound
-		// conn/WS then closes cleanly instead of hitting a torn-down run.
+		// Run ended (ctx cancelled / restart) — the connector's bouncer, web
+		// gateway, and state emitter are stopping, so drop the handles. A late
+		// inbound conn/WS then closes cleanly instead of hitting a torn-down run,
+		// and the emitter's goroutine is drained (goleak-clean across restarts).
 		t.mu.Lock()
 		gw := t.gateway
+		em := t.stateEmitter
 		t.ircConn = nil
 		t.gateway = nil
+		t.stateEmitter = nil
 		t.mu.Unlock()
 		if gw != nil {
 			gw.Stop()
 		}
+		em.Stop() // safe on nil
 		return err
 	}
 }
@@ -282,6 +299,16 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			t.mu.Lock()
 			t.ircConn = conn
 			t.mu.Unlock()
+
+			// Connector-state sync: mirror upstream status / channels / nick to
+			// the control plane on every transition, so appui's connector pill
+			// works for pooled tenants the same way dedicated does (via the
+			// single-tenant runtime emitter). Inert + nil when no control plane.
+			if em := buildTenantStateEmitter(conn, t.ID, t.controlPlaneURL, t.controlPlaneToken, t.log); em != nil {
+				t.mu.Lock()
+				t.stateEmitter = em
+				t.mu.Unlock()
+			}
 
 			// Web shell: built only when the tenant carries a gateway token (the
 			// plan's `gatewayEnabled` capability is expressed by accounts-api
