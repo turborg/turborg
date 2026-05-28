@@ -544,8 +544,17 @@ func (c *Connector) Start(ctx context.Context) error {
 		}
 	}
 
+	// A RECOVERABLE initial-connect failure (unreachable network, wrong port,
+	// TLS/cert mismatch, plaintext-on-TLS-port) must NOT abort Start: the
+	// bouncer + web shell are already up, and Run's supervisor retries with
+	// backoff. bringUp has set the state machine to the disconnected_* reason,
+	// which surfaces on the connector pill as "disconnected: <reason>,
+	// reconnecting". Only a terminal failure (operator cancel, auth/ban) aborts.
 	if err := c.bringUp(ctx); err != nil {
-		return err
+		if !c.machine.State().IsRecoverable() {
+			return err
+		}
+		c.log.Warn("irc initial connect failed; entering reconnect supervision", "err", err)
 	}
 
 	if c.settings.CTCPMaxPerWindow > 0 && c.settings.CTCPWindowSeconds > 0 {
@@ -611,7 +620,7 @@ func (c *Connector) bringUp(ctx context.Context) error {
 	cli, err := Dial(dctx, c.settings.Hostname, c.settings.Port, c.settings.UseTLS)
 	cancel()
 	if err != nil {
-		c.classifyFallback(err)
+		c.classifyFallback(ctx, err)
 		return err
 	}
 	cli.SetLog(c.log)
@@ -621,13 +630,13 @@ func (c *Connector) bringUp(ctx context.Context) error {
 	if err := c.register(ctx); err != nil {
 		_ = cli.Close()
 		c.setClient(nil)
-		c.classifyFallback(err)
+		c.classifyFallback(ctx, err)
 		return err
 	}
 	if err := c.awaitHandshake(ctx); err != nil {
 		_ = cli.Close()
 		c.setClient(nil)
-		c.classifyFallback(err)
+		c.classifyFallback(ctx, err)
 		return err
 	}
 	c.log.Info("irc handshake complete", "nick", c.settings.Nick)
@@ -646,7 +655,7 @@ func (c *Connector) bringUp(ctx context.Context) error {
 		if err := cli.WriteLine(line); err != nil {
 			_ = cli.Close()
 			c.setClient(nil)
-			c.classifyFallback(err)
+			c.classifyFallback(ctx, err)
 			return fmt.Errorf("irc JOIN %s: %w", w.Name, err)
 		}
 	}
@@ -657,7 +666,7 @@ func (c *Connector) bringUp(ctx context.Context) error {
 		); err != nil {
 			_ = cli.Close()
 			c.setClient(nil)
-			c.classifyFallback(err)
+			c.classifyFallback(ctx, err)
 			return fmt.Errorf("irc NickServ IDENTIFY: %w", err)
 		}
 	}
@@ -690,17 +699,33 @@ func (c *Connector) transitionFromError(err error) {
 	}
 }
 
-// classifyFallback publishes a transport-error-derived state only when
-// no upstream classifier has already moved the machine to a recoverable
-// or terminal state. The SASL / numeric / ERROR-line classifiers run
-// before the wrapping Go error returns up the call stack — their result
-// is more specific than the wrapped error's "broken pipe" or "EOF" and
-// must not be clobbered.
-func (c *Connector) classifyFallback(err error) {
+// classifyFallback publishes a connect-failure-derived state, used by bringUp
+// when a dial / register / handshake step fails. A more specific classifier
+// (SASL / numeric / ERROR-line) may have already moved the machine to a
+// recoverable or terminal state — its result is more precise than the wrapped
+// "broken pipe" / "EOF" and must not be clobbered.
+//
+// Otherwise: operator shutdown (parent ctx cancelled) is the only terminal
+// connect outcome; every other connect-phase failure — dial timeout, conn
+// refused, TLS/cert mismatch, unclassified registration error — is a
+// RECOVERABLE transport problem the supervisor retries. Crucially, our own
+// dial/handshake deadline surfaces as DeadlineExceeded too, so we must NOT
+// route it through transitionFromError's Canceled/DeadlineExceeded → Stopped
+// path (that misclassified an unreachable network as a permanent stop, killing
+// the tenant instead of reconnecting).
+func (c *Connector) classifyFallback(ctx context.Context, err error) {
 	if cur := c.machine.State(); cur.IsRecoverable() || cur.IsTerminal() {
 		return
 	}
-	c.transitionFromError(err)
+	if ctx.Err() != nil {
+		c.machine.Transition(UpstreamStateStopped)
+		return
+	}
+	if state, ok := ClassifyError(err); ok && state != UpstreamStateStopped {
+		c.machine.Transition(state, WithServerReason(err.Error()))
+		return
+	}
+	c.machine.Transition(UpstreamStateDisconnectedTransient, WithServerReason(err.Error()))
 }
 
 func (c *Connector) startBouncer(ctx context.Context) error {
@@ -1038,7 +1063,12 @@ func (c *Connector) readLineRespectingCtx(ctx context.Context) (string, error) {
 //     (auth_failed / banned / paused_idle) — agent.Run treats that as
 //     fatal and unwinds the rest of the connectors via Stop.
 func (c *Connector) Run(ctx context.Context) error {
-	if c.getClient() == nil {
+	// A nil client with the machine still in its initial Idle state means Run
+	// was called before Start ever attempted a connect — a programming error.
+	// A nil client in any other state means Start ran but the initial connect
+	// failed recoverably (see Start); the supervisor loop below retries it, so
+	// we must NOT bail here.
+	if c.getClient() == nil && c.machine.State() == UpstreamStateIdle {
 		return errors.New("irc: Run before Start")
 	}
 

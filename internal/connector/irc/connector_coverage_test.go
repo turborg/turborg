@@ -101,20 +101,22 @@ func TestSupervisorWithEscalationDisabledReturnsClosedDoneImmediately(t *testing
 	}
 }
 
-// TestBringUpFailsBeforeStartReturnsError exercises the Start →
-// bringUp fail-fast path against a non-listening port.
-func TestBringUpFailsBeforeStartReturnsError(t *testing.T) {
+// TestStartDegradesGracefullyOnRecoverableConnectFailure: a recoverable
+// initial-connect failure (here, connection refused) must NOT abort Start —
+// the connector stays up in disconnected_transient so Run's supervisor retries,
+// keeping the bouncer / web shell alive instead of crashing the tenant.
+func TestStartDegradesGracefullyOnRecoverableConnectFailure(t *testing.T) {
 	conn := irc.New(&irc.Settings{
 		Hostname:         "127.0.0.1",
-		Port:             1, // privileged port — connection refused for non-root
+		Port:             1, // non-listening — connection refused (recoverable)
 		Nick:             "turborg",
 		HandshakeTimeout: 200 * time.Millisecond,
 	}, nil, nil)
 
 	err := conn.Start(context.Background())
-	require.Error(t, err, "Start must surface the dial failure")
+	require.NoError(t, err, "a recoverable connect failure must not abort Start")
 	assert.Equal(t, irc.UpstreamStateDisconnectedTransient, conn.UpstreamState().State(),
-		"failed initial Dial must publish disconnected_transient")
+		"failed initial Dial must publish disconnected_transient for the supervisor to retry")
 }
 
 // TestSendReturnsErrorWhenWriteLineFails covers Send's write-error

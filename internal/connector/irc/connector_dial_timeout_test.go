@@ -45,7 +45,10 @@ func TestBringUpDialTimeoutDoesNotHang(t *testing.T) {
 	err = conn.Start(context.Background())
 	elapsed := time.Since(start)
 
-	require.Error(t, err, "a stalled TLS dial must error, not hang")
+	require.NoError(t, err,
+		"a stalled TLS dial degrades gracefully (recoverable) — it must not crash the connector")
 	require.Less(t, elapsed, 3*time.Second,
 		"dial must abort at the ~200ms deadline, not block indefinitely (took %s)", elapsed)
+	require.Equal(t, irc.UpstreamStateDisconnectedTransient, conn.UpstreamState().State(),
+		"a dial timeout is a recoverable transient state for the supervisor to retry, not a terminal stop")
 }
