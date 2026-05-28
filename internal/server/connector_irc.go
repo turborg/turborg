@@ -13,9 +13,11 @@ import (
 // Pure — no IO. The single-tenant binary derives the same struct from env via
 // irc.LoadSettings; this is the pooled-mode equivalent sourced from a spec.
 //
-// The per-tenant bouncer is intentionally NOT wired here: N tenants in one
-// process can't each bind a host bouncer port. Pooled bouncer attach is the
-// SNI-router milestone (M6); until then pooled tenants run upstream-only.
+// The bouncer is wired listenerless: it never binds a host port (N tenants in
+// one process can't), and the pool's PROXY-v2 SNI router (M6) feeds it accepted
+// connections via ServeBouncerConn. BouncerPassword (from the spec secrets) is
+// what ENABLES the bouncer — without it the connector runs upstream-only and a
+// routed client connection is closed.
 func settingsFromConnectorSpec(cs ConnectorSpec) (*irc.Settings, error) {
 	host, port, err := splitNetwork(stringField(cs.Config, "network"))
 	if err != nil {
@@ -40,6 +42,8 @@ func settingsFromConnectorSpec(cs ConnectorSpec) (*irc.Settings, error) {
 		SASLPassword:     stringField(cs.Secrets, "sasl_password"),
 		NickServPassword: stringField(cs.Secrets, "nickserv_password"),
 		ServerPassword:   stringField(cs.Secrets, "server_password"),
+		// Enables the (listenerless) bouncer the pool's SNI router feeds.
+		BouncerPassword: stringField(cs.Secrets, "bouncer_password"),
 	}
 
 	// Apply the same operational defaults the env loader gives the dedicated
