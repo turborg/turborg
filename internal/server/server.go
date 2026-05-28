@@ -46,6 +46,13 @@ type Server struct {
 	// actively-used pooled tenants. Nil when no control plane is configured.
 	activity *activityAggregator
 
+	// defaultQuitMessage is the host-wide IRC QUIT brand (from the pool process's
+	// TURBORG_IRC_QUIT_MESSAGE env, set by the sidecar from its host config),
+	// applied to every tenant. Empty → the connector's "bye from turborg"
+	// default. Host-wide, not per-tenant — mirrors the dedicated path, where the
+	// sidecar injects the same env into each container.
+	defaultQuitMessage string
+
 	mu      sync.Mutex
 	tenants map[string]*Tenant
 }
@@ -76,6 +83,13 @@ func (s *Server) SetControlPlane(url, token string) {
 // never fails for lack of a provider.
 func (s *Server) SetLLM(p llm.Provider) {
 	s.llmProvider = p
+}
+
+// SetDefaultQuitMessage sets the host-wide IRC QUIT brand applied to every
+// tenant. Call before Run. Empty (the default) leaves each connector on its
+// built-in "bye from turborg".
+func (s *Server) SetDefaultQuitMessage(msg string) {
+	s.defaultQuitMessage = msg
 }
 
 // Run boots every tenant from the source's initial snapshot, then applies
@@ -145,7 +159,7 @@ func (s *Server) upsert(ctx context.Context, spec TenantSpec) {
 		existing.update(spec)
 		return
 	}
-	s.tenants[spec.TurborgID] = startTenant(ctx, spec, s.log, s.quarantineBase, s.workFactory, s.controlPlaneURL, s.controlPlaneToken, s.llmProvider, s.activity)
+	s.tenants[spec.TurborgID] = startTenant(ctx, spec, s.log, s.quarantineBase, s.workFactory, s.controlPlaneURL, s.controlPlaneToken, s.llmProvider, s.activity, s.defaultQuitMessage)
 }
 
 // remove detaches a tenant, draining its goroutine. No-op when absent.

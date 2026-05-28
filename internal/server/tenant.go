@@ -110,6 +110,10 @@ type Tenant struct {
 	// (bouncer attach, message traffic). Nil when no control plane is set.
 	activity *activityAggregator
 
+	// quitMessage is the host-wide IRC QUIT brand applied to this tenant's
+	// connector (empty → the connector default). Host-wide, from the pool env.
+	quitMessage string
+
 	// messageSink is the durable-message writer for the current run, owning a
 	// background flush goroutine. Captured so defaultWork can Close it on run
 	// end (goleak-clean across restarts). nil between runs / no control plane.
@@ -120,7 +124,7 @@ type Tenant struct {
 // workFactory builds the body to run (and re-run after a panic) from the
 // constructed Tenant; quarantineBase is the first backoff step (doubled per
 // consecutive failure, capped).
-func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger, quarantineBase time.Duration, workFactory func(*Tenant) func(context.Context) error, controlPlaneURL, controlPlaneToken string, llmProvider llm.Provider, activity *activityAggregator) *Tenant {
+func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger, quarantineBase time.Duration, workFactory func(*Tenant) func(context.Context) error, controlPlaneURL, controlPlaneToken string, llmProvider llm.Provider, activity *activityAggregator, quitMessage string) *Tenant {
 	ctx, cancel := context.WithCancel(parent)
 	t := &Tenant{
 		ID:                spec.TurborgID,
@@ -135,6 +139,7 @@ func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger, quar
 		controlPlaneToken: controlPlaneToken,
 		llmProvider:       llmProvider,
 		activity:          activity,
+		quitMessage:       quitMessage,
 	}
 	t.work = workFactory(t)
 	safe.Go("supervise/"+spec.TurborgID, func() { t.supervise(ctx) })
@@ -316,6 +321,10 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 				t.log.Error("skipping invalid irc connector", "err", err)
 				continue
 			}
+			// Override the connector's ApplyDefaults with the host/tier values
+			// dedicated gets from the sidecar env (QUIT brand + CTCP / bouncer
+			// auth-failure tightening) — sourced from the pool env + the feed.
+			t.applyHostAndTierSettings(settings, caps)
 			// Wire the connector to the tenant-owned agent bus: the bouncer's
 			// outbound observer and the connector's join/part/topic/state events
 			// publish here, and the web gateway subscribes to the same bus so the
@@ -382,6 +391,29 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 		default:
 			t.log.Warn("connector type not supported in pooled mode yet", "type", cs.Type)
 		}
+	}
+}
+
+// applyHostAndTierSettings overrides the connector defaults ApplyDefaults filled
+// with the host/tier values dedicated receives from the sidecar env: the
+// host-wide IRC QUIT brand (from the pool process) and the per-tier CTCP +
+// bouncer auth-failure ceilings (from the tenant feed's plan caps). Each guard
+// keeps an unset value on the ApplyDefaults default rather than zeroing it.
+func (t *Tenant) applyHostAndTierSettings(s *irc.Settings, caps *PlanCapabilities) {
+	if t.quitMessage != "" {
+		s.QuitMessage = t.quitMessage
+	}
+	if caps == nil {
+		return
+	}
+	if caps.CTCPMaxPerWindow > 0 {
+		s.CTCPMaxPerWindow = caps.CTCPMaxPerWindow
+	}
+	if caps.CTCPWindowSeconds > 0 {
+		s.CTCPWindowSeconds = caps.CTCPWindowSeconds
+	}
+	if caps.BouncerMaxFailedAttempts > 0 {
+		s.BouncerMaxFailedAttempts = caps.BouncerMaxFailedAttempts
 	}
 }
 

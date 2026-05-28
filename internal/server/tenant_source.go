@@ -68,6 +68,12 @@ type PlanCapabilities struct {
 	// per 30s). 0 = unthrottled by convention.
 	CommandMaxPerWindow  int `json:"command_max_per_window"`
 	CommandWindowSeconds int `json:"command_window_seconds"`
+	// CTCPMaxPerWindow/WindowSeconds: per-sender CTCP throttle (free=2/30).
+	// BouncerMaxFailedAttempts: bouncer auth-failure ceiling (free=3). All
+	// 0 = fall back to the connector's ApplyDefaults values.
+	CTCPMaxPerWindow         int `json:"ctcp_max_per_window"`
+	CTCPWindowSeconds        int `json:"ctcp_window_seconds"`
+	BouncerMaxFailedAttempts int `json:"bouncer_max_failed_attempts"`
 }
 
 // TenantEventKind distinguishes an attach/update from a detach.
