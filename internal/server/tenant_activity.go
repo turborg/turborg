@@ -3,9 +3,9 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,10 +36,11 @@ type httpDoer interface {
 // reaper would kill an actively-used free tenant. Inert (Mark is a no-op, run
 // returns immediately) when no control plane is configured.
 type activityAggregator struct {
-	url    string
-	token  string
-	client httpDoer
-	log    *slog.Logger
+	url      string
+	token    string
+	client   httpDoer
+	interval time.Duration
+	log      *slog.Logger
 
 	mu     sync.Mutex
 	active map[string]struct{}
@@ -56,11 +57,12 @@ func newActivityAggregator(controlPlaneURL, token string, log *slog.Logger) *act
 		log = slog.Default()
 	}
 	return &activityAggregator{
-		url:    strings.TrimRight(controlPlaneURL, "/") + "/turborgs/activity",
-		token:  token,
-		client: &http.Client{Timeout: activityHTTPTimeout},
-		log:    log,
-		active: map[string]struct{}{},
+		url:      strings.TrimRight(controlPlaneURL, "/") + "/turborgs/activity",
+		token:    token,
+		client:   &http.Client{Timeout: activityHTTPTimeout},
+		interval: activityFlushInterval,
+		log:      log,
+		active:   map[string]struct{}{},
 	}
 }
 
@@ -84,7 +86,7 @@ func (a *activityAggregator) run(ctx context.Context) {
 	if a == nil {
 		return
 	}
-	ticker := time.NewTicker(activityFlushInterval)
+	ticker := time.NewTicker(a.interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -116,11 +118,16 @@ func (a *activityAggregator) flush(ctx context.Context) {
 	if len(ids) == 0 {
 		return
 	}
-	body, err := json.Marshal(map[string][]string{"turborg_ids": ids})
-	if err != nil {
-		a.log.Debug("activity marshal", "err", err)
-		return
+	// Build the fixed-shape body directly (mirrors activity.Notifier.fire):
+	// marshaling {"turborg_ids":[...]} can't fail, so skipping json.Marshal
+	// removes an unreachable error branch. IDs are control-plane UUIDs but
+	// quoted defensively.
+	quoted := make([]string, len(ids))
+	for i, id := range ids {
+		quoted[i] = strconv.Quote(id)
 	}
+	body := []byte(`{"turborg_ids":[` + strings.Join(quoted, ",") + `]}`)
+
 	reqCtx, cancel := context.WithTimeout(ctx, activityHTTPTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, a.url, bytes.NewReader(body))
