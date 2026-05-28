@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.5.0](https://github.com/turborg/turborg/compare/v0.4.0...v0.5.0) (2026-05-28)
+
+
+### Features
+
+* **server:** pooled connector state-sync ([#48](https://github.com/turborg/turborg/issues/48)) ([d4744ee](https://github.com/turborg/turborg/commit/d4744eecccc256b226633cb1fd699b5abaf0d66c))
+
 ## [0.4.0](https://github.com/turborg/turborg/compare/v0.3.1...v0.4.0) (2026-05-28)
 
 
