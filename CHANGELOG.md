@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.8.0](https://github.com/turborg/turborg/compare/v0.7.0...v0.8.0) (2026-05-28)
+
+
+### Features
+
+* **server:** apply host QUIT brand + per-tier CTCP/bouncer caps to pooled ([#57](https://github.com/turborg/turborg/issues/57)) ([3f47844](https://github.com/turborg/turborg/commit/3f47844fbfa5edb54ac4ee29cebba7ed798d3daa))
+
 ## [0.7.0](https://github.com/turborg/turborg/compare/v0.6.0...v0.7.0) (2026-05-28)
 
 
