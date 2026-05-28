@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.4.0](https://github.com/turborg/turborg/compare/v0.3.1...v0.4.0) (2026-05-28)
+
+
+### Features
+
+* **server:** pooled web shell gateway + router ([#46](https://github.com/turborg/turborg/issues/46)) ([12f07f3](https://github.com/turborg/turborg/commit/12f07f3ea7862a1107946b170d011f64fd46471c))
+
 ## [0.3.1](https://github.com/turborg/turborg/compare/v0.3.0...v0.3.1) (2026-05-27)
 
 
