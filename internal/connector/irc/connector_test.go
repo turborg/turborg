@@ -423,8 +423,10 @@ func TestConnectorIgnoresUnknownNickInUse433DuringHandshake(t *testing.T) {
 	}, nil, nil)
 
 	err = c.Start(context.Background())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already in use")
+	require.NoError(t, err,
+		"a 433 nick-in-use is recoverable — Start degrades gracefully so the supervisor can retry")
+	assert.True(t, c.UpstreamState().State().IsRecoverable(),
+		"433 during registration must leave the connector in a recoverable state, not crash it")
 }
 
 func TestConnectorClientLimitsAccessors(t *testing.T) {

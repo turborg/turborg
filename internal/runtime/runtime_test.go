@@ -451,24 +451,23 @@ func TestRunStandaloneReturnsOnCtxCancel(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- runtime.Run(ctx, b) }()
 
-	// IRC connect to "fake:6697" will fail fast → Run returns.
-	select {
-	case err := <-done:
-		// Whatever the error, Run should have unwound; either the dial
-		// failed or the ctx cancellation fired.
-		_ = err
-	case <-time.After(3 * time.Second):
-		cancel()
-		t.Fatal("Run did not return within timeout")
-	}
+	// "fake:6697" never resolves; with graceful degradation the connector
+	// enters its reconnect loop rather than crashing, so Run unwinds on ctx
+	// cancel — which is what this asserts.
 	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
 }
 
-func TestRunWithGatewayUnwindsOnAgentStartFailure(t *testing.T) {
-	// Gateway is enabled; the IRC connector points at a port that is
-	// closed so Agent.Run fails fast. Run() must cancel the shared ctx
-	// so gateway.Serve also returns, and Wait must surface the agent
-	// error.
+func TestRunWithGatewayUnwindsWhileConnectorRetries(t *testing.T) {
+	// Gateway is enabled; the IRC connector points at a closed port, so it
+	// degrades into its reconnect loop (graceful — no longer a hard Start
+	// failure). Cancelling the ctx must still unwind BOTH halves of the
+	// mutually-stopping pair: agent.Run (connector retry loop) and
+	// gateway.Serve both return.
 	s := &config.Settings{
 		CommandPrefix:               "!",
 		GatewayPassword:             "p",
@@ -490,17 +489,14 @@ func TestRunWithGatewayUnwindsOnAgentStartFailure(t *testing.T) {
 	require.NotNil(t, b.Gateway)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- runtime.Run(ctx, b) }()
 
+	cancel()
 	select {
 	case <-done:
-		// Either the agent's Dial-refused error surfaced, or the
-		// gateway listener race won — both unwound the pair, which is
-		// what we're testing.
 	case <-time.After(3 * time.Second):
-		t.Fatal("Run did not return within timeout when IRC start failed")
+		t.Fatal("Run did not unwind the gateway/agent pair on ctx cancel")
 	}
 }
 
@@ -650,14 +646,14 @@ func TestRunWithGatewayUnwindsOnCtxCancel(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- runtime.Run(ctx, b) }()
 
-	// IRC start fails fast against the fake hostname; Run unwinds.
+	// The fake hostname never connects; the connector retries (graceful), so
+	// Run unwinds on ctx cancel — the gateway half stops with it.
+	cancel()
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
-		cancel()
-		t.Fatal("Run did not return within timeout")
+		t.Fatal("Run did not return after ctx cancel")
 	}
-	cancel()
 }
 
 func TestBuildRejectsHostnameOutsideAllowedNetworks(t *testing.T) {
