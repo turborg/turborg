@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.6.0](https://github.com/turborg/turborg/compare/v0.5.0...v0.6.0) (2026-05-28)
+
+
+### Features
+
+* **irc:** Settings.ApplyDefaults — shared defaults for hand-built settings ([#50](https://github.com/turborg/turborg/issues/50)) ([88f4443](https://github.com/turborg/turborg/commit/88f4443662c43ec4c28fe066400bf77c56150455))
+
 ## [0.5.0](https://github.com/turborg/turborg/compare/v0.4.0...v0.5.0) (2026-05-28)
 
 
