@@ -139,6 +139,52 @@ func parseChannelList(raw string) []string {
 	return out
 }
 
+// ApplyDefaults fills the operational fields a HAND-BUILT Settings leaves at
+// their zero value with the same defaults the env loader applies — so a Settings
+// built from a spec (the pooled runtime's settingsFromConnectorSpec) behaves
+// identically to the env-loaded dedicated path (CTCP auto-reply on, liveness
+// probing, reconnect escalation, …). The values mirror the `envDefault` tags
+// above; this is the single place the hand-built path picks them up.
+//
+// It must NOT be called on an env-loaded Settings: the true-default bools below
+// are forced on, which would clobber an operator's explicit `CTCP_AUTO_REPLY=false`
+// (the env layer preserves that; a fill-zero defaulter can't tell "unset" from
+// "explicit false"). The connector spec doesn't express these fields, so forcing
+// the defaults is correct for the hand-built path.
+func (s *Settings) ApplyDefaults() {
+	setIfZero(&s.Port, 6697)
+	setIfZero(&s.RealName, "turborg agent")
+	setIfZero(&s.QuitMessage, "bye from turborg")
+	setIfZero(&s.DialTimeout, 20*time.Second)
+	setIfZero(&s.HandshakeTimeout, 30*time.Second)
+	setIfZero(&s.ReadIdleTimeout, 300*time.Second)
+	setIfZero(&s.ClientPingInterval, 120*time.Second)
+	setIfZero(&s.PongTimeout, 30*time.Second)
+	setIfZero(&s.UpstreamWarnAfter, 10*time.Minute)
+	setIfZero(&s.UpstreamPauseAfter, time.Hour)
+	setIfZero(&s.CTCPMaxPerWindow, 3)
+	setIfZero(&s.CTCPWindowSeconds, 30)
+	setIfZero(&s.BouncerHost, "127.0.0.1")
+	setIfZero(&s.BouncerPort, 31337)
+	setIfZero(&s.BouncerMaxFailedAttempts, 5)
+	setIfZero(&s.BouncerFailureWindowSeconds, 60)
+	setIfZero(&s.BouncerLockoutSeconds, 300)
+	setIfZero(&s.BouncerWelcomeReplayDepth, 200)
+	// true-default bools: a hand-built (spec) Settings leaves these false and the
+	// spec doesn't carry them, so default them on to match env.
+	s.CTCPAutoReply = true
+	s.BouncerRatelimitEnabled = true
+}
+
+// setIfZero assigns def to *p only when *p is the zero value. Lets ApplyDefaults
+// read as a flat default table instead of N if-blocks.
+func setIfZero[T comparable](p *T, def T) {
+	var zero T
+	if *p == zero {
+		*p = def
+	}
+}
+
 // NormalizedChannels returns Channels with a '#' prefix added where the
 // caller omitted one. Channels already starting with #/&/+/! are passed
 // through unchanged.

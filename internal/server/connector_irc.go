@@ -42,6 +42,11 @@ func settingsFromConnectorSpec(cs ConnectorSpec) (*irc.Settings, error) {
 		ServerPassword:   stringField(cs.Secrets, "server_password"),
 	}
 
+	// Apply the same operational defaults the env loader gives the dedicated
+	// path, so pooled tenants get CTCP auto-reply, liveness probing, reconnect
+	// escalation, etc. — not the Go zero values a spec-built struct starts with.
+	s.ApplyDefaults()
+
 	if err := s.Validate(); err != nil {
 		return nil, fmt.Errorf("irc settings: %w", err)
 	}
