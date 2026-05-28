@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/safe"
 )
 
@@ -35,6 +36,11 @@ type Server struct {
 	controlPlaneURL   string
 	controlPlaneToken string
 
+	// llmProvider powers the !ask builtin for every pooled tenant. One shared
+	// stateless provider (built once from the pool process's own env), handed
+	// to each tenant's agent wiring. Nil → !ask is not registered.
+	llmProvider llm.Provider
+
 	mu      sync.Mutex
 	tenants map[string]*Tenant
 }
@@ -57,6 +63,13 @@ func New(source TenantSource, log *slog.Logger) *Server {
 func (s *Server) SetControlPlane(url, token string) {
 	s.controlPlaneURL = url
 	s.controlPlaneToken = token
+}
+
+// SetLLM installs the shared LLM provider that powers !ask for every tenant.
+// Call before Run. Nil (the default) leaves !ask unregistered — the agent
+// never fails for lack of a provider.
+func (s *Server) SetLLM(p llm.Provider) {
+	s.llmProvider = p
 }
 
 // Run boots every tenant from the source's initial snapshot, then applies
@@ -122,7 +135,7 @@ func (s *Server) upsert(ctx context.Context, spec TenantSpec) {
 		existing.update(spec)
 		return
 	}
-	s.tenants[spec.TurborgID] = startTenant(ctx, spec, s.log, s.quarantineBase, s.workFactory, s.controlPlaneURL, s.controlPlaneToken)
+	s.tenants[spec.TurborgID] = startTenant(ctx, spec, s.log, s.quarantineBase, s.workFactory, s.controlPlaneURL, s.controlPlaneToken, s.llmProvider)
 }
 
 // remove detaches a tenant, draining its goroutine. No-op when absent.

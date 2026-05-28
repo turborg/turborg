@@ -22,10 +22,16 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 	"github.com/turborg/turborg/internal/logging"
+	"github.com/turborg/turborg/internal/runtime"
 	"github.com/turborg/turborg/internal/safe"
 	"github.com/turborg/turborg/internal/server"
 	"github.com/turborg/turborg/internal/version"
 )
+
+// defaultAnthropicModel mirrors config.Settings' ANTHROPIC_MODEL envDefault so
+// the pooled process picks the same model the dedicated runtime does when the
+// operator doesn't override it.
+const defaultAnthropicModel = "claude-sonnet-4-6"
 
 const defaultTenantsFile = "/etc/turborg/tenants.json"
 
@@ -99,6 +105,22 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 	// state-sync stays off. The receiver authorizes via the host token + host-
 	// owns check, so the control-plane token suffices.
 	srv.SetControlPlane(os.Getenv("TURBORG_CONTROL_PLANE_URL"), os.Getenv("TURBORG_CONTROL_PLANE_TOKEN"))
+
+	// Shared LLM provider for !ask, built once from the pool process's own env
+	// (one Anthropic key per host, shared across all tenants — a stateless HTTP
+	// client). Absent key → provider nil → !ask simply isn't registered. A build
+	// error is logged but never fatal: the agent must still serve.
+	model := os.Getenv("TURBORG_ANTHROPIC_MODEL")
+	if model == "" {
+		model = defaultAnthropicModel
+	}
+	switch provider, err := runtime.NewAnthropicProvider(os.Getenv("TURBORG_ANTHROPIC_API_KEY"), model); {
+	case err != nil:
+		log.Error("llm provider disabled", "err", err)
+	case provider != nil:
+		srv.SetLLM(provider)
+		log.Info("llm provider enabled", "model", model)
+	}
 
 	// Pooled bouncer ingress: one PROXY-v2 router fronts every tenant (HAProxy
 	// terminates TLS and forwards the SNI as the PROXY authority). Runs
