@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/turborg/turborg/internal/agent"
+	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/messages"
 )
 
@@ -123,6 +124,42 @@ func TestCommonParamsMapsCapsAndOwner(t *testing.T) {
 
 	require.Equal(t, store, p.Store, "the store is threaded straight through")
 	require.Nil(t, p.ActivityHook, "no aggregator on a directly-built tenant → no activity hook")
+}
+
+// TestApplyTierSettings: the per-tier QUIT brand + CTCP / bouncer-failed caps
+// (all from the tenant feed) override the connector's ApplyDefaults — closing
+// the last drifts where pooled fell back to defaults dedicated overrode from
+// the sidecar env.
+func TestApplyTierSettings(t *testing.T) {
+	tn := &Tenant{}
+	s := &irc.Settings{Hostname: "irc.example", Nick: "bot"}
+	s.ApplyDefaults() // quit "bye from turborg", CTCP 3/30, bouncer-failed 5
+
+	tn.applyTierSettings(s, &PlanCapabilities{
+		QuitMessage:              "turborg.com — free, xshellz.com",
+		CTCPMaxPerWindow:         2,
+		CTCPWindowSeconds:        30,
+		BouncerMaxFailedAttempts: 3,
+	})
+
+	require.Equal(t, "turborg.com — free, xshellz.com", s.QuitMessage)
+	require.Equal(t, 2, s.CTCPMaxPerWindow)
+	require.Equal(t, 30, s.CTCPWindowSeconds)
+	require.Equal(t, 3, s.BouncerMaxFailedAttempts)
+}
+
+// TestApplyTierSettingsKeepsDefaults: with nil caps (OSS/file-source), the
+// connector keeps its ApplyDefaults values untouched.
+func TestApplyTierSettingsKeepsDefaults(t *testing.T) {
+	tn := &Tenant{}
+	s := &irc.Settings{Hostname: "irc.example", Nick: "bot"}
+	s.ApplyDefaults()
+
+	tn.applyTierSettings(s, nil)
+
+	require.Equal(t, "bye from turborg", s.QuitMessage)
+	require.Equal(t, 3, s.CTCPMaxPerWindow)
+	require.Equal(t, 5, s.BouncerMaxFailedAttempts)
 }
 
 // TestBuildMessageStoreMemoryWithoutControlPlane: the OSS/file-source path with

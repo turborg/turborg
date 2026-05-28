@@ -316,6 +316,10 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 				t.log.Error("skipping invalid irc connector", "err", err)
 				continue
 			}
+			// Override the connector's ApplyDefaults with the per-tier values
+			// dedicated gets from the sidecar env (QUIT brand + CTCP / bouncer
+			// auth-failure tightening) — all sourced from the tenant feed's caps.
+			t.applyTierSettings(settings, caps)
 			// Wire the connector to the tenant-owned agent bus: the bouncer's
 			// outbound observer and the connector's join/part/topic/state events
 			// publish here, and the web gateway subscribes to the same bus so the
@@ -382,6 +386,29 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 		default:
 			t.log.Warn("connector type not supported in pooled mode yet", "type", cs.Type)
 		}
+	}
+}
+
+// applyTierSettings overrides the connector defaults ApplyDefaults filled with
+// the per-tier values dedicated receives from the sidecar env — all sourced
+// from the tenant feed's plan caps: the IRC QUIT brand, the CTCP throttle, and
+// the bouncer auth-failure ceiling. Each guard keeps an unset value on the
+// ApplyDefaults default rather than zeroing it.
+func (t *Tenant) applyTierSettings(s *irc.Settings, caps *PlanCapabilities) {
+	if caps == nil {
+		return
+	}
+	if caps.QuitMessage != "" {
+		s.QuitMessage = caps.QuitMessage
+	}
+	if caps.CTCPMaxPerWindow > 0 {
+		s.CTCPMaxPerWindow = caps.CTCPMaxPerWindow
+	}
+	if caps.CTCPWindowSeconds > 0 {
+		s.CTCPWindowSeconds = caps.CTCPWindowSeconds
+	}
+	if caps.BouncerMaxFailedAttempts > 0 {
+		s.BouncerMaxFailedAttempts = caps.BouncerMaxFailedAttempts
 	}
 }
 
