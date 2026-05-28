@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.7.0](https://github.com/turborg/turborg/compare/v0.6.0...v0.7.0) (2026-05-28)
+
+
+### Features
+
+* **runtime:** unify dedicated + pooled agent wiring via WireCommon ([#54](https://github.com/turborg/turborg/issues/54)) ([2e8a541](https://github.com/turborg/turborg/commit/2e8a541d27ca440b83d226260e2c35f882588682))
+* **server:** full pooled parity — activity, durable history, nudge, throttle ([#55](https://github.com/turborg/turborg/issues/55)) ([559e1b4](https://github.com/turborg/turborg/commit/559e1b4d49ccfb934203009a912d704bc37585a3))
+
+
+### Bug Fixes
+
+* **server:** wire bouncer password for pooled tenants ([#52](https://github.com/turborg/turborg/issues/52)) ([2978ea7](https://github.com/turborg/turborg/commit/2978ea764fecada7a3f40bc8623efdb2904c0eab))
+
 ## [0.6.0](https://github.com/turborg/turborg/compare/v0.5.0...v0.6.0) (2026-05-28)
 
 
