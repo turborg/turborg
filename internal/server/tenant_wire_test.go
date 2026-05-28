@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/turborg/turborg/internal/agent"
+	"github.com/turborg/turborg/internal/messages"
 )
 
 // newIRCTenant builds a Tenant whose spec carries one IRC connector with the
@@ -79,7 +80,8 @@ func TestBuildConnectorsOwnerGuardDefaultDenies(t *testing.T) {
 }
 
 // TestCommonParamsMapsCapsAndOwner locks the spec→CommonParams mapping: owner
-// fields come from the connector config, identity/throttle limits from caps.
+// fields + ignored nicks from the spec, identity/throttle/nudge limits from
+// caps, and the store threaded in.
 func TestCommonParamsMapsCapsAndOwner(t *testing.T) {
 	tn := newIRCTenant(nil, nil)
 	cs := ConnectorSpec{Config: map[string]any{
@@ -94,16 +96,24 @@ func TestCommonParamsMapsCapsAndOwner(t *testing.T) {
 		MaxChannels:           5,
 		OutboundMsgsPerWindow: 7,
 		OutboundWindowSeconds: 30,
+		OwnerDMNudgeEvery:     100,
+		CommandMaxPerWindow:   3,
+		CommandWindowSeconds:  30,
 	}
+	store := messages.NewMemoryStore(0)
 
-	p := tn.commonParams(cs, caps, "bot")
+	p := tn.commonParams(cs, caps, "bot", store, []string{"spammer", "troll"})
 
 	require.Equal(t, "external", p.Owner.OwnerMode)
 	require.Equal(t, "alice", p.Owner.OwnerNick)
 	require.Equal(t, "aliceacct", p.Owner.OwnerAccount)
 	require.Equal(t, "*!*@trusted.host", p.Owner.OwnerHostmask)
 	require.Equal(t, "bot", p.Owner.BotNick)
+	require.Equal(t, []string{"spammer", "troll"}, p.Owner.IgnoredNicks)
+	require.Equal(t, 3, p.Owner.CommandMaxPerWindow)
+	require.Equal(t, 30, p.Owner.CommandWindowSeconds)
 	require.Equal(t, "alice", p.OwnerNick)
+	require.Equal(t, 100, p.OwnerDMNudgeEvery)
 
 	require.True(t, p.Limits.NickLocked)
 	require.True(t, p.Limits.RealnameLocked)
@@ -111,5 +121,33 @@ func TestCommonParamsMapsCapsAndOwner(t *testing.T) {
 	require.Equal(t, 7, p.OutboundMaxPerWindow)
 	require.Equal(t, 30, p.OutboundWindowSeconds)
 
-	require.NotNil(t, p.Store, "pooled tenants get an in-process store for scrollback (Phase 1)")
+	require.Equal(t, store, p.Store, "the store is threaded straight through")
+	require.Nil(t, p.ActivityHook, "no aggregator on a directly-built tenant → no activity hook")
+}
+
+// TestBuildMessageStoreMemoryWithoutControlPlane: the OSS/file-source path with
+// no control plane gets an in-process store and no sink (nothing to close).
+func TestBuildMessageStoreMemoryWithoutControlPlane(t *testing.T) {
+	tn := &Tenant{ID: "t1", log: slog.Default()}
+	store, sink := tn.buildMessageStore()
+	require.NotNil(t, store)
+	require.Nil(t, sink)
+}
+
+// TestBuildMessageStoreHTTPWithControlPlane: with a control plane the store is
+// the write-through HTTP store pointed at the per-tenant endpoint, and a sink
+// (owning a flush goroutine) is returned for the caller to Close.
+func TestBuildMessageStoreHTTPWithControlPlane(t *testing.T) {
+	tn := &Tenant{
+		ID:                "t1",
+		log:               slog.Default(),
+		controlPlaneURL:   "https://cp.example/v1/internal",
+		controlPlaneToken: "host-token",
+	}
+	store, sink := tn.buildMessageStore()
+	require.NotNil(t, store)
+	require.NotNil(t, sink, "control plane configured → durable sink with a flush goroutine")
+
+	// Close the sink so its goroutine doesn't leak past the test.
+	sink.Close(context.Background())
 }

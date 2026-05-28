@@ -39,6 +39,10 @@ type TenantSpec struct {
 	Connectors       []ConnectorSpec   `json:"connectors"`
 	PlanCapabilities *PlanCapabilities `json:"plan_capabilities,omitempty"`
 
+	// IgnoredNicks is the owner's per-user ignore list: the command guard drops
+	// !commands from these nicks. Mirrors the dedicated spawn payload's field.
+	IgnoredNicks []string `json:"ignored_nicks,omitempty"`
+
 	// GatewayToken authorizes the per-tenant web shell (the appui `/ws`
 	// surface). It's the turborg's existing container_token, threaded through
 	// by accounts-api; an empty token means "no web shell for this tenant" and
@@ -57,6 +61,13 @@ type PlanCapabilities struct {
 	MaxChannels           int  `json:"max_channels"`
 	OutboundMsgsPerWindow int  `json:"outbound_msgs_per_window"`
 	OutboundWindowSeconds int  `json:"outbound_window_seconds"`
+	// OwnerDMNudgeEvery: DM the owner every N outbound PRIVMSGs with a usage
+	// summary (free=100). Fires only when an owner nick is configured.
+	OwnerDMNudgeEvery int `json:"owner_dm_nudge_every"`
+	// CommandMaxPerWindow/WindowSeconds: per-sender !command throttle (free=3
+	// per 30s). 0 = unthrottled by convention.
+	CommandMaxPerWindow  int `json:"command_max_per_window"`
+	CommandWindowSeconds int `json:"command_window_seconds"`
 }
 
 // TenantEventKind distinguishes an attach/update from a detach.

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"reflect"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/messages"
+	"github.com/turborg/turborg/internal/messagesink"
 	"github.com/turborg/turborg/internal/runtime"
 	"github.com/turborg/turborg/internal/safe"
 	"github.com/turborg/turborg/internal/statepush"
@@ -103,13 +105,22 @@ type Tenant struct {
 	// llmProvider is the shared !ask provider handed down from the Server.
 	// Nil → !ask is not registered for this tenant.
 	llmProvider llm.Provider
+
+	// activity is the pool-wide aggregator this tenant marks itself active in
+	// (bouncer attach, message traffic). Nil when no control plane is set.
+	activity *activityAggregator
+
+	// messageSink is the durable-message writer for the current run, owning a
+	// background flush goroutine. Captured so defaultWork can Close it on run
+	// end (goleak-clean across restarts). nil between runs / no control plane.
+	messageSink *messagesink.Sink
 }
 
 // startTenant launches a self-supervising tenant under a child of parent.
 // workFactory builds the body to run (and re-run after a panic) from the
 // constructed Tenant; quarantineBase is the first backoff step (doubled per
 // consecutive failure, capped).
-func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger, quarantineBase time.Duration, workFactory func(*Tenant) func(context.Context) error, controlPlaneURL, controlPlaneToken string, llmProvider llm.Provider) *Tenant {
+func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger, quarantineBase time.Duration, workFactory func(*Tenant) func(context.Context) error, controlPlaneURL, controlPlaneToken string, llmProvider llm.Provider, activity *activityAggregator) *Tenant {
 	ctx, cancel := context.WithCancel(parent)
 	t := &Tenant{
 		ID:                spec.TurborgID,
@@ -123,6 +134,7 @@ func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger, quar
 		controlPlaneURL:   controlPlaneURL,
 		controlPlaneToken: controlPlaneToken,
 		llmProvider:       llmProvider,
+		activity:          activity,
 	}
 	t.work = workFactory(t)
 	safe.Go("supervise/"+spec.TurborgID, func() { t.supervise(ctx) })
@@ -263,14 +275,23 @@ func (t *Tenant) defaultWork() func(context.Context) error {
 		t.mu.Lock()
 		gw := t.gateway
 		em := t.stateEmitter
+		sink := t.messageSink
 		t.ircConn = nil
 		t.gateway = nil
 		t.stateEmitter = nil
+		t.messageSink = nil
 		t.mu.Unlock()
 		if gw != nil {
 			gw.Stop()
 		}
 		em.Stop() // safe on nil
+		if sink != nil {
+			// Drain + stop the sink's flush goroutine so restarts stay
+			// goleak-clean. Bounded so a slow control plane can't hang teardown.
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			sink.Close(closeCtx)
+			cancel()
+		}
 		return err
 	}
 }
@@ -284,6 +305,7 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 	connectors := t.spec.Connectors
 	caps := t.spec.PlanCapabilities
 	gatewayToken := t.spec.GatewayToken
+	ignoredNicks := t.spec.IgnoredNicks
 	t.mu.Unlock()
 
 	for _, cs := range connectors {
@@ -305,14 +327,24 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			// tenant resolution. Set before WireCommon adds the connector.
 			conn.SetBouncerListenerless(true)
 
+			// Durable message store (write-through to the control plane), so the
+			// bouncer welcome replay, web-shell scrollback, and the user's
+			// readable history survive a pool restart. Falls back to in-process
+			// when no control plane is configured. The sink owns a flush
+			// goroutine closed in defaultWork.
+			store, sink := t.buildMessageStore()
+			t.mu.Lock()
+			t.messageSink = sink
+			t.mu.Unlock()
+
 			// The shared, connector-agnostic wiring — identical to the dedicated
 			// runtime, which calls the same runtime.WireCommon. Gives pooled
 			// tenants builtins (!ping/!version/!ask), the owner command guard,
-			// plan limits + outbound throttle, and message-store submitters, so
-			// the two modes can't drift. Owner-trust config travels in the
-			// connector config (the feed reuses the same connectorList() shape
-			// the dedicated spawn payload does).
-			if err := runtime.WireCommon(a, conn, t.commonParams(cs, caps, settings.Nick), t.log); err != nil {
+			// plan limits + outbound throttle, owner nudge, activity reporting,
+			// and message-store submitters, so the two modes can't drift. Owner-
+			// trust config travels in the connector config (the feed reuses the
+			// same connectorList() shape the dedicated spawn payload does).
+			if err := runtime.WireCommon(a, conn, t.commonParams(cs, caps, settings.Nick, store, ignoredNicks), t.log); err != nil {
 				t.log.Error("skipping irc connector: wiring failed", "err", err)
 				continue
 			}
@@ -354,20 +386,18 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 }
 
 // commonParams maps a tenant's IRC connector spec + plan caps onto the
-// runtime.CommonParams the shared agent wiring consumes. Owner-trust fields
-// live in the connector config (the feed reuses the dedicated connectorList()
-// shape); identity limits + the outbound throttle come from the plan caps; the
-// LLM provider is the pool-process-wide shared one.
+// runtime.CommonParams the shared agent wiring consumes — the single place
+// pooled inputs become the same struct the dedicated runtime builds from env.
+// Owner-trust fields live in the connector config (the feed reuses the
+// dedicated connectorList() shape); identity limits, throttles, and the nudge
+// interval come from the plan caps; ignored nicks + the LLM provider + the
+// store + the activity hook are threaded from the tenant.
 //
-// Fields the pooled feed doesn't carry yet — custom-commands cap, per-sender
-// command throttle, owner-DM nudge interval, ignored nicks, and a durable
-// message store — default to their zero values here (builtins-only, no
-// throttle, no nudge, in-process MemoryStore). Phase 3 extends the feed +
-// control plane to fill them, at which point this is the single place to map
-// them through.
-func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick string) runtime.CommonParams {
+// The one field still unset is CustomCommandsMax: free (the only pooled tier)
+// has it at 0, so there's nothing to carry.
+func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick string, store messages.Store, ignoredNicks []string) runtime.CommonParams {
 	var limits irc.ClientLimits
-	var outMax, outWin int
+	var outMax, outWin, nudge, cmdMax, cmdWin int
 	if caps != nil {
 		limits = irc.ClientLimits{
 			NickLocked:     caps.NickLocked,
@@ -375,22 +405,56 @@ func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick 
 			MaxChannels:    caps.MaxChannels,
 		}
 		outMax, outWin = caps.OutboundMsgsPerWindow, caps.OutboundWindowSeconds
+		nudge = caps.OwnerDMNudgeEvery
+		cmdMax, cmdWin = caps.CommandMaxPerWindow, caps.CommandWindowSeconds
 	}
+
+	// Activity hook: mark this tenant active in the pool's coalescing
+	// aggregator. Nil when no control plane is configured.
+	var activityHook func(string)
+	if t.activity != nil {
+		activityHook = func(string) { t.activity.Mark(t.ID) }
+	}
+
+	ownerNick := stringField(cs.Config, "owner_nick")
 	return runtime.CommonParams{
 		Limits: limits,
 		Owner: runtime.GuardParams{
-			OwnerMode:     stringField(cs.Config, "owner_mode"),
-			OwnerNick:     stringField(cs.Config, "owner_nick"),
-			OwnerAccount:  stringField(cs.Config, "owner_account"),
-			OwnerHostmask: stringField(cs.Config, "owner_hostmask"),
-			BotNick:       botNick,
+			OwnerMode:            stringField(cs.Config, "owner_mode"),
+			OwnerNick:            ownerNick,
+			OwnerAccount:         stringField(cs.Config, "owner_account"),
+			OwnerHostmask:        stringField(cs.Config, "owner_hostmask"),
+			IgnoredNicks:         ignoredNicks,
+			BotNick:              botNick,
+			CommandMaxPerWindow:  cmdMax,
+			CommandWindowSeconds: cmdWin,
 		},
 		OutboundMaxPerWindow:  outMax,
 		OutboundWindowSeconds: outWin,
-		OwnerNick:             stringField(cs.Config, "owner_nick"),
+		OwnerNick:             ownerNick,
+		OwnerDMNudgeEvery:     nudge,
 		LLM:                   t.llmProvider,
-		Store:                 messages.NewMemoryStore(0),
+		ActivityHook:          activityHook,
+		Store:                 store,
 	}
+}
+
+// buildMessageStore builds this tenant's message store. With a control plane
+// configured it's a write-through HTTP store pointed at the per-tenant control-
+// plane endpoint (durable history that survives a pool restart + serves the
+// user's readable log window); the returned sink owns a flush goroutine the
+// caller must Close. Without a control plane it's an in-process MemoryStore
+// (and a nil sink) — the OSS/file-source path.
+func (t *Tenant) buildMessageStore() (messages.Store, *messagesink.Sink) {
+	if t.controlPlaneURL == "" {
+		return messages.NewMemoryStore(0), nil
+	}
+	base := strings.TrimRight(t.controlPlaneURL, "/") + "/turborgs/" + t.ID + "/messages"
+	sink := messagesink.New(base, t.controlPlaneToken, t.log)
+	if hs := messages.NewHTTPStore(base, t.controlPlaneToken, sink, t.log); hs != nil {
+		return hs, sink
+	}
+	return messages.NewMemoryStore(0), sink
 }
 
 // update applies a new desired spec to a running tenant (M7, conservative
