@@ -202,6 +202,22 @@ func (g *Gateway) Subscribe(bus *agent.EventBus) {
 	}
 }
 
+// Handler returns the gateway's HTTP routes — /ws (WebSocket), /health,
+// /metrics, and the static UI. Serve mounts it on the gateway's own listener
+// (dedicated / single-tenant); the pooled runtime mounts the SAME handler
+// behind its per-tenant router. One route set + one handler chain for both
+// modes — a change here affects both, no reimplementation.
+func (g *Gateway) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", g.handleWS)
+	mux.HandleFunc("/health", g.handleHealth)
+	mux.HandleFunc("/metrics", g.handleMetrics)
+	if staticSub, err := fs.Sub(staticFS, "static"); err == nil {
+		mux.Handle("/", http.FileServer(http.FS(staticSub)))
+	}
+	return mux
+}
+
 // Serve binds the listener and blocks until ctx is canceled. Returns
 // http.ErrServerClosed on clean shutdown, or any net.Listen error.
 func (g *Gateway) Serve(ctx context.Context) error {
@@ -216,18 +232,8 @@ func (g *Gateway) Serve(ctx context.Context) error {
 	g.cancel = cancel
 	g.mu.Unlock()
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", g.handleWS)
-	mux.HandleFunc("/health", g.handleHealth)
-	mux.HandleFunc("/metrics", g.handleMetrics)
-
-	staticSub, err := fs.Sub(staticFS, "static")
-	if err == nil {
-		mux.Handle("/", http.FileServer(http.FS(staticSub)))
-	}
-
 	srv := &http.Server{
-		Handler:           mux,
+		Handler:           g.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	g.mu.Lock()
@@ -732,8 +738,8 @@ func (g *Gateway) dispatchInbound(ctx context.Context, c *client, p map[string]a
 // reference + appui front-ends fires this when the user nears the top
 // of the channel pane. Wire shape:
 //
-//   inbound:  {op:"history", channel:"#x", before:"2026-05-21T12:00:00.000Z", limit:200}
-//   outbound: {op:"history_result", channel, messages:[{nick,text,ts,id}], has_more:bool}
+//	inbound:  {op:"history", channel:"#x", before:"2026-05-21T12:00:00.000Z", limit:200}
+//	outbound: {op:"history_result", channel, messages:[{nick,text,ts,id}], has_more:bool}
 //
 // `before` and `limit` are both optional: empty `before` returns the
 // most recent `limit` messages (equivalent to the initial attach

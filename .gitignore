@@ -25,5 +25,7 @@ Thumbs.db
 # Local-only plans + Claude notes
 PLAN-*.md
 CLAUDE.md
-# Compiled devirc binary; leading slash so it doesn't shadow cmd/devirc/ source.
+# Compiled root binaries; leading slash so they don't shadow cmd/*/ source.
 /devirc
+/turborg
+/turborg-server

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"net/http"
 	"sort"
 	"sync"
 	"time"
@@ -172,6 +173,21 @@ func (s *Server) RouteBouncerConn(turborgID string, conn net.Conn) bool {
 		return false
 	}
 	t.ServeBouncerConn(conn)
+	return true
+}
+
+// RouteWS hands one HTTP request (the web shell's `/ws` upgrade) to the named
+// tenant's web gateway. Returns false (and does not touch w) when no such tenant
+// is attached, so the router can answer 404. The actual auth + WS upgrade (and
+// the 404 on a between-runs tenant with no live gateway) is the tenant's job.
+func (s *Server) RouteWS(turborgID string, w http.ResponseWriter, r *http.Request) bool {
+	s.mu.Lock()
+	t, ok := s.tenants[turborgID]
+	s.mu.Unlock()
+	if !ok {
+		return false
+	}
+	t.ServeWS(w, r)
 	return true
 }
 

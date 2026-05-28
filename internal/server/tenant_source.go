@@ -38,6 +38,13 @@ type TenantSpec struct {
 	CommandPrefix    string            `json:"command_prefix,omitempty"`
 	Connectors       []ConnectorSpec   `json:"connectors"`
 	PlanCapabilities *PlanCapabilities `json:"plan_capabilities,omitempty"`
+
+	// GatewayToken authorizes the per-tenant web shell (the appui `/ws`
+	// surface). It's the turborg's existing container_token, threaded through
+	// by accounts-api; an empty token means "no web shell for this tenant" and
+	// the pooled gateway is not built. The web router's StaticPasswordVerifier
+	// checks the `?token=` query against it.
+	GatewayToken string `json:"gateway_token,omitempty"`
 }
 
 // PlanCapabilities is the subset of accounts-api's plan-tier caps the pooled

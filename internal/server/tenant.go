@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"reflect"
 	"runtime/debug"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/safe"
+	"github.com/turborg/turborg/internal/web"
 )
 
 // TenantStatus is the supervised lifecycle phase of a tenant.
@@ -77,6 +79,12 @@ type Tenant struct {
 	// it via ServeBouncerConn to deliver an attached client to this tenant. nil
 	// between runs (quarantined / restarting) → an inbound conn is closed.
 	ircConn *irc.Connector
+	// gateway is the live web shell for the current run, built in
+	// buildConnectors when the spec carries a GatewayToken and cleared when the
+	// run ends. The web router reaches it via ServeWS to upgrade an attached
+	// browser client. nil between runs / when the tenant has no web shell → an
+	// inbound WS request is closed with 404.
+	gateway *web.Gateway
 }
 
 // startTenant launches a self-supervising tenant under a child of parent.
@@ -222,12 +230,17 @@ func (t *Tenant) defaultWork() func(context.Context) error {
 		t.buildConnectors(a)
 		t.log.Info("tenant attached", "connectors", t.connectorTypes())
 		err := a.Run(ctx)
-		// Run ended (ctx cancelled / restart) — the connector's bouncer is
-		// stopping, so drop the routing handle. A late inbound conn then closes
-		// cleanly instead of hitting a torn-down bouncer.
+		// Run ended (ctx cancelled / restart) — the connector's bouncer and the
+		// web gateway are stopping, so drop both routing handles. A late inbound
+		// conn/WS then closes cleanly instead of hitting a torn-down run.
 		t.mu.Lock()
+		gw := t.gateway
 		t.ircConn = nil
+		t.gateway = nil
 		t.mu.Unlock()
+		if gw != nil {
+			gw.Stop()
+		}
 		return err
 	}
 }
@@ -240,6 +253,7 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 	t.mu.Lock()
 	connectors := t.spec.Connectors
 	caps := t.spec.PlanCapabilities
+	gatewayToken := t.spec.GatewayToken
 	t.mu.Unlock()
 
 	for _, cs := range connectors {
@@ -250,7 +264,12 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 				t.log.Error("skipping invalid irc connector", "err", err)
 				continue
 			}
-			conn := irc.New(settings, t.log, nil)
+			// Wire the connector to the tenant-owned agent bus: the bouncer's
+			// outbound observer and the connector's join/part/topic/state events
+			// publish here, and the web gateway subscribes to the same bus so the
+			// web shell sees the full event stream (not just plain messages,
+			// which arrive via the agent's inbound drain regardless).
+			conn := irc.New(settings, t.log, a.Events)
 			if err := applyPlanLimits(conn, caps); err != nil {
 				t.log.Error("skipping irc connector: invalid plan limits", "err", err)
 				continue
@@ -263,6 +282,23 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			t.mu.Lock()
 			t.ircConn = conn
 			t.mu.Unlock()
+
+			// Web shell: built only when the tenant carries a gateway token (the
+			// plan's `gatewayEnabled` capability is expressed by accounts-api
+			// emitting the token at all). Listenerless like the bouncer — the web
+			// router dispatches `/c/<id>` to the shared Handler via ServeWS, so the
+			// gateway never binds its own port.
+			if gatewayToken != "" {
+				gw, err := buildTenantGateway(conn, gatewayToken, t.log)
+				if err != nil {
+					t.log.Error("skipping web gateway", "err", err)
+					continue
+				}
+				gw.Subscribe(a.Events)
+				t.mu.Lock()
+				t.gateway = gw
+				t.mu.Unlock()
+			}
 		default:
 			t.log.Warn("connector type not supported in pooled mode yet", "type", cs.Type)
 		}
@@ -321,6 +357,26 @@ func (t *Tenant) ServeBouncerConn(conn net.Conn) {
 		return
 	}
 	c.ServeBouncerConn(conn)
+}
+
+// ServeWS hands one HTTP request (the appui web shell's `/ws` upgrade, addressed
+// as `/c/<turborg_id>`) to this tenant's live web gateway. The web router calls
+// it after resolving the tenant from the request path. Returns 404 when the
+// tenant has no running gateway (between runs / quarantined / no web shell
+// configured); the browser reconnects and the router retries. The request's
+// `?token=` query is preserved — the shared gateway handler does auth + upgrade.
+func (t *Tenant) ServeWS(w http.ResponseWriter, r *http.Request) {
+	t.mu.Lock()
+	gw := t.gateway
+	t.mu.Unlock()
+	if gw == nil {
+		http.Error(w, "no web shell for tenant", http.StatusNotFound)
+		return
+	}
+	// The shared mux routes on `/ws`; rewrite the path the router matched
+	// (`/c/<id>`) to it. Query (the token) is untouched.
+	r.URL.Path = "/ws"
+	gw.Handler().ServeHTTP(w, r)
 }
 
 // connectorTypes lists the configured connector types, for logging.
