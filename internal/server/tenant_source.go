@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/turborg/turborg/internal/commands"
 	"github.com/turborg/turborg/internal/safe"
 )
 
@@ -42,6 +43,13 @@ type TenantSpec struct {
 	// IgnoredNicks is the owner's per-user ignore list: the command guard drops
 	// !commands from these nicks. Mirrors the dedicated spawn payload's field.
 	IgnoredNicks []string `json:"ignored_nicks,omitempty"`
+
+	// Commands is the tenant's data-driven command set (the same wire shape
+	// the dedicated payload carries as TURBORG_COMMANDS). The pooled runtime
+	// swaps it into the agent's registry, and — uniquely — a change to ONLY
+	// this field is applied in place without dropping the IRC connection
+	// (see Tenant.update). Ordered; an empty slice means no commands.
+	Commands []commands.Definition `json:"commands,omitempty"`
 
 	// GatewayToken authorizes the per-tenant web shell (the appui `/ws`
 	// surface). It's the turborg's existing container_token, threaded through
@@ -78,6 +86,29 @@ type PlanCapabilities struct {
 	// xshellz.com"), applied to the tenant's connector. Empty → the connector
 	// default. Mirrors the value the sidecar emits for dedicated.
 	QuitMessage string `json:"quit_message"`
+
+	// CustomCommandsMax caps how many data-driven commands the tenant's
+	// registry accepts (a safety net; the control plane enforces the same
+	// cap on attach). 0 = no commands, -1 = unrestricted.
+	CustomCommandsMax int `json:"custom_commands_max"`
+
+	// LLM carries the OpenAI-compatible router config for LLM-type commands.
+	// Documentation-only on the turborg side: the pooled process builds one
+	// shared provider from its own env (the API key is a server-side secret,
+	// never in the feed) and the model catalog is enforced upstream at
+	// attach time. Mirrors the block the sidecar emits as TURBORG_LLM_* for
+	// dedicated.
+	LLM *LLMRouterConfig `json:"llm,omitempty"`
+}
+
+// LLMRouterConfig is the OpenAI-compatible LLM router block. It travels in
+// the plan capabilities for documentation + parity with the dedicated
+// TURBORG_LLM_* env; the secret API key is never carried here.
+type LLMRouterConfig struct {
+	Provider      string   `json:"provider"`
+	BaseURL       string   `json:"base_url"`
+	DefaultModel  string   `json:"default_model"`
+	AllowedModels []string `json:"allowed_models,omitempty"`
 }
 
 // TenantEventKind distinguishes an attach/update from a detach.

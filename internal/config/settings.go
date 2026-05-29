@@ -128,10 +128,28 @@ type Settings struct {
 	LLMOutputTokensPerDay int      `env:"LLM_OUTPUT_TOKENS_PER_DAY"`
 	AllowedLLMModels      []string `env:"ALLOWED_LLM_MODELS" envSeparator:","`
 
-	// CustomCommandsMax caps the dynamic-command registry. 0 = builtins
-	// only, -1 = unrestricted. The custom-commands API itself is not yet
-	// shipping; this knob is present so operators can pre-set it.
+	// CustomCommandsMax caps the dynamic-command registry. 0 = no
+	// commands, -1 = unrestricted. Bounds the command set loaded from
+	// TURBORG_COMMANDS (and any later runtime registrations).
 	CustomCommandsMax int `env:"CUSTOM_COMMANDS_MAX"`
+
+	// LLM router. When LLMProvider or LLMAPIKey is set these select +
+	// configure the LLM backend used by LLM-type commands, taking
+	// precedence over the legacy TURBORG_ANTHROPIC_* envs. LLMProvider is
+	// "anthropic" (default) or "openai_compat"; LLMBaseURL points at the
+	// OpenAI-compatible endpoint root for the latter; LLMModel is the
+	// default model when a command doesn't pin its own.
+	LLMProvider string `env:"LLM_PROVIDER"`
+	LLMBaseURL  string `env:"LLM_BASE_URL"`
+	LLMAPIKey   string `env:"LLM_API_KEY"`
+	LLMModel    string `env:"LLM_MODEL"`
+
+	// Commands is the JSON-encoded set of data-driven commands the agent
+	// dispatches: an array of {name,type,template,model,access,allowlist}
+	// objects. Empty → the agent dispatches nothing. This is the per-
+	// process transport for the same command set a multi-tenant deployment
+	// delivers through its tenant feed.
+	Commands string `env:"COMMANDS"`
 
 	// OwnerDMNudgeEvery triggers a DM to the owner after every N outbound
 	// messages. 0 = disabled. Used by operators who want a regular usage

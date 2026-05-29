@@ -37,6 +37,11 @@ func TestEchoPing(t *testing.T) {
 	}, nil, nil)
 
 	a := agent.New(nil)
+	// Register a simple everyone-access ping command (the agent ships with
+	// none) so the end-to-end echo path has something to dispatch.
+	a.Commands.Register("ping", func(_ context.Context, env *agent.InboundEnvelope, _ []string) (*agent.OutboundEnvelope, error) {
+		return agent.ReplyTo(env, "pong"), nil
+	}, nil)
 	a.AddConnector(conn)
 
 	ctx, cancel := context.WithCancel(context.Background())

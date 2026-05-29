@@ -14,6 +14,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,21 +23,15 @@ import (
 
 	"github.com/turborg/turborg/internal/activity"
 	"github.com/turborg/turborg/internal/agent"
+	"github.com/turborg/turborg/internal/commands"
 	"github.com/turborg/turborg/internal/config"
 	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/messages"
 	"github.com/turborg/turborg/internal/messagesink"
 	"github.com/turborg/turborg/internal/statepush"
-	"github.com/turborg/turborg/internal/version"
 	"github.com/turborg/turborg/internal/web"
 )
-
-// AskSystemPrompt is the system prompt used for the built-in !ask
-// command. Kept as a const so prompt-caching's prefix match stays
-// stable across calls.
-const AskSystemPrompt = "You are turborg, an IRC chatbot. Keep replies short and conversational — " +
-	"most IRC clients show one line at a time. Avoid markdown."
 
 // Built composes a fully-wired Agent (and optionally a Web gateway)
 // from the given settings. The IRC connector and any other configured
@@ -64,6 +59,11 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	}
 
 	provider, err := buildLLM(s)
+	if err != nil {
+		return nil, err
+	}
+
+	cmds, err := parseCommands(s.Commands)
 	if err != nil {
 		return nil, err
 	}
@@ -107,6 +107,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	// same WireCommon from its tenant builder, so the two modes can't drift.
 	if err := WireCommon(a, ircConn, CommonParams{
 		CustomCommandsMax: s.CustomCommandsMax,
+		Commands:          cmds,
 		Limits: irc.ClientLimits{
 			NickLocked:     s.NickLocked,
 			RealnameLocked: s.RealnameLocked,
@@ -188,8 +189,29 @@ func applyOperatorPolicy(s *config.Settings, ircCfg *irc.Settings) error {
 	return nil
 }
 
+// buildLLM mints the agent's LLM provider from settings. The unified LLM
+// router config (TURBORG_LLM_*) takes precedence when a provider kind or
+// API key is set; otherwise it falls back to the legacy TURBORG_ANTHROPIC_*
+// envs so existing deployments keep working unchanged.
 func buildLLM(s *config.Settings) (llm.Provider, error) {
+	if s.LLMProvider != "" || s.LLMAPIKey != "" {
+		return BuildLLMProvider(s.LLMProvider, s.LLMBaseURL, s.LLMAPIKey, s.LLMModel)
+	}
 	return NewAnthropicProvider(s.AnthropicAPIKey, s.AnthropicModel)
+}
+
+// parseCommands decodes the TURBORG_COMMANDS JSON array into command
+// definitions. Empty input is not an error — it just means no commands.
+func parseCommands(raw string) ([]commands.Definition, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var defs []commands.Definition
+	if err := json.Unmarshal([]byte(raw), &defs); err != nil {
+		return nil, fmt.Errorf("runtime: parsing TURBORG_COMMANDS: %w", err)
+	}
+	return defs, nil
 }
 
 func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, log *slog.Logger, notifier *activity.Notifier, store messages.Store) (*web.Gateway, error) {
@@ -350,48 +372,6 @@ func isChannelTarget(s string) bool {
 		return true
 	}
 	return false
-}
-
-// RegisterBuiltinCommands installs ping, version, and (when an LLM is
-// configured) ask. Idempotent for the same registry — duplicate names
-// just overwrite the prior handler. Builtins call ReplyTo so DM-routing
-// works out of the box.
-func RegisterBuiltinCommands(a *agent.Agent, provider llm.Provider) {
-	a.Commands.Register("ping", pingCmd, nil)
-	a.Commands.Register("version", versionCmd, nil)
-	if provider != nil {
-		a.Commands.Register("ask", askCmd(provider, a.Log()), nil)
-	}
-}
-
-func pingCmd(_ context.Context, env *agent.InboundEnvelope, _ []string) (*agent.OutboundEnvelope, error) {
-	return agent.ReplyTo(env, "pong"), nil
-}
-
-func versionCmd(_ context.Context, env *agent.InboundEnvelope, _ []string) (*agent.OutboundEnvelope, error) {
-	return agent.ReplyTo(env, "turborg "+version.Version), nil
-}
-
-func askCmd(provider llm.Provider, log *slog.Logger) agent.CommandHandler {
-	return func(ctx context.Context, env *agent.InboundEnvelope, args []string) (*agent.OutboundEnvelope, error) {
-		question := strings.TrimSpace(strings.Join(args, " "))
-		if question == "" {
-			return agent.ReplyTo(env, "usage: !ask <question>"), nil
-		}
-		answer, err := provider.Ask(ctx, question,
-			llm.WithSystem(AskSystemPrompt),
-			llm.WithMaxTokens(512),
-		)
-		if err != nil {
-			log.Warn("ask failed", "err", err)
-			return agent.ReplyTo(env, "sorry, that broke: "+err.Error()), nil
-		}
-		return agent.ReplyTo(env, collapseWhitespace(answer)), nil
-	}
-}
-
-func collapseWhitespace(s string) string {
-	return strings.Join(strings.Fields(s), " ")
 }
 
 // BuildCommandGuard composes the owner-trust check and per-sender

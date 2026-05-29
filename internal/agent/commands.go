@@ -18,6 +18,19 @@ type commandEntry struct {
 	name    string
 	handler CommandHandler
 	guard   CommandGuard
+	// dynamic marks entries installed via the user-defined path
+	// (RegisterDynamic / ReplaceDynamic) as opposed to Register. Only
+	// dynamic entries are governed by the MaxDynamic cap and swapped out
+	// by ReplaceDynamic; Register entries are left untouched.
+	dynamic bool
+}
+
+// DynamicCommand is one user-defined command in a ReplaceDynamic batch:
+// a trigger name plus its handler and optional per-command guard.
+type DynamicCommand struct {
+	Name    string
+	Handler CommandHandler
+	Guard   CommandGuard
 }
 
 // CommandRegistry parses text that starts with Prefix and dispatches to a
@@ -94,11 +107,51 @@ func (r *CommandRegistry) RegisterDynamic(name string, handler CommandHandler, p
 	if !alreadyExists && r.maxDynamic != -1 && r.dynamicCount >= r.maxDynamic {
 		return ErrDynamicCommandLimit
 	}
-	r.commands[key] = commandEntry{name: key, handler: handler, guard: perCommandGuard}
+	r.commands[key] = commandEntry{name: key, handler: handler, guard: perCommandGuard, dynamic: true}
 	if !alreadyExists {
 		r.dynamicCount++
 	}
 	return nil
+}
+
+// ReplaceDynamic atomically swaps the entire set of dynamic (user-defined)
+// commands for the given batch, leaving Register-installed entries
+// untouched. It is the hot-reload primitive: the pooled runtime calls it
+// when a tenant's attached commands change, and the dedicated control
+// endpoint calls it on a push — neither drops the IRC connection.
+//
+// The swap happens under the write lock; Dispatch only ever RLocks, so a
+// concurrent command sees the complete old set or the complete new set,
+// never a torn mix. MaxDynamic is enforced as a safety net (the control
+// plane caps attachments upstream); entries beyond the cap are dropped.
+// A dynamic command may not shadow a Register-installed (built-in) name.
+func (r *CommandRegistry) ReplaceDynamic(cmds []DynamicCommand) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for key, e := range r.commands {
+		if e.dynamic {
+			delete(r.commands, key)
+		}
+	}
+	r.dynamicCount = 0
+
+	for _, c := range cmds {
+		key := strings.ToLower(c.Name)
+		if existing, ok := r.commands[key]; ok {
+			if !existing.dynamic {
+				continue // never shadow a Register-installed command
+			}
+			// Duplicate name within the batch — overwrite, no new slot.
+			r.commands[key] = commandEntry{name: key, handler: c.Handler, guard: c.Guard, dynamic: true}
+			continue
+		}
+		if r.maxDynamic != -1 && r.dynamicCount >= r.maxDynamic {
+			continue // safety net; the control plane caps attachments
+		}
+		r.commands[key] = commandEntry{name: key, handler: c.Handler, guard: c.Guard, dynamic: true}
+		r.dynamicCount++
+	}
 }
 
 func (r *CommandRegistry) Names() []string {

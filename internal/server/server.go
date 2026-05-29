@@ -36,9 +36,9 @@ type Server struct {
 	controlPlaneURL   string
 	controlPlaneToken string
 
-	// llmProvider powers the !ask builtin for every pooled tenant. One shared
+	// llmProvider powers LLM-type commands for every pooled tenant. One shared
 	// stateless provider (built once from the pool process's own env), handed
-	// to each tenant's agent wiring. Nil → !ask is not registered.
+	// to each tenant's agent wiring. Nil → LLM-type commands are skipped.
 	llmProvider llm.Provider
 
 	// activity coalesces per-tenant activity into a coarse bulk heartbeat to the
@@ -71,9 +71,9 @@ func (s *Server) SetControlPlane(url, token string) {
 	s.activity = newActivityAggregator(url, token, s.log)
 }
 
-// SetLLM installs the shared LLM provider that powers !ask for every tenant.
-// Call before Run. Nil (the default) leaves !ask unregistered — the agent
-// never fails for lack of a provider.
+// SetLLM installs the shared LLM provider that powers LLM-type commands for
+// every tenant. Call before Run. Nil (the default) leaves LLM-type commands
+// skipped — the agent never fails for lack of a provider.
 func (s *Server) SetLLM(p llm.Provider) {
 	s.llmProvider = p
 }

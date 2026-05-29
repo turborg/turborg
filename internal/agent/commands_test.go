@@ -205,11 +205,83 @@ func TestRegisterDynamicUnrestrictedWithNegativeOne(t *testing.T) {
 }
 
 func TestRegisterBuiltinsAreNotCapped(t *testing.T) {
-	// Builtins use the unconditional Register path. They must work even
-	// when MaxDynamic is 0.
+	// Register uses the unconditional path. It must work even when
+	// MaxDynamic is 0.
 	r := agent.NewCommandRegistry("!")
 	r.SetMaxDynamic(0)
 	r.Register("builtin-1", noopHandler, nil)
 	r.Register("builtin-2", noopHandler, nil)
 	assert.ElementsMatch(t, []string{"builtin-1", "builtin-2"}, r.Names())
+}
+
+// --- ReplaceDynamic (hot-reload) -------------------------------------------
+
+func dyn(name string) agent.DynamicCommand {
+	return agent.DynamicCommand{Name: name, Handler: noopHandler}
+}
+
+func TestReplaceDynamicSwapsTheWholeSet(t *testing.T) {
+	r := agent.NewCommandRegistry("!")
+	r.SetMaxDynamic(-1)
+
+	r.ReplaceDynamic([]agent.DynamicCommand{dyn("a"), dyn("b")})
+	assert.ElementsMatch(t, []string{"a", "b"}, r.Names())
+
+	// A second swap fully replaces the prior set — "a" is gone.
+	r.ReplaceDynamic([]agent.DynamicCommand{dyn("b"), dyn("c")})
+	assert.ElementsMatch(t, []string{"b", "c"}, r.Names())
+
+	// Empty swap clears everything.
+	r.ReplaceDynamic(nil)
+	assert.Empty(t, r.Names())
+}
+
+func TestReplaceDynamicLeavesRegisterEntriesUntouched(t *testing.T) {
+	r := agent.NewCommandRegistry("!")
+	r.SetMaxDynamic(-1)
+	r.Register("builtin", noopHandler, nil)
+
+	r.ReplaceDynamic([]agent.DynamicCommand{dyn("user1")})
+	assert.ElementsMatch(t, []string{"builtin", "user1"}, r.Names())
+
+	// A dynamic command may not shadow a Register-installed name.
+	r.ReplaceDynamic([]agent.DynamicCommand{{Name: "builtin", Handler: func(_ context.Context, env *agent.InboundEnvelope, _ []string) (*agent.OutboundEnvelope, error) {
+		return agent.ReplyTo(env, "shadowed"), nil
+	}}})
+	out, err := r.Dispatch(context.Background(), agent.NewInbound("t", "#c", "a", "!builtin"))
+	assert.NoError(t, err)
+	assert.Nil(t, out, "the original Register handler (noop → nil) must still win")
+}
+
+func TestReplaceDynamicEnforcesCapAsSafetyNet(t *testing.T) {
+	r := agent.NewCommandRegistry("!")
+	r.SetMaxDynamic(2)
+	r.ReplaceDynamic([]agent.DynamicCommand{dyn("a"), dyn("b"), dyn("c")})
+	assert.Len(t, r.Names(), 2, "entries beyond MaxDynamic are dropped")
+
+	// A re-sync that re-registers existing names stays within cap.
+	r.ReplaceDynamic([]agent.DynamicCommand{dyn("a"), dyn("a")})
+	assert.ElementsMatch(t, []string{"a"}, r.Names())
+}
+
+func TestReplaceDynamicConcurrentWithDispatch(t *testing.T) {
+	// The swap must be atomic relative to Dispatch — run both hard under
+	// -race and assert no torn read / data race.
+	r := agent.NewCommandRegistry("!")
+	r.SetMaxDynamic(-1)
+	r.ReplaceDynamic([]agent.DynamicCommand{dyn("a")})
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 1000; i++ {
+			r.ReplaceDynamic([]agent.DynamicCommand{dyn("a"), dyn("b")})
+			r.ReplaceDynamic([]agent.DynamicCommand{dyn("a")})
+		}
+		close(done)
+	}()
+	for i := 0; i < 1000; i++ {
+		_, _ = r.Dispatch(context.Background(), agent.NewInbound("t", "#c", "a", "!a"))
+		_, _ = r.Dispatch(context.Background(), agent.NewInbound("t", "#c", "a", "!b"))
+	}
+	<-done
 }
