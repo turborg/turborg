@@ -49,12 +49,16 @@ const (
 // Definition is one user-defined command. It is the byte-stable wire shape
 // shared by the pooled feed and the dedicated spawn payload.
 type Definition struct {
-	Name      string   `json:"name"`
-	Type      Type     `json:"type"`
-	Template  string   `json:"template"`
-	Model     string   `json:"model,omitempty"`
-	Access    Access   `json:"access"`
-	Allowlist []string `json:"allowlist,omitempty"`
+	Name     string `json:"name"`
+	Type     Type   `json:"type"`
+	Template string `json:"template"`
+	// Instructions, when set, is the system prompt for an LLM command —
+	// the persona / knowledge / behavior the model runs with. Empty falls
+	// back to the default IRC-shaping prompt. Ignored for static commands.
+	Instructions string   `json:"instructions,omitempty"`
+	Model        string   `json:"model,omitempty"`
+	Access       Access   `json:"access"`
+	Allowlist    []string `json:"allowlist,omitempty"`
 }
 
 // llmSystemPrompt steers LLM-backed commands toward IRC-shaped replies.
@@ -115,9 +119,15 @@ func llmHandler(d Definition, provider llm.Provider, log *slog.Logger) agent.Com
 	tmpl := d.Template
 	model := d.Model
 	name := d.Name
+	// The command's own instructions become the system prompt; fall back to
+	// the default IRC-shaping prompt when none were supplied.
+	system := strings.TrimSpace(d.Instructions)
+	if system == "" {
+		system = llmSystemPrompt
+	}
 	return func(ctx context.Context, env *agent.InboundEnvelope, args []string) (*agent.OutboundEnvelope, error) {
 		prompt := render(tmpl, env, args)
-		opts := []llm.CallOption{llm.WithSystem(llmSystemPrompt), llm.WithMaxTokens(llmMaxTokens)}
+		opts := []llm.CallOption{llm.WithSystem(system), llm.WithMaxTokens(llmMaxTokens)}
 		if model != "" {
 			opts = append(opts, llm.WithModel(model))
 		}

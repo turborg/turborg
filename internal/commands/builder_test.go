@@ -80,6 +80,28 @@ func TestBuildLLMPassesModelAndSystem(t *testing.T) {
 	assert.Equal(t, "the answer is 42", out.Text, "reply whitespace is collapsed for IRC")
 }
 
+func TestBuildLLMUsesInstructionsAsSystemPrompt(t *testing.T) {
+	prov := &recordingProvider{resp: "ok"}
+	built := commands.Build([]commands.Definition{
+		{Name: "pirate", Type: commands.TypeLLM, Template: "{args}", Instructions: "Reply like a pirate.", Access: commands.AccessOwner},
+	}, prov, nil, nil)
+	require.Len(t, built, 1)
+
+	dispatch(t, built[0], agent.NewInbound("irc", "#room", "bob", "!pirate hi"), []string{"hi"})
+	assert.Equal(t, "Reply like a pirate.", prov.system, "skill instructions become the system prompt")
+}
+
+func TestBuildLLMFallsBackToDefaultSystemPromptWhenNoInstructions(t *testing.T) {
+	prov := &recordingProvider{resp: "ok"}
+	built := commands.Build([]commands.Definition{
+		{Name: "ask", Type: commands.TypeLLM, Template: "{args}", Access: commands.AccessOwner},
+	}, prov, nil, nil)
+	require.Len(t, built, 1)
+
+	dispatch(t, built[0], agent.NewInbound("irc", "#room", "bob", "!ask hi"), []string{"hi"})
+	assert.NotEmpty(t, prov.system, "a default system prompt applies when no instructions are set")
+}
+
 func TestBuildLLMReportsProviderError(t *testing.T) {
 	prov := &recordingProvider{err: errors.New("rate limited")}
 	built := commands.Build([]commands.Definition{
