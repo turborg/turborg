@@ -415,6 +415,76 @@ func TestHostmaskHelperPatternBehaviors(t *testing.T) {
 
 // --- Run pair stops mutually ---------------------------------------------
 
+func TestBuildWiresBudgetRefreshWhenConfigured(t *testing.T) {
+	base := &config.Settings{
+		CommandPrefix:        "!",
+		AnthropicAPIKey:      "sk-test",
+		AnthropicModel:       "claude-sonnet-4-6",
+		LLMInputTokensPerDay: 4000,
+	}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+
+	// No budget URL → no refresher even though the provider is budgeted.
+	b, err := runtime.Build(base, ircCfg, nil)
+	require.NoError(t, err)
+	assert.Nil(t, b.BudgetRefresh, "no LLM_BUDGET_URL → no refresher")
+
+	// With a URL + token, the refresher is wired.
+	withURL := *base
+	withURL.LLMBudgetURL = "http://sidecar.local/llm-budget"
+	withURL.LLMBudgetToken = "tok"
+	b2, err := runtime.Build(&withURL, ircCfg, nil)
+	require.NoError(t, err)
+	assert.NotNil(t, b2.BudgetRefresh, "budgeted provider + endpoint → refresher")
+}
+
+func TestBuildNoBudgetRefreshWithoutCaps(t *testing.T) {
+	// A URL is set but no caps → provider isn't budgeted → no refresher.
+	s := &config.Settings{
+		CommandPrefix:   "!",
+		AnthropicAPIKey: "sk-test",
+		AnthropicModel:  "claude-sonnet-4-6",
+		LLMBudgetURL:    "http://sidecar.local/llm-budget",
+		LLMBudgetToken:  "tok",
+	}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	assert.Nil(t, b.BudgetRefresh, "unbudgeted provider → no refresher even with a URL")
+}
+
+func TestRunDrainsBudgetRefreshOnCtxCancel(t *testing.T) {
+	s := &config.Settings{
+		CommandPrefix:           "!",
+		AnthropicAPIKey:         "sk-test",
+		AnthropicModel:          "claude-sonnet-4-6",
+		LLMInputTokensPerDay:    4000,
+		LLMBudgetURL:            "http://127.0.0.1:1/llm-budget", // refresh fails fast; loop keeps ticking
+		LLMBudgetToken:          "tok",
+		LLMBudgetRefreshSeconds: 2,
+	}
+	ircCfg := &irc.Settings{
+		Hostname:           "fake",
+		Nick:               "turborg",
+		HandshakeTimeout:   100 * time.Millisecond,
+		ClientPingInterval: 50 * time.Millisecond,
+	}
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	require.NotNil(t, b.BudgetRefresh, "precondition: refresher is wired")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runtime.Run(ctx, b) }()
+
+	cancel()
+	select {
+	case <-done: // Run must drain the refresher goroutine before returning (goleak)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
 func TestRunStandaloneReturnsOnCtxCancel(t *testing.T) {
 	s := &config.Settings{CommandPrefix: "!"}
 	ircCfg := &irc.Settings{

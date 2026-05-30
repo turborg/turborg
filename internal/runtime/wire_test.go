@@ -150,27 +150,27 @@ func TestWireCommonNoBudgetWhenCapsZero(t *testing.T) {
 
 func TestBuildBudgetedProviderNilReturnsNil(t *testing.T) {
 	a := agent.NewWithPrefix(nil, "!")
-	require.Nil(t, runtime.BuildBudgetedProvider(a, nil, 100, 100, nil))
+	require.Nil(t, runtime.BuildBudgetedProvider(a, nil, 100, 100, 0, 0, nil))
 }
 
 func TestBuildBudgetedProviderNoCapsReturnsRaw(t *testing.T) {
 	a := agent.NewWithPrefix(nil, "!")
 	raw := stubProvider{}
-	got := runtime.BuildBudgetedProvider(a, raw, 0, 0, nil)
+	got := runtime.BuildBudgetedProvider(a, raw, 0, 0, 0, 0, nil)
 	require.Equal(t, raw, got)
 }
 
 func TestBuildBudgetedProviderWrapsWhenCapsSet(t *testing.T) {
 	a := agent.NewWithPrefix(nil, "!")
-	got := runtime.BuildBudgetedProvider(a, stubProvider{}, 100, 50, nil)
+	got := runtime.BuildBudgetedProvider(a, stubProvider{}, 100, 50, 0, 0, nil)
 	_, ok := got.(*llm.BudgetedProvider)
 	require.True(t, ok, "expected a *llm.BudgetedProvider wrapper")
 }
 
 func TestBuildBudgetedProviderIdempotent(t *testing.T) {
 	a := agent.NewWithPrefix(nil, "!")
-	wrapped := runtime.BuildBudgetedProvider(a, stubProvider{}, 100, 50, nil)
-	again := runtime.BuildBudgetedProvider(a, wrapped, 100, 50, nil)
+	wrapped := runtime.BuildBudgetedProvider(a, stubProvider{}, 100, 50, 0, 0, nil)
+	again := runtime.BuildBudgetedProvider(a, wrapped, 100, 50, 0, 0, nil)
 	require.Same(t, wrapped, again, "re-wrapping must return the same instance")
 }
 
@@ -180,7 +180,7 @@ func TestBuildBudgetedProviderPublishesUsageEvent(t *testing.T) {
 	a.Events.Subscribe(agent.EventLLMUsage, func(_ context.Context, ev *agent.Event) {
 		got <- ev
 	})
-	wrapped := runtime.BuildBudgetedProvider(a, &usageProvider{in: 30, out: 12}, 1000, 500, nil)
+	wrapped := runtime.BuildBudgetedProvider(a, &usageProvider{in: 30, out: 12}, 1000, 500, 0, 0, nil)
 	_, _, err := wrapped.Ask(context.Background(), "hi")
 	require.NoError(t, err)
 	select {

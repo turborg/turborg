@@ -101,6 +101,14 @@ type PlanCapabilities struct {
 	LLMInputTokensPerDay  int `json:"llm_input_tokens_per_day"`
 	LLMOutputTokensPerDay int `json:"llm_output_tokens_per_day"`
 
+	// LLMInputTokensUsed / LLMOutputTokensUsed seed the budget with consumption
+	// the control plane has already recorded across the account for the rolling
+	// window (this tenant's prior incarnations + sibling tenants). They make the
+	// cap enforce per account/window rather than per tenant-instance, so a
+	// delete+recreate can't reset the window. 0 = fresh window.
+	LLMInputTokensUsed  int `json:"llm_input_tokens_used"`
+	LLMOutputTokensUsed int `json:"llm_output_tokens_used"`
+
 	// LLM carries the OpenAI-compatible router config for LLM-type commands.
 	// Documentation-only on the turborg side: the pooled process builds one
 	// shared provider from its own env (the API key is a server-side secret,

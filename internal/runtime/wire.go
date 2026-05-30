@@ -62,6 +62,13 @@ type CommonParams struct {
 	LLMInputCap  int
 	LLMOutputCap int
 
+	// LLMInputUsed / LLMOutputUsed seed the budget with consumption already
+	// reported across the account for the rolling window (sibling agents and
+	// previously-destroyed ones), so the cap is enforced per account/window
+	// rather than per agent-instance. 0 = fresh window. See TokenBudget.Seed.
+	LLMInputUsed  int
+	LLMOutputUsed int
+
 	// ActivityHook fires on connector activity (bouncer attach, message
 	// traffic). Nil → activity hooks are not attached. Dedicated passes its
 	// Notifier.Hook (a per-event POST to the local sidecar); pooled passes a
@@ -139,7 +146,7 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 	// The wrapped provider is used everywhere: commands, /tb, gateway.
 	// Idempotent — if the runtime already wrapped it (so the gateway can
 	// share the same budget instance), this is a no-op.
-	provider := BuildBudgetedProvider(a, p.LLM, p.LLMInputCap, p.LLMOutputCap, log)
+	provider := BuildBudgetedProvider(a, p.LLM, p.LLMInputCap, p.LLMOutputCap, p.LLMInputUsed, p.LLMOutputUsed, log)
 
 	if provider != nil {
 		ircConn.SetLLMProvider(provider)
@@ -177,7 +184,12 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 // returned unchanged, so the runtime can build it once and share the
 // same budget instance between the gateway and WireCommon. nil in →
 // nil out; caps both 0 → unwrapped (no enforcement).
-func BuildBudgetedProvider(a *agent.Agent, provider llm.Provider, inputCap, outputCap int, log *slog.Logger) llm.Provider {
+//
+// usedInput/usedOutput seed the rolling window with consumption already
+// reported across the account for the same window (see TokenBudget.Seed),
+// so the cap is enforced per account/window rather than per agent-instance.
+// Both 0 → no prior usage, fresh window.
+func BuildBudgetedProvider(a *agent.Agent, provider llm.Provider, inputCap, outputCap, usedInput, usedOutput int, log *slog.Logger) llm.Provider {
 	if provider == nil {
 		return nil
 	}
@@ -191,6 +203,7 @@ func BuildBudgetedProvider(a *agent.Agent, provider llm.Provider, inputCap, outp
 		log = slog.Default()
 	}
 	budget := llm.NewTokenBudget()
+	budget.SetBaseline(usedInput, usedOutput)
 	return llm.NewBudgetedProvider(provider, budget, inputCap, outputCap, func(u llm.Usage) {
 		inTotal, outTotal := budget.Totals()
 		log.Info("llm_usage",
