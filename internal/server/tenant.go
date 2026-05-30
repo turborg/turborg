@@ -359,7 +359,13 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			// and message-store submitters, so the two modes can't drift. Owner-
 			// trust config travels in the connector config (the feed reuses the
 			// same connectorList() shape the dedicated spawn payload does).
-			if err := runtime.WireCommon(a, conn, t.commonParams(cs, caps, settings.Nick, store, ignoredNicks, cmds), t.log); err != nil {
+			// Build the budgeted provider once so the same budget instance is
+			// shared by the connector/commands (WireCommon) and the web gateway
+			// below. WireCommon's own wrap is idempotent on this.
+			cp := t.commonParams(cs, caps, settings.Nick, store, ignoredNicks, cmds)
+			budgetedProvider := runtime.BuildBudgetedProvider(a, cp.LLM, cp.LLMInputCap, cp.LLMOutputCap, t.log)
+			cp.LLM = budgetedProvider
+			if err := runtime.WireCommon(a, conn, cp, t.log); err != nil {
 				t.log.Error("skipping irc connector: wiring failed", "err", err)
 				continue
 			}
@@ -388,7 +394,7 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 				if caps != nil {
 					tbCap = caps.TBSummarizeMaxMessages
 				}
-				gw, err := buildTenantGateway(conn, gatewayToken, t.log, store, t.llmProvider, tbCap)
+				gw, err := buildTenantGateway(conn, gatewayToken, t.log, store, budgetedProvider, tbCap)
 				if err != nil {
 					t.log.Error("skipping web gateway", "err", err)
 					continue

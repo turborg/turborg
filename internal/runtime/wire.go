@@ -137,31 +137,9 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 
 	// Wrap the LLM provider with budget enforcement when caps are set.
 	// The wrapped provider is used everywhere: commands, /tb, gateway.
-	provider := p.LLM
-	if provider != nil && (p.LLMInputCap > 0 || p.LLMOutputCap > 0) {
-		budget := llm.NewTokenBudget()
-		provider = llm.NewBudgetedProvider(provider, budget, p.LLMInputCap, p.LLMOutputCap, func(u llm.Usage) {
-			inTotal, outTotal := budget.Totals()
-			log.Info("llm_usage",
-				"input_tokens", u.InputTokens,
-				"output_tokens", u.OutputTokens,
-				"input_total", inTotal,
-				"output_total", outTotal,
-			)
-			a.Events.Publish(context.Background(), &agent.Event{
-				Type: agent.EventLLMUsage,
-				Time: time.Now(),
-				Fields: map[string]any{
-					"input_tokens":  u.InputTokens,
-					"output_tokens": u.OutputTokens,
-					"input_total":   inTotal,
-					"output_total":  outTotal,
-					"input_cap":     p.LLMInputCap,
-					"output_cap":    p.LLMOutputCap,
-				},
-			})
-		})
-	}
+	// Idempotent — if the runtime already wrapped it (so the gateway can
+	// share the same budget instance), this is a no-op.
+	provider := BuildBudgetedProvider(a, p.LLM, p.LLMInputCap, p.LLMOutputCap, log)
 
 	if provider != nil {
 		ircConn.SetLLMProvider(provider)
@@ -188,6 +166,52 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 	}, log)
 	a.Commands.ReplaceDynamic(built)
 	return nil
+}
+
+// BuildBudgetedProvider wraps an llm.Provider with rolling-24h budget
+// enforcement when caps are set. The onUsage callback emits the
+// structured llm_usage log (scraped by the sidecar) and publishes
+// EventLLMUsage on the agent's bus (broadcast to WS clients).
+//
+// Idempotent: a provider that is already a *llm.BudgetedProvider is
+// returned unchanged, so the runtime can build it once and share the
+// same budget instance between the gateway and WireCommon. nil in →
+// nil out; caps both 0 → unwrapped (no enforcement).
+func BuildBudgetedProvider(a *agent.Agent, provider llm.Provider, inputCap, outputCap int, log *slog.Logger) llm.Provider {
+	if provider == nil {
+		return nil
+	}
+	if _, ok := provider.(*llm.BudgetedProvider); ok {
+		return provider
+	}
+	if inputCap <= 0 && outputCap <= 0 {
+		return provider
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	budget := llm.NewTokenBudget()
+	return llm.NewBudgetedProvider(provider, budget, inputCap, outputCap, func(u llm.Usage) {
+		inTotal, outTotal := budget.Totals()
+		log.Info("llm_usage",
+			"input_tokens", u.InputTokens,
+			"output_tokens", u.OutputTokens,
+			"input_total", inTotal,
+			"output_total", outTotal,
+		)
+		a.Events.Publish(context.Background(), &agent.Event{
+			Type: agent.EventLLMUsage,
+			Time: time.Now(),
+			Fields: map[string]any{
+				"input_tokens":  u.InputTokens,
+				"output_tokens": u.OutputTokens,
+				"input_total":   inTotal,
+				"output_total":  outTotal,
+				"input_cap":     inputCap,
+				"output_cap":    outputCap,
+			},
+		})
+	})
 }
 
 // BuildLLMProvider mints an llm.Provider from a provider kind + endpoint +

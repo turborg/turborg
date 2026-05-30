@@ -835,11 +835,29 @@ func (g *Gateway) handleTBOp(ctx context.Context, c *client, p map[string]any) {
 			n = int(v)
 		}
 		g.handleTBSummarize(ctx, c, channel, n)
+	case "usage":
+		g.handleTBUsage(ctx, c)
 	default:
 		g.sendTo(ctx, c, map[string]any{
-			"op": "tb_error", "message": "Unknown /tb subcommand. Available: summarize",
+			"op": "tb_error", "message": "Unknown /tb subcommand. Available: summarize, usage",
 		})
 	}
+}
+
+func (g *Gateway) handleTBUsage(ctx context.Context, c *client) {
+	var inputUsed, outputUsed, inputCap, outputCap int
+	if bp, ok := g.opts.LLMProvider.(*llm.BudgetedProvider); ok {
+		inputUsed, outputUsed = bp.Budget().Totals()
+		inputCap, outputCap = bp.Caps()
+	}
+	g.sendTo(ctx, c, map[string]any{
+		"op":          "tb_result",
+		"sub":         "usage",
+		"input_used":  inputUsed,
+		"output_used": outputUsed,
+		"input_cap":   inputCap,
+		"output_cap":  outputCap,
+	})
 }
 
 func (g *Gateway) handleTBSummarize(ctx context.Context, c *client, channel string, n int) {
