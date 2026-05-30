@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/turborg/turborg/internal/agent"
+	"github.com/turborg/turborg/internal/commands"
 	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/messages"
@@ -85,6 +86,11 @@ type Tenant struct {
 	// it via ServeBouncerConn to deliver an attached client to this tenant. nil
 	// between runs (quarantined / restarting) → an inbound conn is closed.
 	ircConn *irc.Connector
+	// agentRef is the live agent for the current run, captured in defaultWork
+	// and cleared when the run ends. update() reaches it via reloadCommands to
+	// swap the command set in place (ReplaceDynamic) when ONLY the commands
+	// changed — no reconnect. nil between runs → reload falls back to restart.
+	agentRef *agent.Agent
 	// gateway is the live web shell for the current run, built in
 	// buildConnectors when the spec carries a GatewayToken and cleared when the
 	// run ends. The web router reaches it via ServeWS to upgrade an attached
@@ -102,8 +108,8 @@ type Tenant struct {
 	controlPlaneURL   string
 	controlPlaneToken string
 
-	// llmProvider is the shared !ask provider handed down from the Server.
-	// Nil → !ask is not registered for this tenant.
+	// llmProvider is the shared LLM provider handed down from the Server.
+	// Nil → LLM-type commands are skipped for this tenant.
 	llmProvider llm.Provider
 
 	// activity is the pool-wide aggregator this tenant marks itself active in
@@ -266,6 +272,9 @@ func (t *Tenant) defaultWork() func(context.Context) error {
 		// path (where the env default fills it) so free tenants behave the same.
 		a := agent.NewWithPrefix(t.log, prefix)
 		t.buildConnectors(a)
+		t.mu.Lock()
+		t.agentRef = a
+		t.mu.Unlock()
 		t.log.Info("tenant attached", "connectors", t.connectorTypes())
 		err := a.Run(ctx)
 		// Run ended (ctx cancelled / restart) — the connector's bouncer, web
@@ -280,6 +289,7 @@ func (t *Tenant) defaultWork() func(context.Context) error {
 		t.gateway = nil
 		t.stateEmitter = nil
 		t.messageSink = nil
+		t.agentRef = nil
 		t.mu.Unlock()
 		if gw != nil {
 			gw.Stop()
@@ -306,6 +316,7 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 	caps := t.spec.PlanCapabilities
 	gatewayToken := t.spec.GatewayToken
 	ignoredNicks := t.spec.IgnoredNicks
+	cmds := t.spec.Commands
 	t.mu.Unlock()
 
 	for _, cs := range connectors {
@@ -348,7 +359,7 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			// and message-store submitters, so the two modes can't drift. Owner-
 			// trust config travels in the connector config (the feed reuses the
 			// same connectorList() shape the dedicated spawn payload does).
-			if err := runtime.WireCommon(a, conn, t.commonParams(cs, caps, settings.Nick, store, ignoredNicks), t.log); err != nil {
+			if err := runtime.WireCommon(a, conn, t.commonParams(cs, caps, settings.Nick, store, ignoredNicks, cmds), t.log); err != nil {
 				t.log.Error("skipping irc connector: wiring failed", "err", err)
 				continue
 			}
@@ -373,7 +384,11 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			// router dispatches `/c/<id>` to the shared Handler via ServeWS, so the
 			// gateway never binds its own port.
 			if gatewayToken != "" {
-				gw, err := buildTenantGateway(conn, gatewayToken, t.log)
+				var tbCap int
+				if caps != nil {
+					tbCap = caps.TBSummarizeMaxMessages
+				}
+				gw, err := buildTenantGateway(conn, gatewayToken, t.log, store, t.llmProvider, tbCap)
 				if err != nil {
 					t.log.Error("skipping web gateway", "err", err)
 					continue
@@ -420,20 +435,23 @@ func (t *Tenant) applyTierSettings(s *irc.Settings, caps *PlanCapabilities) {
 // interval come from the plan caps; ignored nicks + the LLM provider + the
 // store + the activity hook are threaded from the tenant.
 //
-// The one field still unset is CustomCommandsMax: free (the only pooled tier)
-// has it at 0, so there's nothing to carry.
-func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick string, store messages.Store, ignoredNicks []string) runtime.CommonParams {
+// CustomCommandsMax + Commands carry the tenant's data-driven command set
+// and its cap, so pooled tenants get user-defined commands the same way the
+// dedicated runtime does (from TURBORG_COMMANDS).
+func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick string, store messages.Store, ignoredNicks []string, cmds []commands.Definition) runtime.CommonParams {
 	var limits irc.ClientLimits
-	var outMax, outWin, nudge, cmdMax, cmdWin int
+	var outMax, outWin, nudge, cmdMax, cmdWin, customCmdMax int
 	if caps != nil {
 		limits = irc.ClientLimits{
-			NickLocked:     caps.NickLocked,
-			RealnameLocked: caps.RealnameLocked,
-			MaxChannels:    caps.MaxChannels,
+			NickLocked:             caps.NickLocked,
+			RealnameLocked:         caps.RealnameLocked,
+			MaxChannels:            caps.MaxChannels,
+			TBSummarizeMaxMessages: caps.TBSummarizeMaxMessages,
 		}
 		outMax, outWin = caps.OutboundMsgsPerWindow, caps.OutboundWindowSeconds
 		nudge = caps.OwnerDMNudgeEvery
 		cmdMax, cmdWin = caps.CommandMaxPerWindow, caps.CommandWindowSeconds
+		customCmdMax = caps.CustomCommandsMax
 	}
 
 	// Activity hook: mark this tenant active in the pool's coalescing
@@ -445,7 +463,9 @@ func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick 
 
 	ownerNick := stringField(cs.Config, "owner_nick")
 	return runtime.CommonParams{
-		Limits: limits,
+		CustomCommandsMax: customCmdMax,
+		Commands:          cmds,
+		Limits:            limits,
 		Owner: runtime.GuardParams{
 			OwnerMode:            stringField(cs.Config, "owner_mode"),
 			OwnerNick:            ownerNick,
@@ -484,24 +504,31 @@ func (t *Tenant) buildMessageStore() (messages.Store, *messagesink.Sink) {
 	return messages.NewMemoryStore(0), sink
 }
 
-// update applies a new desired spec to a running tenant (M7, conservative
-// hot reload). When the spec actually changed it restarts the tenant's run so
-// the new connectors/limits take effect; an identical spec is a no-op.
-//
-// Conservative by design: any change triggers a full reconnect rather than a
-// surgical JOIN/PART. The plan's aggressive in-place reload (no reconnect on
-// channel-only edits) is a later refinement; reconnect-on-change is correct
-// and simple, and avoids silent state divergence.
+// update applies a new desired spec to a running tenant (M7 hot reload). An
+// identical spec is a no-op. A change to ONLY the command set is applied in
+// place — the live registry's dynamic commands are swapped via ReplaceDynamic
+// with no reconnect, so attaching/editing/detaching a command takes effect
+// within the feed-poll window without dropping the IRC session or the
+// attached bouncer clients. Any other change (connectors, limits, owner
+// config, ignored nicks, …) triggers a full reconnect, which is correct and
+// simple and avoids silent state divergence.
 func (t *Tenant) update(spec TenantSpec) {
 	t.mu.Lock()
-	unchanged := reflect.DeepEqual(t.spec, spec)
-	if unchanged {
+	if reflect.DeepEqual(t.spec, spec) {
 		t.mu.Unlock()
 		return
 	}
+	prev := t.spec
 	t.spec = spec
 	cancel := t.runCancel
 	t.mu.Unlock()
+
+	// Command-only change: reload in place, no reconnect. Falls through to a
+	// restart only if the tenant isn't currently running (between runs).
+	if commandsOnlyChange(prev, spec) && t.reloadCommands(spec.Commands) {
+		t.log.Info("tenant commands reloaded in place", "commands", len(spec.Commands))
+		return
+	}
 
 	t.log.Info("tenant spec changed; restarting", "connectors", t.connectorTypes())
 
@@ -514,6 +541,57 @@ func (t *Tenant) update(spec TenantSpec) {
 	case t.restartCh <- struct{}{}:
 	default:
 	}
+}
+
+// commandsOnlyChange reports whether two differing specs differ in nothing
+// but their command set — the precondition for an in-place reload.
+func commandsOnlyChange(a, b TenantSpec) bool {
+	a.Commands = nil
+	b.Commands = nil
+	return reflect.DeepEqual(a, b)
+}
+
+// reloadCommands swaps the live agent's dynamic command set for defs, rebuilt
+// with the tenant's current owner-trust + LLM provider, without touching the
+// connection. Returns false when the tenant isn't running (no live agent /
+// connector), so the caller falls back to a restart. The per-command guards
+// reuse the same owner-trust config the connector spec carries (the registry-
+// wide ignore + throttle guard set at wire time is untouched).
+func (t *Tenant) reloadCommands(defs []commands.Definition) bool {
+	t.mu.Lock()
+	a := t.agentRef
+	conn := t.ircConn
+	cs := firstIRCConnectorSpec(t.spec.Connectors)
+	ignoredNicks := t.spec.IgnoredNicks
+	t.mu.Unlock()
+	if a == nil || conn == nil {
+		return false
+	}
+
+	owner := runtime.GuardParams{
+		OwnerMode:     stringField(cs.Config, "owner_mode"),
+		OwnerNick:     stringField(cs.Config, "owner_nick"),
+		OwnerAccount:  stringField(cs.Config, "owner_account"),
+		OwnerHostmask: stringField(cs.Config, "owner_hostmask"),
+		IgnoredNicks:  ignoredNicks,
+		BotNick:       conn.CurrentNick(),
+	}
+	built := commands.Build(defs, t.llmProvider, func(d commands.Definition) agent.CommandGuard {
+		return runtime.PerCommandGuard(string(d.Access), d.Allowlist, owner)
+	}, t.log)
+	a.Commands.ReplaceDynamic(built)
+	return true
+}
+
+// firstIRCConnectorSpec returns the tenant's IRC connector spec (the only
+// connector type pooled mode runs today), or a zero spec when none is present.
+func firstIRCConnectorSpec(conns []ConnectorSpec) ConnectorSpec {
+	for _, c := range conns {
+		if c.Type == "irc" {
+			return c
+		}
+	}
+	return ConnectorSpec{}
 }
 
 // stop cancels the tenant and waits for its goroutine to drain.

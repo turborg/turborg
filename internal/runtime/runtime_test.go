@@ -2,8 +2,6 @@ package runtime_test
 
 import (
 	"context"
-	"errors"
-	"iter"
 	"os"
 	"testing"
 	"time"
@@ -13,9 +11,7 @@ import (
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/config"
 	"github.com/turborg/turborg/internal/connector/irc"
-	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/runtime"
-	"github.com/turborg/turborg/internal/version"
 )
 
 func TestBuildStandalone(t *testing.T) {
@@ -40,8 +36,49 @@ func TestBuildWithAnthropic(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, b.LLM)
 	assert.Equal(t, "claude-sonnet-4-6", b.LLM.Model())
-	assert.Contains(t, b.Agent.Commands.Names(), "ask",
-		"!ask command must be registered when LLM is wired")
+	assert.Empty(t, b.Agent.Commands.Names(),
+		"no commands are registered until a command set is configured")
+}
+
+func TestBuildWithOpenAICompatProvider(t *testing.T) {
+	s := &config.Settings{
+		CommandPrefix: "!",
+		LLMProvider:   "openai_compat",
+		LLMBaseURL:    "https://openrouter.ai/api/v1",
+		LLMAPIKey:     "sk-router",
+		LLMModel:      "openai/gpt-4o-mini",
+	}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	require.NotNil(t, b.LLM, "TURBORG_LLM_* config must mint an LLM provider")
+	assert.Equal(t, "openai/gpt-4o-mini", b.LLM.Model())
+}
+
+func TestBuildLoadsCommandsFromEnv(t *testing.T) {
+	s := &config.Settings{
+		CommandPrefix:     "!",
+		CustomCommandsMax: 5,
+		Commands:          `[{"name":"rules","type":"static","template":"be nice","access":"everyone"}]`,
+	}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	assert.Contains(t, b.Agent.Commands.Names(), "rules")
+
+	out, err := b.Agent.Commands.Dispatch(context.Background(),
+		agent.NewInbound("irc", "#test", "alice", "!rules"))
+	require.NoError(t, err)
+	require.NotNil(t, out, "everyone-access static command must dispatch for any sender")
+	assert.Equal(t, "be nice", out.Text)
+}
+
+func TestBuildRejectsMalformedCommandsJSON(t *testing.T) {
+	s := &config.Settings{CommandPrefix: "!", Commands: `{not json`}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+	_, err := runtime.Build(s, ircCfg, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TURBORG_COMMANDS")
 }
 
 func TestBuildWithGateway(t *testing.T) {
@@ -96,64 +133,6 @@ func TestBuildRejectsUnknownConnector(t *testing.T) {
 	_, err := runtime.Build(s, ircCfg, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not yet implemented in Go")
-}
-
-func TestVersionCommand(t *testing.T) {
-	s := &config.Settings{
-		CommandPrefix: "!",
-		// !version is owner-gated by default since OwnerMode defaults to
-		// "none" (no commands accepted). Configure mode=external for
-		// alice so the dispatch path can run the command.
-		OwnerMode: "external",
-		OwnerNick: "alice",
-	}
-	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
-	b, err := runtime.Build(s, ircCfg, nil)
-	require.NoError(t, err)
-
-	env := agent.NewInbound("irc", "#test", "alice", "!version")
-	env.Metadata["account"] = "alice"
-	out, err := b.Agent.Commands.Dispatch(context.Background(), env)
-	require.NoError(t, err)
-	require.NotNil(t, out)
-	assert.Contains(t, out.Text, version.Version)
-	assert.Contains(t, out.Text, "turborg")
-}
-
-func TestAskCommandReturnsUsageWithoutArgs(t *testing.T) {
-	a := agent.NewWithPrefix(nil, "!")
-	runtime.RegisterBuiltinCommands(a, fakeLLM{})
-
-	out, err := a.Commands.Dispatch(context.Background(),
-		agent.NewInbound("irc", "#test", "alice", "!ask"))
-	require.NoError(t, err)
-	require.NotNil(t, out)
-	assert.Contains(t, out.Text, "usage:")
-}
-
-func TestAskCommandCallsProvider(t *testing.T) {
-	a := agent.NewWithPrefix(nil, "!")
-	llmStub := fakeLLM{response: "the answer\n\nis    42"}
-	runtime.RegisterBuiltinCommands(a, llmStub)
-
-	out, err := a.Commands.Dispatch(context.Background(),
-		agent.NewInbound("irc", "#test", "alice", "!ask what is the answer"))
-	require.NoError(t, err)
-	require.NotNil(t, out)
-	assert.Equal(t, "the answer is 42", out.Text,
-		"collapseWhitespace should normalize internal newlines + spans")
-}
-
-func TestAskCommandHandlesProviderError(t *testing.T) {
-	a := agent.NewWithPrefix(nil, "!")
-	runtime.RegisterBuiltinCommands(a, fakeLLM{err: errors.New("rate limited")})
-
-	out, err := a.Commands.Dispatch(context.Background(),
-		agent.NewInbound("irc", "#test", "alice", "!ask hi"))
-	require.NoError(t, err)
-	require.NotNil(t, out)
-	assert.Contains(t, out.Text, "sorry")
-	assert.Contains(t, out.Text, "rate limited")
 }
 
 // --- guard composition ---------------------------------------------------
@@ -818,19 +797,4 @@ func TestBuildIgnoresRealnameTemplateWithoutLock(t *testing.T) {
 	_, err := runtime.Build(s, ircCfg, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "user-supplied", ircCfg.RealName)
-}
-
-// --- fakeLLM stub --------------------------------------------------------
-
-type fakeLLM struct {
-	response string
-	err      error
-}
-
-func (f fakeLLM) Model() string { return "fake" }
-func (f fakeLLM) Ask(_ context.Context, _ string, _ ...llm.CallOption) (string, error) {
-	return f.response, f.err
-}
-func (f fakeLLM) Stream(_ context.Context, _ string, _ ...llm.CallOption) iter.Seq2[string, error] {
-	return func(_ func(string, error) bool) {}
 }

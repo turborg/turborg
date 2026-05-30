@@ -16,7 +16,8 @@ turborg connects an IRC nick to a network, joins channels, runs commands you reg
 - **A built-in IRC bouncer** — local clients connect to the bot's loopback port, authenticate with a password, and tunnel through the bot's upstream session. The bot stays in control while a human can lurk and chat from their own client.
 - **A WebSocket gateway + reference web UI** — vanilla-JS single-page client at `/` with channel sidebar, member list, slash commands, IndexedDB-backed scrollback, browser notifications. The protocol is stable and documented so SaaS deployments can swap in their own UI.
 - **A normalized `Envelope`** — the same handler that runs on IRC will also run on Discord / Telegram / Web when those connectors land.
-- **Optional LLM, not the centerpiece** — set an API key and `!ask` is wired in (Anthropic Claude with prompt caching). Leave it unset and the rest of the bot doesn't care.
+- **Data-driven commands** — the bot ships with none. Define commands as data (a trigger name, a `static` or `llm` type, a template, and an access policy); they're loaded from config and dispatched at runtime. No recompile to add or change one.
+- **Optional LLM, not the centerpiece** — point a command at an LLM (Anthropic, or any OpenAI-compatible endpoint via the router) and it answers prompts. Leave the LLM unset and the rest of the bot doesn't care.
 
 The design separates **how the bot talks to a network** (the connector) from **how it thinks** (any LLM, or none) from **what it does** (your handlers).
 
@@ -40,16 +41,18 @@ Minimum config — three env vars and you're online:
 export TURBORG_IRC_HOSTNAME=irc.libera.chat
 export TURBORG_IRC_NICK=myturborg
 export TURBORG_IRC_CHANNELS=#turborg-test
+export TURBORG_CUSTOM_COMMANDS_MAX=-1
+export TURBORG_COMMANDS='[{"name":"ping","type":"static","template":"pong","access":"everyone"}]'
 turborg run
 ```
 
-In `#turborg-test`, type `!ping` — the bot replies `pong`. That's it.
+In `#turborg-test`, type `!ping` — the bot replies `pong`, because that's the command you just defined. Swap the template, add more, or point a `"type":"llm"` command at a model — all without recompiling.
 
 ### Optional extras (each independent)
 
 | Want to…                                | Set this                                          |
 |------------------------------------------|---------------------------------------------------|
-| Enable the `!ask` AI command             | `TURBORG_ANTHROPIC_API_KEY=sk-...`                |
+| Back `llm`-type commands with an LLM     | `TURBORG_LLM_API_KEY=sk-...` (`TURBORG_LLM_PROVIDER=anthropic` by default) |
 | Attach HexChat through the bouncer       | `TURBORG_IRC_BOUNCER_PASSWORD=…`                  |
 | Open the web UI at `http://127.0.0.1:8765/` | `TURBORG_GATEWAY_PASSWORD=…`                   |
 
@@ -102,7 +105,7 @@ export TURBORG_IRC_CHANNELS=#turborg-test
 go run ./examples/turborg_irc
 ```
 
-`!ping`, `!help`, `!version` are pre-registered builtins. `!echo hello world` is the custom command this example adds. Ctrl-C unwinds cleanly within ~500ms.
+The agent ships with no commands; `!echo hello world` is the one this example registers in code. (The binary instead loads commands from `TURBORG_COMMANDS` — see the CLI quickstart above.) Ctrl-C unwinds cleanly within ~500ms.
 
 ## Run with Docker
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"iter"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/connector/irc"
+	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/messages"
 	"github.com/turborg/turborg/internal/web"
 )
@@ -86,6 +88,30 @@ func (s *fakeSender) Outbound() []*agent.OutboundEnvelope {
 	out := make([]*agent.OutboundEnvelope, len(s.sent))
 	copy(out, s.sent)
 	return out
+}
+
+type testLLM struct {
+	response string
+}
+
+func (t *testLLM) Model() string { return "test" }
+func (t *testLLM) Ask(_ context.Context, _ string, _ ...llm.CallOption) (string, error) {
+	return t.response, nil
+}
+func (t *testLLM) Stream(_ context.Context, _ string, _ ...llm.CallOption) iter.Seq2[string, error] {
+	return func(yield func(string, error) bool) {}
+}
+
+type testLLMErr struct {
+	err error
+}
+
+func (t *testLLMErr) Model() string { return "test" }
+func (t *testLLMErr) Ask(_ context.Context, _ string, _ ...llm.CallOption) (string, error) {
+	return "", t.err
+}
+func (t *testLLMErr) Stream(_ context.Context, _ string, _ ...llm.CallOption) iter.Seq2[string, error] {
+	return func(yield func(string, error) bool) {}
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -1087,6 +1113,244 @@ func TestHistoryOpRejectsNonChannelTarget(t *testing.T) {
 	defer cancel()
 	_, _, err := conn.Read(ctx)
 	assert.Error(t, err, "non-channel target must not produce a history_result")
+}
+
+// --- /tb ops ---------------------------------------------------------
+
+func TestTBOpSummarizeNoProvider(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	bridge.state.OnSelfJoin("#x")
+	opts := newOptions(t, "p")
+	g, _, td := startGateway(t, opts, bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+
+	body, _ := json.Marshal(map[string]any{
+		"op": "tb", "sub": "summarize", "channel": "#x",
+	})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	got := readJSON(t, conn)
+	assert.Equal(t, "tb_error", got["op"])
+	assert.Contains(t, got["message"], "No LLM provider")
+}
+
+func TestTBOpSummarizeSuccess(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	bridge.state.OnSelfJoin("#x")
+	opts := newOptions(t, "p")
+	store := opts.MessageStore.(*messages.MemoryStore)
+	for i, text := range []string{"hello", "world", "test"} {
+		_ = store.Submit(context.Background(), messages.Message{
+			Channel: "#x", Nick: "alice", Text: text,
+			TS: time.Now().Add(time.Duration(i) * time.Second),
+		})
+	}
+	opts.LLMProvider = &testLLM{response: "  chat summary  "}
+	opts.TBSummarizeMaxMessages = 200
+	g, _, td := startGateway(t, opts, bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+	// Drain the initial replay (3 messages).
+	for range 3 {
+		_ = readJSON(t, conn)
+	}
+
+	// Send with explicit n > cap to exercise both the n-parsing and n>cap branches.
+	body, _ := json.Marshal(map[string]any{
+		"op": "tb", "sub": "summarize", "channel": "#x", "n": float64(500),
+	})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	// First frame: tb_status.
+	status := readJSON(t, conn)
+	assert.Equal(t, "tb_status", status["op"])
+
+	// Second frame: tb_result.
+	result := readJSON(t, conn)
+	assert.Equal(t, "tb_result", result["op"])
+	assert.Equal(t, "summarize", result["sub"])
+	assert.Equal(t, "#x", result["channel"])
+	assert.Equal(t, "chat summary", result["summary"])
+}
+
+func TestTBOpSummarizeZeroCap(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	bridge.state.OnSelfJoin("#x")
+	opts := newOptions(t, "p")
+	opts.LLMProvider = &testLLM{response: "ok"}
+	opts.TBSummarizeMaxMessages = 0
+	g, _, td := startGateway(t, opts, bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+
+	body, _ := json.Marshal(map[string]any{
+		"op": "tb", "sub": "summarize", "channel": "#x",
+	})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	got := readJSON(t, conn)
+	assert.Equal(t, "tb_error", got["op"])
+	assert.Contains(t, got["message"], "not available on your plan")
+}
+
+func TestTBOpUnknownSubcommand(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	g, _, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+
+	body, _ := json.Marshal(map[string]any{
+		"op": "tb", "sub": "bogus", "channel": "#x",
+	})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	got := readJSON(t, conn)
+	assert.Equal(t, "tb_error", got["op"])
+	assert.Contains(t, got["message"], "Unknown")
+}
+
+func TestTBOpSummarizeNoStore(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	bridge.state.OnSelfJoin("#x")
+	opts := newOptions(t, "p")
+	opts.MessageStore = nil
+	opts.LLMProvider = &testLLM{response: "ok"}
+	opts.TBSummarizeMaxMessages = 200
+	g, _, td := startGateway(t, opts, bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+
+	body, _ := json.Marshal(map[string]any{
+		"op": "tb", "sub": "summarize", "channel": "#x",
+	})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	got := readJSON(t, conn)
+	assert.Equal(t, "tb_error", got["op"])
+	assert.Contains(t, got["message"], "No message history")
+}
+
+func TestTBOpSummarizeEmptyChannel(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	bridge.state.OnSelfJoin("#empty")
+	opts := newOptions(t, "p")
+	opts.LLMProvider = &testLLM{response: "ok"}
+	opts.TBSummarizeMaxMessages = 200
+	g, _, td := startGateway(t, opts, bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+
+	body, _ := json.Marshal(map[string]any{
+		"op": "tb", "sub": "summarize", "channel": "#empty",
+	})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	// Status frame first.
+	status := readJSON(t, conn)
+	assert.Equal(t, "tb_status", status["op"])
+
+	got := readJSON(t, conn)
+	assert.Equal(t, "tb_error", got["op"])
+	assert.Contains(t, got["message"], "No messages")
+}
+
+func TestTBOpSummarizePersistsToStore(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	bridge.state.OnSelfJoin("#x")
+	opts := newOptions(t, "p")
+	store := opts.MessageStore.(*messages.MemoryStore)
+	_ = store.Submit(context.Background(), messages.Message{
+		Channel: "#x", Nick: "alice", Text: "hello", TS: time.Now(),
+	})
+	opts.LLMProvider = &testLLM{response: "great chat"}
+	opts.TBSummarizeMaxMessages = 200
+	g, _, td := startGateway(t, opts, bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+	_ = readJSON(t, conn) // replay
+
+	body, _ := json.Marshal(map[string]any{
+		"op": "tb", "sub": "summarize", "channel": "#x",
+	})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	_ = readJSON(t, conn) // tb_status
+	_ = readJSON(t, conn) // tb_result
+
+	// The summary should be persisted in the store.
+	require.Eventually(t, func() bool {
+		return store.Len("#x") == 2
+	}, 2*time.Second, 50*time.Millisecond, "summary should be stored")
+}
+
+func TestTBOpSummarizeLLMError(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	bridge.state.OnSelfJoin("#x")
+	opts := newOptions(t, "p")
+	store := opts.MessageStore.(*messages.MemoryStore)
+	_ = store.Submit(context.Background(), messages.Message{
+		Channel: "#x", Nick: "alice", Text: "hello", TS: time.Now(),
+	})
+	opts.LLMProvider = &testLLMErr{err: errors.New("api down")}
+	opts.TBSummarizeMaxMessages = 200
+	g, _, td := startGateway(t, opts, bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+	_ = readJSON(t, conn) // replay
+
+	body, _ := json.Marshal(map[string]any{
+		"op": "tb", "sub": "summarize", "channel": "#x",
+	})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	_ = readJSON(t, conn) // tb_status
+	got := readJSON(t, conn)
+	assert.Equal(t, "tb_error", got["op"])
+	assert.Contains(t, got["message"], "LLM request failed")
+}
+
+func TestTBOpSummarizeMissingChannel(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	g, _, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+
+	body, _ := json.Marshal(map[string]any{
+		"op": "tb", "sub": "summarize",
+	})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	got := readJSON(t, conn)
+	assert.Equal(t, "tb_error", got["op"])
+	assert.Contains(t, got["message"], "Channel is required")
 }
 
 // --- sendTo error path: closed conn is removed from clients ------

@@ -1584,3 +1584,108 @@ func TestBouncerZeroClientLimitsIsUnrestricted(t *testing.T) {
 	assert.True(t, sawNick, "unrestricted limits must let NICK through")
 	assert.True(t, sawJoin, "unrestricted limits must let JOIN through")
 }
+
+// authSimple sends PASS + NICK + USER without CAP negotiation so the
+// bouncer authenticates the client. Drains initial lines until idle.
+func authSimple(t *testing.T, conn net.Conn, r *bufio.Reader, password string) {
+	t.Helper()
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _ = r.ReadString('\n') // pre-auth NOTICE
+	writeLine(t, conn, "PASS "+password)
+	writeLine(t, conn, "NICK testclient")
+	writeLine(t, conn, "USER testclient 0 * :test")
+	// Drain welcome + any replay until idle.
+	conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	for {
+		if _, err := r.ReadString('\n'); err != nil {
+			break
+		}
+	}
+}
+
+func TestBouncerTBSummarizeNoChannel(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#test")
+	b.AttachState(state, "turborg", "ident", "host")
+
+	conn, r := bouncerClient(t, addr)
+	defer conn.Close()
+	authSimple(t, conn, r, "hunter2")
+
+	writeLine(t, conn, "TB SUMMARIZE")
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var gotHint bool
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		if strings.Contains(line, "specify a channel") {
+			gotHint = true
+			break
+		}
+	}
+	assert.True(t, gotHint, "TB SUMMARIZE without channel should produce a hint")
+}
+
+func TestBouncerTBHelp(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	b.AttachState(state, "turborg", "ident", "host")
+
+	conn, r := bouncerClient(t, addr)
+	defer conn.Close()
+	authSimple(t, conn, r, "hunter2")
+
+	writeLine(t, conn, "TB")
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var gotUsage bool
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		if strings.Contains(line, "Usage") || strings.Contains(line, "summarize") {
+			gotUsage = true
+			break
+		}
+	}
+	assert.True(t, gotUsage, "TB with no args should show usage help")
+}
+
+func TestBouncerTBSummarizeNoCap(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#test")
+	b.AttachState(state, "turborg", "ident", "host")
+	b.AttachClientLimits(irc.ClientLimits{TBSummarizeMaxMessages: 0})
+
+	store := messages.NewMemoryStore(0)
+	_ = store.Submit(context.Background(), messages.Message{
+		Channel: "#test", Nick: "alice", Text: "hi", TS: time.Now(),
+	})
+	b.AttachMessageStore(store)
+
+	conn, r := bouncerClient(t, addr)
+	defer conn.Close()
+	authSimple(t, conn, r, "hunter2")
+
+	writeLine(t, conn, "TB SUMMARIZE #test")
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var gotError bool
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		if strings.Contains(line, "not available") || strings.Contains(line, "Error") {
+			gotError = true
+			break
+		}
+	}
+	assert.True(t, gotError, "TB SUMMARIZE with cap=0 should produce an error")
+}

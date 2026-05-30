@@ -18,8 +18,11 @@ func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
 
-func TestAgentBuiltinPing(t *testing.T) {
+func TestAgentDispatchesRegisteredCommand(t *testing.T) {
 	a := agent.New(nil)
+	a.Commands.Register("ping", func(_ context.Context, env *agent.InboundEnvelope, _ []string) (*agent.OutboundEnvelope, error) {
+		return agent.ReplyTo(env, "pong"), nil
+	}, nil)
 	c := fakeconn.New("fake")
 	a.AddConnector(c)
 
@@ -104,24 +107,26 @@ func TestAgentStartErrorAbortsRun(t *testing.T) {
 func TestAgentNewWithPrefix(t *testing.T) {
 	a := agent.NewWithPrefix(nil, ".")
 	assert.Equal(t, ".", a.Commands.Prefix())
-	assert.Contains(t, a.Commands.Names(), "ping")
+	assert.Empty(t, a.Commands.Names(), "agents ship with no commands registered")
 }
 
-func TestAgentBuiltinHelp(t *testing.T) {
+func TestAgentShipsWithNoCommands(t *testing.T) {
+	// No built-ins: a fresh agent dispatches nothing until commands are
+	// installed via the registry's dynamic path.
 	a := agent.New(nil)
 	c := fakeconn.New("fake")
 	a.AddConnector(c)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	var msgs atomic.Int32
+	a.Events.Subscribe(agent.EventMessage, func(context.Context, *agent.Event) { msgs.Add(1) })
 	go func() { _ = a.Run(ctx) }()
 
-	c.Feed(agent.NewInbound("fake", "#ch", "alice", "!help"))
-	require.Eventually(t, func() bool { return len(c.Sent()) == 1 }, 1*time.Second, 10*time.Millisecond)
-
-	sent := c.Sent()[0]
-	assert.Contains(t, sent.Text, "ping")
-	assert.Contains(t, sent.Text, "help")
+	c.Feed(agent.NewInbound("fake", "#ch", "alice", "!ping"))
+	require.Eventually(t, func() bool { return msgs.Load() == 1 }, 1*time.Second, 10*time.Millisecond)
+	assert.Empty(t, c.Sent(), "no command is registered, so nothing is dispatched")
 }
 
 func TestAgentSwallowsHandlerError(t *testing.T) {
@@ -147,6 +152,9 @@ func TestAgentSwallowsHandlerError(t *testing.T) {
 
 func TestAgentLogsSendError(t *testing.T) {
 	a := agent.New(nil)
+	a.Commands.Register("ping", func(_ context.Context, env *agent.InboundEnvelope, _ []string) (*agent.OutboundEnvelope, error) {
+		return agent.ReplyTo(env, "pong"), nil
+	}, nil)
 	c := &sendFails{Conn: fakeconn.New("sendfail")}
 	a.AddConnector(c)
 

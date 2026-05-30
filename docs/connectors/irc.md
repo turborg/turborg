@@ -24,9 +24,9 @@ export TURBORG_IRC_CHANNELS=#turborg-test
 turborg run
 ```
 
-That's it. The bot connects with TLS on port 6697, joins
-`#turborg-test`, and answers `!ping`. Everything below this line is
-optional.
+That's it. The bot connects with TLS on port 6697 and joins
+`#turborg-test`. Define what it responds to in `TURBORG_COMMANDS` (see the
+README). Everything below this line is optional.
 
 ---
 

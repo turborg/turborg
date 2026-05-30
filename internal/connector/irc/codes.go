@@ -89,6 +89,9 @@ const (
 	// framing CHATHISTORY responses and welcome replay for
 	// batch-capable clients.
 	CmdBatch = "BATCH"
+	// CmdTB is the turborg meta-command. Handled locally by the bouncer
+	// and web gateway; never forwarded upstream.
+	CmdTB = "TB"
 )
 
 // IsHandshakeComplete reports whether the given numeric reply signals the

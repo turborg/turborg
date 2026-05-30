@@ -7,18 +7,24 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/turborg/turborg/internal/agent"
+	"github.com/turborg/turborg/internal/commands"
 	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/messages"
 )
 
 // newIRCTenant builds a Tenant whose spec carries one IRC connector with the
 // given extra config keys merged in. No control plane / gateway token, so
-// buildConnectors wires only the connector + shared agent wiring.
-func newIRCTenant(configOverrides map[string]any, caps *PlanCapabilities) *Tenant {
+// buildConnectors wires only the connector + shared agent wiring. cmds is the
+// tenant's data-driven command set (with an unrestricted cap for the tests).
+func newIRCTenant(configOverrides map[string]any, caps *PlanCapabilities, cmds ...commands.Definition) *Tenant {
 	cfg := map[string]any{"network": "irc.example:6697", "nick": "bot"}
 	for k, v := range configOverrides {
 		cfg[k] = v
 	}
+	if caps == nil {
+		caps = &PlanCapabilities{}
+	}
+	caps.CustomCommandsMax = -1
 	return &Tenant{
 		ID:  "t1",
 		log: slog.Default(),
@@ -27,21 +33,24 @@ func newIRCTenant(configOverrides map[string]any, caps *PlanCapabilities) *Tenan
 			CommandPrefix:    "!",
 			Connectors:       []ConnectorSpec{{Type: "irc", Config: cfg, Secrets: map[string]any{}}},
 			PlanCapabilities: caps,
+			Commands:         cmds,
 		},
 	}
 }
 
-// TestBuildConnectorsWiresBuiltins proves the pooled path now gets the builtins
-// the dedicated runtime has — the core of the unify. Before WireCommon, pooled
-// agents only had agent.RegisterBuiltins (ping+help) and no version/ask.
-func TestBuildConnectorsWiresBuiltins(t *testing.T) {
-	tn := newIRCTenant(map[string]any{"owner_mode": "self"}, &PlanCapabilities{MaxChannels: 3})
+// TestBuildConnectorsWiresCommands proves the pooled path installs the tenant's
+// data-driven commands the same way the dedicated runtime does (via the shared
+// WireCommon), and captures the live connector for the bouncer router.
+func TestBuildConnectorsWiresCommands(t *testing.T) {
+	tn := newIRCTenant(
+		map[string]any{"owner_mode": "self"},
+		&PlanCapabilities{MaxChannels: 3},
+		commands.Definition{Name: "rules", Type: commands.TypeStatic, Template: "be nice", Access: commands.AccessEveryone},
+	)
 	a := agent.NewWithPrefix(tn.log, "!")
 	tn.buildConnectors(a)
 
-	names := a.Commands.Names()
-	require.Contains(t, names, "ping")
-	require.Contains(t, names, "version")
+	require.Contains(t, a.Commands.Names(), "rules")
 
 	tn.mu.Lock()
 	conn := tn.ircConn
@@ -50,34 +59,41 @@ func TestBuildConnectorsWiresBuiltins(t *testing.T) {
 }
 
 // TestBuildConnectorsOwnerGuardFromConfig proves the owner-trust config that
-// travels in the connector config (owner_mode) is applied to the command guard
-// for pooled tenants exactly as it is for dedicated.
+// travels in the connector config (owner_mode) gates an owner-access command
+// for pooled tenants exactly as it does for dedicated.
 func TestBuildConnectorsOwnerGuardFromConfig(t *testing.T) {
-	tn := newIRCTenant(map[string]any{"owner_mode": "self"}, nil)
+	tn := newIRCTenant(
+		map[string]any{"owner_mode": "self"}, nil,
+		commands.Definition{Name: "secret", Type: commands.TypeStatic, Template: "shh", Access: commands.AccessOwner},
+	)
 	a := agent.NewWithPrefix(tn.log, "!")
 	tn.buildConnectors(a)
 
 	// owner_mode=self → the bot's own nick is trusted; strangers are denied.
-	allowed, err := a.Commands.Dispatch(context.Background(), &agent.InboundEnvelope{Text: "!ping", Sender: "bot"})
+	allowed, err := a.Commands.Dispatch(context.Background(), &agent.InboundEnvelope{Text: "!secret", Sender: "bot"})
 	require.NoError(t, err)
 	require.NotNil(t, allowed)
-	require.Equal(t, "pong", allowed.Text)
+	require.Equal(t, "shh", allowed.Text)
 
-	denied, err := a.Commands.Dispatch(context.Background(), &agent.InboundEnvelope{Text: "!ping", Sender: "stranger"})
+	denied, err := a.Commands.Dispatch(context.Background(), &agent.InboundEnvelope{Text: "!secret", Sender: "stranger"})
 	require.NoError(t, err)
 	require.Nil(t, denied)
 }
 
 // TestBuildConnectorsOwnerGuardDefaultDenies proves a tenant with no owner
-// config falls back to "none" — every !command denied, matching dedicated.
+// config falls back to "none" — an owner-access command is denied for all,
+// matching dedicated.
 func TestBuildConnectorsOwnerGuardDefaultDenies(t *testing.T) {
-	tn := newIRCTenant(nil, nil)
+	tn := newIRCTenant(
+		nil, nil,
+		commands.Definition{Name: "secret", Type: commands.TypeStatic, Template: "shh", Access: commands.AccessOwner},
+	)
 	a := agent.NewWithPrefix(tn.log, "!")
 	tn.buildConnectors(a)
 
-	out, err := a.Commands.Dispatch(context.Background(), &agent.InboundEnvelope{Text: "!ping", Sender: "bot"})
+	out, err := a.Commands.Dispatch(context.Background(), &agent.InboundEnvelope{Text: "!secret", Sender: "bot"})
 	require.NoError(t, err)
-	require.Nil(t, out, "no owner_mode → none → !commands denied")
+	require.Nil(t, out, "no owner_mode → none → owner-access command denied")
 }
 
 // TestCommonParamsMapsCapsAndOwner locks the spec→CommonParams mapping: owner
@@ -103,7 +119,7 @@ func TestCommonParamsMapsCapsAndOwner(t *testing.T) {
 	}
 	store := messages.NewMemoryStore(0)
 
-	p := tn.commonParams(cs, caps, "bot", store, []string{"spammer", "troll"})
+	p := tn.commonParams(cs, caps, "bot", store, []string{"spammer", "troll"}, nil)
 
 	require.Equal(t, "external", p.Owner.OwnerMode)
 	require.Equal(t, "alice", p.Owner.OwnerNick)

@@ -7,7 +7,8 @@
 //	export TURBORG_IRC_CHANNELS=#turborg-test
 //	go run ./examples/turborg_irc
 //
-// In #turborg-test, type `!ping` or `!echo hello` — the bot replies.
+// In #turborg-test, type `!echo hello` — the bot replies. (The agent ships
+// with no commands; this example registers `echo` in code below.)
 // Ctrl-C unwinds cleanly within ~500ms.
 //
 // Same wiring the production `turborg` binary uses internally (see

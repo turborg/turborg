@@ -46,7 +46,8 @@ func newRunCmd() *cobra.Command {
 Default path: a single IRC connector. Required env:
   TURBORG_IRC_HOSTNAME, TURBORG_IRC_NICK, TURBORG_IRC_CHANNELS
 
-Optional: TURBORG_ANTHROPIC_API_KEY enables the !ask command.
+Commands are data-driven: define them in TURBORG_COMMANDS (a JSON array).
+Optional: TURBORG_LLM_API_KEY (or TURBORG_ANTHROPIC_API_KEY) backs llm-type commands.
 
 Multi-connector: set TURBORG_CONNECTORS=irc[,...] to register every listed
 connector under one agent process. Each connector reads its own

@@ -21,6 +21,7 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
+	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/logging"
 	"github.com/turborg/turborg/internal/runtime"
 	"github.com/turborg/turborg/internal/safe"
@@ -106,20 +107,28 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 	// owns check, so the control-plane token suffices.
 	srv.SetControlPlane(os.Getenv("TURBORG_CONTROL_PLANE_URL"), os.Getenv("TURBORG_CONTROL_PLANE_TOKEN"))
 
-	// Shared LLM provider for !ask, built once from the pool process's own env
-	// (one Anthropic key per host, shared across all tenants — a stateless HTTP
-	// client). Absent key → provider nil → !ask simply isn't registered. A build
-	// error is logged but never fatal: the agent must still serve.
-	model := os.Getenv("TURBORG_ANTHROPIC_MODEL")
-	if model == "" {
-		model = defaultAnthropicModel
+	// Shared LLM provider for LLM-type commands, built once from the pool
+	// process's own env (one key per host, shared across all tenants — a
+	// stateless HTTP client). The unified router (TURBORG_LLM_*) takes
+	// precedence; otherwise the legacy TURBORG_ANTHROPIC_* envs are used.
+	// Absent key → provider nil → LLM-type commands are skipped. A build error
+	// is logged but never fatal: the agent must still serve.
+	buildPoolLLM := func() (llm.Provider, error) {
+		if kind := os.Getenv("TURBORG_LLM_PROVIDER"); kind != "" || os.Getenv("TURBORG_LLM_API_KEY") != "" {
+			return runtime.BuildLLMProvider(kind, os.Getenv("TURBORG_LLM_BASE_URL"), os.Getenv("TURBORG_LLM_API_KEY"), os.Getenv("TURBORG_LLM_MODEL"))
+		}
+		model := os.Getenv("TURBORG_ANTHROPIC_MODEL")
+		if model == "" {
+			model = defaultAnthropicModel
+		}
+		return runtime.NewAnthropicProvider(os.Getenv("TURBORG_ANTHROPIC_API_KEY"), model)
 	}
-	switch provider, err := runtime.NewAnthropicProvider(os.Getenv("TURBORG_ANTHROPIC_API_KEY"), model); {
+	switch provider, err := buildPoolLLM(); {
 	case err != nil:
 		log.Error("llm provider disabled", "err", err)
 	case provider != nil:
 		srv.SetLLM(provider)
-		log.Info("llm provider enabled", "model", model)
+		log.Info("llm provider enabled", "model", provider.Model())
 	}
 
 	// Pooled bouncer ingress: one PROXY-v2 router fronts every tenant (HAProxy

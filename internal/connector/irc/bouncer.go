@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/messages"
 )
 
@@ -327,6 +329,9 @@ type Bouncer struct {
 	welcomeReplayMu    sync.RWMutex
 	welcomeReplayDepth int
 
+	// tb powers /tb subcommands (summarize, etc.).
+	tb *tbHandler
+
 	// keepalive timings for the server→client PING that holds idle
 	// attachments open and reaps dead ones. Defaults set in NewBouncer;
 	// override (e.g. short intervals in tests) via AttachClientKeepalive.
@@ -357,6 +362,7 @@ func NewBouncer(password, host string, port int, rl *RateLimiter, log *slog.Logg
 		upstreamHost: "turborg",
 		pingInterval: defaultClientPingInterval,
 		pongGrace:    defaultClientPongGrace,
+		tb:           newTBHandler(log),
 	}, nil
 }
 
@@ -377,6 +383,11 @@ func (b *Bouncer) clientKeepalive() (interval, grace time.Duration) {
 	return b.pingInterval, b.pongGrace
 }
 
+// AttachLLMProvider wires the LLM provider used by /tb subcommands.
+func (b *Bouncer) AttachLLMProvider(p llm.Provider) {
+	b.tb.setLLM(p)
+}
+
 // AttachMessageStore wires the bouncer to a shared messages.Store.
 // Replay-on-attach and CHATHISTORY both query through this seam. nil
 // disables replay; the bouncer still serves live traffic normally.
@@ -390,6 +401,64 @@ func (b *Bouncer) currentMessageStore() messages.Store {
 	b.messageStoreMu.RLock()
 	defer b.messageStoreMu.RUnlock()
 	return b.messageStore
+}
+
+// handleTB dispatches /tb subcommands from attached IRC clients.
+// Format: TB SUMMARIZE [#channel] [N]
+func (b *Bouncer) handleTB(client *BouncerClient, msg Message) {
+	if len(msg.Params) == 0 {
+		b.notifyService(client, "Usage: /tb summarize [#channel] [N]")
+		return
+	}
+
+	sub, args := strings.ToLower(msg.Params[0]), msg.Params[1:]
+	switch sub {
+	case "summarize":
+		b.handleTBSummarize(client, args)
+	default:
+		b.notifyService(client, "Unknown /tb subcommand: "+sub+". Available: summarize")
+	}
+}
+
+func (b *Bouncer) handleTBSummarize(client *BouncerClient, args []string) {
+	var channel string
+	var n int
+
+	for _, a := range args {
+		if startsWithChannelSigil(a) {
+			channel = a
+		} else if v, err := strconv.Atoi(a); err == nil && v > 0 {
+			n = v
+		}
+	}
+
+	if channel == "" {
+		b.notifyService(client, "Please specify a channel: /tb summarize #channel [N]")
+		return
+	}
+
+	limits := b.currentClientLimits()
+	cap := limits.TBSummarizeMaxMessages
+	store := b.currentMessageStore()
+
+	b.notifyService(client, "Summarizing "+channel+"...")
+
+	go func() {
+		summary, err := b.tb.tbSummarize(context.Background(), channel, n, cap, store)
+		if err != nil {
+			b.notifyService(client, "Error: "+err.Error())
+			return
+		}
+		if store != nil {
+			_ = store.Submit(context.Background(), messages.Message{
+				Channel: channel,
+				Nick:    "*turborg",
+				Text:    "\U0001f4cb Summary: " + summary,
+				TS:      time.Now(),
+			})
+		}
+		b.notifyService(client, "["+channel+" summary] "+summary)
+	}()
 }
 
 func (b *Bouncer) AttachUpstream(send SendUpstreamFunc) {
@@ -406,6 +475,12 @@ func (b *Bouncer) AttachClientLimits(l ClientLimits) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.limits = l
+}
+
+func (b *Bouncer) currentClientLimits() ClientLimits {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.limits
 }
 
 // AttachOutboundThrottle installs the per-target outbound throttle the
@@ -805,6 +880,12 @@ func (b *Bouncer) handleLine(client *BouncerClient, line string) {
 	// run BEFORE the forwardable filter.
 	if msg.Command == CmdChathistory {
 		b.handleChathistory(client, msg)
+		return
+	}
+
+	// TB is the turborg meta-command (/tb summarize [N]).
+	if msg.Command == CmdTB {
+		b.handleTB(client, msg)
 		return
 	}
 
