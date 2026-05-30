@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -55,6 +56,11 @@ type CommonParams struct {
 	// skipped at build time. Shared across pooled tenants (a stateless HTTP
 	// client) and per-process for dedicated.
 	LLM llm.Provider
+
+	// LLMInputCap / LLMOutputCap are the rolling-24h token budget caps.
+	// Both > 0 to enable enforcement via BudgetedProvider. 0 = unrestricted.
+	LLMInputCap  int
+	LLMOutputCap int
 
 	// ActivityHook fires on connector activity (bouncer attach, message
 	// traffic). Nil → activity hooks are not attached. Dedicated passes its
@@ -128,8 +134,37 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 	if p.Store != nil {
 		ircConn.SetMessageStore(p.Store)
 	}
-	if p.LLM != nil {
-		ircConn.SetLLMProvider(p.LLM)
+
+	// Wrap the LLM provider with budget enforcement when caps are set.
+	// The wrapped provider is used everywhere: commands, /tb, gateway.
+	provider := p.LLM
+	if provider != nil && (p.LLMInputCap > 0 || p.LLMOutputCap > 0) {
+		budget := llm.NewTokenBudget()
+		provider = llm.NewBudgetedProvider(provider, budget, p.LLMInputCap, p.LLMOutputCap, func(u llm.Usage) {
+			inTotal, outTotal := budget.Totals()
+			log.Info("llm_usage",
+				"input_tokens", u.InputTokens,
+				"output_tokens", u.OutputTokens,
+				"input_total", inTotal,
+				"output_total", outTotal,
+			)
+			a.Events.Publish(context.Background(), &agent.Event{
+				Type: agent.EventLLMUsage,
+				Time: time.Now(),
+				Fields: map[string]any{
+					"input_tokens":  u.InputTokens,
+					"output_tokens": u.OutputTokens,
+					"input_total":   inTotal,
+					"output_total":  outTotal,
+					"input_cap":     p.LLMInputCap,
+					"output_cap":    p.LLMOutputCap,
+				},
+			})
+		})
+	}
+
+	if provider != nil {
+		ircConn.SetLLMProvider(provider)
 	}
 	ircConn.SetBouncerWelcomeReplayDepth(clampReplayDepth(p.BouncerWelcomeReplayDepth))
 
@@ -148,7 +183,7 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 
 	// Install the tenant's data-driven commands. The dynamic set is fully
 	// owned by ReplaceDynamic, so a later hot reload swaps it atomically.
-	built := commands.Build(p.Commands, p.LLM, func(d commands.Definition) agent.CommandGuard {
+	built := commands.Build(p.Commands, provider, func(d commands.Definition) agent.CommandGuard {
 		return PerCommandGuard(string(d.Access), d.Allowlist, p.Owner)
 	}, log)
 	a.Commands.ReplaceDynamic(built)

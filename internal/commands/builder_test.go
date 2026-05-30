@@ -29,13 +29,13 @@ type recordingProvider struct {
 }
 
 func (p *recordingProvider) Model() string { return "rec" }
-func (p *recordingProvider) Ask(_ context.Context, prompt string, opts ...llm.CallOption) (string, error) {
+func (p *recordingProvider) Ask(_ context.Context, prompt string, opts ...llm.CallOption) (string, llm.Usage, error) {
 	co := llm.ApplyOptions(opts)
 	p.prompt = prompt
 	p.model = co.Model
 	p.system = co.System
 	p.maxTok = co.MaxTokens
-	return p.resp, p.err
+	return p.resp, llm.Usage{InputTokens: 10, OutputTokens: 5}, p.err
 }
 func (p *recordingProvider) Stream(context.Context, string, ...llm.CallOption) iter.Seq2[string, error] {
 	return func(func(string, error) bool) {}

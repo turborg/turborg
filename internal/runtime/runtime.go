@@ -130,6 +130,8 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		OwnerDMNudgeEvery:         s.OwnerDMNudgeEvery,
 		BouncerWelcomeReplayDepth: ircCfg.BouncerWelcomeReplayDepth,
 		LLM:                       provider,
+		LLMInputCap:               s.LLMInputTokensPerDay,
+		LLMOutputCap:              s.LLMOutputTokensPerDay,
 		ActivityHook:              activityHook,
 		Store:                     store,
 	}, log); err != nil {

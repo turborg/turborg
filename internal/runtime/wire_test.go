@@ -18,8 +18,8 @@ import (
 type stubProvider struct{}
 
 func (stubProvider) Model() string { return "stub" }
-func (stubProvider) Ask(context.Context, string, ...llm.CallOption) (string, error) {
-	return "", nil
+func (stubProvider) Ask(context.Context, string, ...llm.CallOption) (string, llm.Usage, error) {
+	return "", llm.Usage{}, nil
 }
 func (stubProvider) Stream(context.Context, string, ...llm.CallOption) iter.Seq2[string, error] {
 	return func(func(string, error) bool) {}
@@ -122,4 +122,28 @@ func TestWireCommonAllowlistAccess(t *testing.T) {
 	other, err := a.Commands.Dispatch(context.Background(), &agent.InboundEnvelope{Text: "!team", Sender: "mallory"})
 	require.NoError(t, err)
 	require.Nil(t, other, "a non-owner non-allowlisted sender is denied")
+}
+
+func TestWireCommonWrapsLLMWithBudget(t *testing.T) {
+	a := newWiredAgent(t, runtime.CommonParams{
+		LLM:          stubProvider{},
+		LLMInputCap:  1000,
+		LLMOutputCap: 500,
+		Commands: []commands.Definition{
+			{Name: "ask", Type: commands.TypeLLM, Template: "hi", Access: commands.AccessEveryone},
+		},
+	})
+	require.Contains(t, a.Commands.Names(), "ask")
+}
+
+func TestWireCommonNoBudgetWhenCapsZero(t *testing.T) {
+	a := newWiredAgent(t, runtime.CommonParams{
+		LLM:          stubProvider{},
+		LLMInputCap:  0,
+		LLMOutputCap: 0,
+		Commands: []commands.Definition{
+			{Name: "ask", Type: commands.TypeLLM, Template: "hi", Access: commands.AccessEveryone},
+		},
+	})
+	require.Contains(t, a.Commands.Names(), "ask")
 }

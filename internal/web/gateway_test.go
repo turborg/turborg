@@ -95,8 +95,8 @@ type testLLM struct {
 }
 
 func (t *testLLM) Model() string { return "test" }
-func (t *testLLM) Ask(_ context.Context, _ string, _ ...llm.CallOption) (string, error) {
-	return t.response, nil
+func (t *testLLM) Ask(_ context.Context, _ string, _ ...llm.CallOption) (string, llm.Usage, error) {
+	return t.response, llm.Usage{}, nil
 }
 func (t *testLLM) Stream(_ context.Context, _ string, _ ...llm.CallOption) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {}
@@ -107,8 +107,8 @@ type testLLMErr struct {
 }
 
 func (t *testLLMErr) Model() string { return "test" }
-func (t *testLLMErr) Ask(_ context.Context, _ string, _ ...llm.CallOption) (string, error) {
-	return "", t.err
+func (t *testLLMErr) Ask(_ context.Context, _ string, _ ...llm.CallOption) (string, llm.Usage, error) {
+	return "", llm.Usage{}, t.err
 }
 func (t *testLLMErr) Stream(_ context.Context, _ string, _ ...llm.CallOption) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {}
@@ -404,6 +404,18 @@ func TestEveryEventBusHandlerBroadcastsAnOp(t *testing.T) {
 			agent.Event{Type: agent.EventMessageSent, Fields: map[string]any{"channel": "#x", "sender": "turborg", "text": "echo"}},
 			"message",
 			func(t *testing.T, got map[string]any) { assert.Equal(t, "echo", got["text"]) },
+		},
+		{"LLM_USAGE → llm_usage",
+			agent.Event{Type: agent.EventLLMUsage, Fields: map[string]any{
+				"input_tokens": 100, "output_tokens": 50,
+				"input_total": 200, "output_total": 100,
+				"input_cap": 4000, "output_cap": 1000,
+			}},
+			"llm_usage",
+			func(t *testing.T, got map[string]any) {
+				assert.Equal(t, float64(100), got["input_tokens"])
+				assert.Equal(t, float64(4000), got["input_cap"])
+			},
 		},
 	}
 	for _, tc := range cases {

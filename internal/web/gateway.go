@@ -198,6 +198,7 @@ func (g *Gateway) Subscribe(bus *agent.EventBus) {
 	bus.Subscribe(agent.EventListResult, g.onListResult)
 	bus.Subscribe(agent.EventWhoResult, g.onWhoResult)
 	bus.Subscribe(agent.EventJoinFailed, g.onJoinFailed)
+	bus.Subscribe(agent.EventLLMUsage, g.onLLMUsage)
 
 	if machine := g.bridge.UpstreamState(); machine != nil {
 		sub := machine.Subscribe(g.onUpstreamStateChange)
@@ -887,11 +888,15 @@ func (g *Gateway) handleTBSummarize(ctx context.Context, c *client, channel stri
 			fmt.Fprintf(&sb, "<%s> %s\n", m.Nick, m.Text)
 		}
 		prompt := fmt.Sprintf("Summarize these %d messages from %s:\n\n%s", len(msgs), channel, sb.String())
-		summary, err := provider.Ask(bgCtx, prompt,
+		summary, _, err := provider.Ask(bgCtx, prompt,
 			llm.WithSystem("Summarize the following IRC conversation concisely. Output a short, readable summary suitable for a single IRC message (max ~400 chars). No markdown."),
 			llm.WithMaxTokens(300))
 		if err != nil {
-			g.sendTo(bgCtx, c, map[string]any{"op": "tb_error", "message": "LLM request failed."})
+			msg := "LLM request failed."
+			if errors.Is(err, llm.ErrBudgetExhausted) {
+				msg = "Daily AI token budget spent. Resets on a rolling 24h window."
+			}
+			g.sendTo(bgCtx, c, map[string]any{"op": "tb_error", "message": msg})
 			return
 		}
 		trimmed := strings.TrimSpace(summary)
@@ -1098,6 +1103,18 @@ func (g *Gateway) onJoinFailed(_ context.Context, ev *agent.Event) {
 		"channel": ev.Fields["channel"],
 		"code":    ev.Fields["code"],
 		"reason":  reason,
+	})
+}
+
+func (g *Gateway) onLLMUsage(_ context.Context, ev *agent.Event) {
+	g.broadcast(map[string]any{
+		"op":            "llm_usage",
+		"input_tokens":  ev.Fields["input_tokens"],
+		"output_tokens": ev.Fields["output_tokens"],
+		"input_total":   ev.Fields["input_total"],
+		"output_total":  ev.Fields["output_total"],
+		"input_cap":     ev.Fields["input_cap"],
+		"output_cap":    ev.Fields["output_cap"],
 	})
 }
 

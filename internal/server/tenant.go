@@ -440,7 +440,7 @@ func (t *Tenant) applyTierSettings(s *irc.Settings, caps *PlanCapabilities) {
 // dedicated runtime does (from TURBORG_COMMANDS).
 func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick string, store messages.Store, ignoredNicks []string, cmds []commands.Definition) runtime.CommonParams {
 	var limits irc.ClientLimits
-	var outMax, outWin, nudge, cmdMax, cmdWin, customCmdMax int
+	var outMax, outWin, nudge, cmdMax, cmdWin, customCmdMax, llmInCap, llmOutCap int
 	if caps != nil {
 		limits = irc.ClientLimits{
 			NickLocked:             caps.NickLocked,
@@ -452,6 +452,7 @@ func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick 
 		nudge = caps.OwnerDMNudgeEvery
 		cmdMax, cmdWin = caps.CommandMaxPerWindow, caps.CommandWindowSeconds
 		customCmdMax = caps.CustomCommandsMax
+		llmInCap, llmOutCap = caps.LLMInputTokensPerDay, caps.LLMOutputTokensPerDay
 	}
 
 	// Activity hook: mark this tenant active in the pool's coalescing
@@ -481,6 +482,8 @@ func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick 
 		OwnerNick:             ownerNick,
 		OwnerDMNudgeEvery:     nudge,
 		LLM:                   t.llmProvider,
+		LLMInputCap:           llmInCap,
+		LLMOutputCap:          llmOutCap,
 		ActivityHook:          activityHook,
 		Store:                 store,
 	}

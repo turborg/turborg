@@ -13,6 +13,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 
@@ -131,8 +132,11 @@ func llmHandler(d Definition, provider llm.Provider, log *slog.Logger) agent.Com
 		if model != "" {
 			opts = append(opts, llm.WithModel(model))
 		}
-		answer, err := provider.Ask(ctx, prompt, opts...)
+		answer, _, err := provider.Ask(ctx, prompt, opts...)
 		if err != nil {
+			if errors.Is(err, llm.ErrBudgetExhausted) {
+				return agent.ReplyTo(env, "Daily AI token budget spent. Resets on a rolling 24h window."), nil
+			}
 			log.Warn("llm command failed", "command", name, "err", err)
 			return agent.ReplyTo(env, "sorry, that broke: "+err.Error()), nil
 		}
