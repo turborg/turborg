@@ -30,6 +30,10 @@ type ClientLimits struct {
 	// have joined at any one time. 0 = unrestricted. JOIN is rejected
 	// when the current count would exceed the cap; PART always allowed.
 	MaxChannels int
+
+	// TBSummarizeMaxMessages caps how many channel messages /tb summarize
+	// can consume. 0 = feature disabled.
+	TBSummarizeMaxMessages int
 }
 
 // CapHitKind maps an IRC command to the canonical "kind" label used in

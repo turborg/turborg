@@ -128,6 +128,9 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 	if p.Store != nil {
 		ircConn.SetMessageStore(p.Store)
 	}
+	if p.LLM != nil {
+		ircConn.SetLLMProvider(p.LLM)
+	}
 	ircConn.SetBouncerWelcomeReplayDepth(clampReplayDepth(p.BouncerWelcomeReplayDepth))
 
 	a.AddConnector(ircConn)

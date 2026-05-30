@@ -16,6 +16,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/connector/irc"
+	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/messages"
 )
 
@@ -87,6 +88,13 @@ type Options struct {
 	// means "no history available" — clients still see live traffic,
 	// but replay and scrollback frames are empty.
 	MessageStore messages.Store
+
+	// LLMProvider powers /tb subcommands. Nil = /tb is unavailable.
+	LLMProvider llm.Provider
+
+	// TBSummarizeMaxMessages caps how many messages /tb summarize can
+	// consume per invocation. 0 = feature disabled.
+	TBSummarizeMaxMessages int
 }
 
 // Gateway is an HTTP server exposing /ws (WebSocket), /health, /metrics,
@@ -730,6 +738,8 @@ func (g *Gateway) dispatchInbound(ctx context.Context, c *client, p map[string]a
 		_ = g.bridge.SendRaw(line)
 	case "history":
 		g.handleHistoryOp(ctx, c, p)
+	case "tb":
+		g.handleTBOp(ctx, c, p)
 	}
 }
 
@@ -804,6 +814,102 @@ func (g *Gateway) handleHistoryOp(ctx context.Context, c *client, p map[string]a
 		"messages": out,
 		"has_more": len(msgs) == limit,
 	})
+}
+
+// handleTBOp handles {op:"tb", sub:"summarize", channel:"#x", n:200}.
+func (g *Gateway) handleTBOp(ctx context.Context, c *client, p map[string]any) {
+	sub, _ := p["sub"].(string)
+	channel, _ := p["channel"].(string)
+
+	switch strings.ToLower(sub) {
+	case "summarize":
+		if channel == "" || !startsWithChannelSigil(channel) {
+			g.sendTo(ctx, c, map[string]any{
+				"op": "tb_error", "message": "Channel is required.",
+			})
+			return
+		}
+		n := 0
+		if v, ok := p["n"].(float64); ok && int(v) > 0 {
+			n = int(v)
+		}
+		g.handleTBSummarize(ctx, c, channel, n)
+	default:
+		g.sendTo(ctx, c, map[string]any{
+			"op": "tb_error", "message": "Unknown /tb subcommand. Available: summarize",
+		})
+	}
+}
+
+func (g *Gateway) handleTBSummarize(ctx context.Context, c *client, channel string, n int) {
+	provider := g.opts.LLMProvider
+	store := g.opts.MessageStore
+	cap := g.opts.TBSummarizeMaxMessages
+
+	if provider == nil {
+		g.sendTo(ctx, c, map[string]any{"op": "tb_error", "message": "No LLM provider configured."})
+		return
+	}
+	if store == nil {
+		g.sendTo(ctx, c, map[string]any{"op": "tb_error", "message": "No message history available."})
+		return
+	}
+	if cap <= 0 {
+		g.sendTo(ctx, c, map[string]any{"op": "tb_error", "message": "/tb summarize is not available on your plan."})
+		return
+	}
+	if n <= 0 {
+		n = 200
+	}
+	if n > cap {
+		n = cap
+	}
+
+	g.sendTo(ctx, c, map[string]any{"op": "tb_status", "message": "Summarizing " + channel + "..."})
+
+	go func(c *client) { //nolint:gosec // intentionally detached — LLM call outlives the WS frame
+		bgCtx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+		defer cancel()
+		msgs, err := store.Recent(bgCtx, channel, time.Time{}, n)
+		if err != nil {
+			g.sendTo(bgCtx, c, map[string]any{"op": "tb_error", "message": "Failed to fetch history."})
+			return
+		}
+		if len(msgs) == 0 {
+			g.sendTo(bgCtx, c, map[string]any{"op": "tb_error", "message": "No messages in " + channel + " to summarize."})
+			return
+		}
+		for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+			msgs[i], msgs[j] = msgs[j], msgs[i]
+		}
+		var sb strings.Builder
+		for _, m := range msgs {
+			fmt.Fprintf(&sb, "<%s> %s\n", m.Nick, m.Text)
+		}
+		prompt := fmt.Sprintf("Summarize these %d messages from %s:\n\n%s", len(msgs), channel, sb.String())
+		summary, err := provider.Ask(bgCtx, prompt,
+			llm.WithSystem("Summarize the following IRC conversation concisely. Output a short, readable summary suitable for a single IRC message (max ~400 chars). No markdown."),
+			llm.WithMaxTokens(300))
+		if err != nil {
+			g.sendTo(bgCtx, c, map[string]any{"op": "tb_error", "message": "LLM request failed."})
+			return
+		}
+		trimmed := strings.TrimSpace(summary)
+		if store != nil {
+			_ = store.Submit(bgCtx, messages.Message{
+				Channel: channel,
+				Nick:    "*turborg",
+				Text:    "\U0001f4cb Summary: " + trimmed,
+				TS:      time.Now(),
+			})
+		}
+		g.sendTo(bgCtx, c, map[string]any{
+			"op":      "tb_result",
+			"sub":     "summarize",
+			"channel": channel,
+			"summary": trimmed,
+		})
+	}(c)
 }
 
 // --- EventBus handlers ----------------------------------------------------

@@ -133,6 +133,10 @@ type Settings struct {
 	// TURBORG_COMMANDS (and any later runtime registrations).
 	CustomCommandsMax int `env:"CUSTOM_COMMANDS_MAX"`
 
+	// TBSummarizeMaxMessages caps how many channel messages /tb summarize
+	// can consume per invocation. 0 = disabled.
+	TBSummarizeMaxMessages int `env:"TB_SUMMARIZE_MAX_MESSAGES"`
+
 	// LLM router. When LLMProvider or LLMAPIKey is set these select +
 	// configure the LLM backend used by LLM-type commands, taking
 	// precedence over the legacy TURBORG_ANTHROPIC_* envs. LLMProvider is

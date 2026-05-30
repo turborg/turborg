@@ -384,7 +384,11 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			// router dispatches `/c/<id>` to the shared Handler via ServeWS, so the
 			// gateway never binds its own port.
 			if gatewayToken != "" {
-				gw, err := buildTenantGateway(conn, gatewayToken, t.log)
+				var tbCap int
+				if caps != nil {
+					tbCap = caps.TBSummarizeMaxMessages
+				}
+				gw, err := buildTenantGateway(conn, gatewayToken, t.log, store, t.llmProvider, tbCap)
 				if err != nil {
 					t.log.Error("skipping web gateway", "err", err)
 					continue
@@ -439,9 +443,10 @@ func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick 
 	var outMax, outWin, nudge, cmdMax, cmdWin, customCmdMax int
 	if caps != nil {
 		limits = irc.ClientLimits{
-			NickLocked:     caps.NickLocked,
-			RealnameLocked: caps.RealnameLocked,
-			MaxChannels:    caps.MaxChannels,
+			NickLocked:             caps.NickLocked,
+			RealnameLocked:         caps.RealnameLocked,
+			MaxChannels:            caps.MaxChannels,
+			TBSummarizeMaxMessages: caps.TBSummarizeMaxMessages,
 		}
 		outMax, outWin = caps.OutboundMsgsPerWindow, caps.OutboundWindowSeconds
 		nudge = caps.OwnerDMNudgeEvery

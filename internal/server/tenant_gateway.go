@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/turborg/turborg/internal/connector/irc"
+	"github.com/turborg/turborg/internal/llm"
+	"github.com/turborg/turborg/internal/messages"
 	"github.com/turborg/turborg/internal/web"
 )
 
@@ -29,7 +31,7 @@ const (
 // router serves the shared Handler() per request. No MessageStore: pooled
 // scrollback lives in accounts-api and is a follow-up; live streaming works
 // without it.
-func buildTenantGateway(bridge *irc.Connector, token string, log *slog.Logger) (*web.Gateway, error) {
+func buildTenantGateway(bridge *irc.Connector, token string, log *slog.Logger, store messages.Store, llmProvider llm.Provider, tbSummarizeCap int) (*web.Gateway, error) {
 	verifier, err := web.NewStaticPasswordVerifier(token)
 	if err != nil {
 		return nil, fmt.Errorf("gateway verifier: %w", err)
@@ -39,9 +41,12 @@ func buildTenantGateway(bridge *irc.Connector, token string, log *slog.Logger) (
 		return nil, fmt.Errorf("gateway ratelimit: %w", err)
 	}
 	gw, err := web.New(bridge, bridge, web.Options{
-		Verifier:    verifier,
-		RateLimiter: rl,
-		Log:         log,
+		Verifier:               verifier,
+		RateLimiter:            rl,
+		Log:                    log,
+		MessageStore:           store,
+		LLMProvider:            llmProvider,
+		TBSummarizeMaxMessages: tbSummarizeCap,
 	})
 	if err != nil {
 		return nil, err

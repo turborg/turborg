@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/turborg/turborg/internal/agent"
+	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/messages"
 	"github.com/turborg/turborg/internal/safe"
 	"github.com/turborg/turborg/internal/version"
@@ -111,6 +112,10 @@ type Connector struct {
 	// TURBORG_BOUNCER_WELCOME_REPLAY_DEPTH lands on the right knob.
 	// Zero leaves the bouncer default in place.
 	bouncerWelcomeReplayDepth int
+
+	// llmProvider is forwarded onto the bouncer at startBouncer time
+	// so /tb subcommands can call the LLM.
+	llmProvider llm.Provider
 
 	// onUpstreamWarn fires from the escalation watchdog once per
 	// transient-outage window when UpstreamWarnAfter elapses without
@@ -343,6 +348,10 @@ func (c *Connector) SetMessageStore(s messages.Store) { c.messageStore = s }
 // Forwarded to the bouncer at startBouncer time. Pass 0 to leave the
 // default in place.
 func (c *Connector) SetBouncerWelcomeReplayDepth(n int) { c.bouncerWelcomeReplayDepth = n }
+
+// SetLLMProvider wires the LLM provider for /tb subcommands.
+// Forwarded to the bouncer at startBouncer time.
+func (c *Connector) SetLLMProvider(p llm.Provider) { c.llmProvider = p }
 
 // SetBouncerListenerless selects the pooled-runtime bouncer path: the bouncer
 // comes up without binding a TCP port and is fed connections by the pool's
@@ -760,6 +769,7 @@ func (c *Connector) startBouncer(ctx context.Context) error {
 	b.AttachWantedChannels(c.wanted)
 	b.AttachPreferredNickHook(c.SetPreferredNick)
 	b.AttachMessageStore(c.messageStore)
+	b.AttachLLMProvider(c.llmProvider)
 	b.AttachWelcomeReplayDepth(c.bouncerWelcomeReplayDepth)
 	// Reuse the existing onUpstreamWarn hook slot: the supervisor's
 	// long-outage watchdog calls into the bouncer's broadcast so
