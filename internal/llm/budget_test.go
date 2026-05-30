@@ -57,6 +57,31 @@ func TestTokenBudgetAllowZeroCapMeansUnrestricted(t *testing.T) {
 	assert.True(t, b.Allow(0, 0))
 }
 
+func TestTokenBudgetSeedCountsTowardCap(t *testing.T) {
+	b := NewTokenBudget()
+	b.Seed(90, 8)
+
+	// Seed alone is under the caps.
+	assert.True(t, b.Allow(100, 0))
+	// Fresh consumption stacks on top of the seed.
+	b.Record(10, 0)
+	assert.False(t, b.Allow(100, 0), "seed + recorded usage must exhaust the cap")
+
+	in, out := b.Totals()
+	assert.Equal(t, 100, in)
+	assert.Equal(t, 8, out)
+}
+
+func TestTokenBudgetSeedZeroIsNoop(t *testing.T) {
+	b := NewTokenBudget()
+	b.Seed(0, 0)
+	b.Seed(-5, -1)
+
+	in, out := b.Totals()
+	assert.Equal(t, 0, in)
+	assert.Equal(t, 0, out)
+}
+
 func TestTokenBudgetRollingWindow(t *testing.T) {
 	b := NewTokenBudget()
 	b.window = 100 * time.Millisecond

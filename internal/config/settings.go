@@ -128,6 +128,14 @@ type Settings struct {
 	LLMOutputTokensPerDay int      `env:"LLM_OUTPUT_TOKENS_PER_DAY"`
 	AllowedLLMModels      []string `env:"ALLOWED_LLM_MODELS" envSeparator:","`
 
+	// LLMInputTokensUsed / LLMOutputTokensUsed seed the rolling-window budget
+	// with consumption already reported across the account for the current
+	// window (sibling agents and previously-destroyed ones), supplied by the
+	// operator at boot. They make the cap enforce per account/window instead of
+	// resetting to zero on every restart/recreate. 0 = fresh window.
+	LLMInputTokensUsed  int `env:"LLM_INPUT_TOKENS_USED"`
+	LLMOutputTokensUsed int `env:"LLM_OUTPUT_TOKENS_USED"`
+
 	// CustomCommandsMax caps the dynamic-command registry. 0 = no
 	// commands, -1 = unrestricted. Bounds the command set loaded from
 	// TURBORG_COMMANDS (and any later runtime registrations).
@@ -308,6 +316,12 @@ func (s *Settings) validatePolicyBounds() error {
 	}
 	if s.LLMOutputTokensPerDay < 0 {
 		return errors.New("config: LLM_OUTPUT_TOKENS_PER_DAY must be >= 0 (0 = unrestricted)")
+	}
+	if s.LLMInputTokensUsed < 0 {
+		return errors.New("config: LLM_INPUT_TOKENS_USED must be >= 0 (0 = fresh window)")
+	}
+	if s.LLMOutputTokensUsed < 0 {
+		return errors.New("config: LLM_OUTPUT_TOKENS_USED must be >= 0 (0 = fresh window)")
 	}
 	if s.MaxChannels < 0 {
 		return errors.New("config: MAX_CHANNELS must be >= 0 (0 = unrestricted)")

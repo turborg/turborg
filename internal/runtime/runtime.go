@@ -106,7 +106,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	// budget instance is shared by the connector/commands (via WireCommon)
 	// AND the web gateway (via buildGateway). WireCommon's own wrap is
 	// idempotent on an already-budgeted provider.
-	provider = BuildBudgetedProvider(a, provider, s.LLMInputTokensPerDay, s.LLMOutputTokensPerDay, log)
+	provider = BuildBudgetedProvider(a, provider, s.LLMInputTokensPerDay, s.LLMOutputTokensPerDay, s.LLMInputTokensUsed, s.LLMOutputTokensUsed, log)
 
 	// The connector-agnostic, transport-independent wiring — builtins, owner
 	// guard, throttles, nudge, store submitters. The pooled runtime calls this
@@ -138,6 +138,8 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		LLM:                       provider,
 		LLMInputCap:               s.LLMInputTokensPerDay,
 		LLMOutputCap:              s.LLMOutputTokensPerDay,
+		LLMInputUsed:              s.LLMInputTokensUsed,
+		LLMOutputUsed:             s.LLMOutputTokensUsed,
 		ActivityHook:              activityHook,
 		Store:                     store,
 	}, log); err != nil {

@@ -42,6 +42,31 @@ func (b *TokenBudget) Record(input, output int) {
 	})
 }
 
+// Seed pre-loads consumption that happened before this budget existed — the
+// totals an external authority (the control plane) reports for the rolling
+// window across the whole account, including sibling and previously-destroyed
+// agents. Without it, the window resets to zero every time an agent restarts
+// or is recreated, so the cap would be enforced per agent-instance rather than
+// per account/window: an operator could reset the budget at will by recreating
+// the agent. Seeding closes that.
+//
+// The seed is anchored at the current time because the per-entry ages of the
+// reported total aren't carried across, so it influences the budget for a full
+// window from process start. That is deliberately conservative — it never
+// under-counts prior usage. A zero/negative seed is a no-op.
+func (b *TokenBudget) Seed(input, output int) {
+	if input <= 0 && output <= 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.entries = append(b.entries, tokenEntry{
+		ts:     b.now(),
+		input:  max(0, input),
+		output: max(0, output),
+	})
+}
+
 // Totals returns the sum of input and output tokens consumed within
 // the rolling window.
 func (b *TokenBudget) Totals() (input, output int) {

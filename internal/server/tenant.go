@@ -363,7 +363,7 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			// shared by the connector/commands (WireCommon) and the web gateway
 			// below. WireCommon's own wrap is idempotent on this.
 			cp := t.commonParams(cs, caps, settings.Nick, store, ignoredNicks, cmds)
-			budgetedProvider := runtime.BuildBudgetedProvider(a, cp.LLM, cp.LLMInputCap, cp.LLMOutputCap, t.log)
+			budgetedProvider := runtime.BuildBudgetedProvider(a, cp.LLM, cp.LLMInputCap, cp.LLMOutputCap, cp.LLMInputUsed, cp.LLMOutputUsed, t.log)
 			cp.LLM = budgetedProvider
 			if err := runtime.WireCommon(a, conn, cp, t.log); err != nil {
 				t.log.Error("skipping irc connector: wiring failed", "err", err)
@@ -446,7 +446,7 @@ func (t *Tenant) applyTierSettings(s *irc.Settings, caps *PlanCapabilities) {
 // dedicated runtime does (from TURBORG_COMMANDS).
 func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick string, store messages.Store, ignoredNicks []string, cmds []commands.Definition) runtime.CommonParams {
 	var limits irc.ClientLimits
-	var outMax, outWin, nudge, cmdMax, cmdWin, customCmdMax, llmInCap, llmOutCap int
+	var outMax, outWin, nudge, cmdMax, cmdWin, customCmdMax, llmInCap, llmOutCap, llmInUsed, llmOutUsed int
 	if caps != nil {
 		limits = irc.ClientLimits{
 			NickLocked:             caps.NickLocked,
@@ -459,6 +459,7 @@ func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick 
 		cmdMax, cmdWin = caps.CommandMaxPerWindow, caps.CommandWindowSeconds
 		customCmdMax = caps.CustomCommandsMax
 		llmInCap, llmOutCap = caps.LLMInputTokensPerDay, caps.LLMOutputTokensPerDay
+		llmInUsed, llmOutUsed = caps.LLMInputTokensUsed, caps.LLMOutputTokensUsed
 	}
 
 	// Activity hook: mark this tenant active in the pool's coalescing
@@ -490,6 +491,8 @@ func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick 
 		LLM:                   t.llmProvider,
 		LLMInputCap:           llmInCap,
 		LLMOutputCap:          llmOutCap,
+		LLMInputUsed:          llmInUsed,
+		LLMOutputUsed:         llmOutUsed,
 		ActivityHook:          activityHook,
 		Store:                 store,
 	}
