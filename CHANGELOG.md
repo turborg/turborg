@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.9.1](https://github.com/turborg/turborg/compare/v0.9.0...v0.9.1) (2026-05-30)
+
+
+### Bug Fixes
+
+* **llm:** seed rolling-window budget with prior usage so the cap survives restarts ([#64](https://github.com/turborg/turborg/issues/64)) ([c313a5e](https://github.com/turborg/turborg/commit/c313a5e5d0a0770cdae1f7b95c5d8c4f73cbcc86))
+
 ## [0.9.0](https://github.com/turborg/turborg/compare/v0.8.1...v0.9.0) (2026-05-30)
 
 
