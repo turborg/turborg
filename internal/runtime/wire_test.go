@@ -147,3 +147,62 @@ func TestWireCommonNoBudgetWhenCapsZero(t *testing.T) {
 	})
 	require.Contains(t, a.Commands.Names(), "ask")
 }
+
+func TestBuildBudgetedProviderNilReturnsNil(t *testing.T) {
+	a := agent.NewWithPrefix(nil, "!")
+	require.Nil(t, runtime.BuildBudgetedProvider(a, nil, 100, 100, nil))
+}
+
+func TestBuildBudgetedProviderNoCapsReturnsRaw(t *testing.T) {
+	a := agent.NewWithPrefix(nil, "!")
+	raw := stubProvider{}
+	got := runtime.BuildBudgetedProvider(a, raw, 0, 0, nil)
+	require.Equal(t, raw, got)
+}
+
+func TestBuildBudgetedProviderWrapsWhenCapsSet(t *testing.T) {
+	a := agent.NewWithPrefix(nil, "!")
+	got := runtime.BuildBudgetedProvider(a, stubProvider{}, 100, 50, nil)
+	_, ok := got.(*llm.BudgetedProvider)
+	require.True(t, ok, "expected a *llm.BudgetedProvider wrapper")
+}
+
+func TestBuildBudgetedProviderIdempotent(t *testing.T) {
+	a := agent.NewWithPrefix(nil, "!")
+	wrapped := runtime.BuildBudgetedProvider(a, stubProvider{}, 100, 50, nil)
+	again := runtime.BuildBudgetedProvider(a, wrapped, 100, 50, nil)
+	require.Same(t, wrapped, again, "re-wrapping must return the same instance")
+}
+
+func TestBuildBudgetedProviderPublishesUsageEvent(t *testing.T) {
+	a := agent.NewWithPrefix(nil, "!")
+	got := make(chan *agent.Event, 1)
+	a.Events.Subscribe(agent.EventLLMUsage, func(_ context.Context, ev *agent.Event) {
+		got <- ev
+	})
+	wrapped := runtime.BuildBudgetedProvider(a, &usageProvider{in: 30, out: 12}, 1000, 500, nil)
+	_, _, err := wrapped.Ask(context.Background(), "hi")
+	require.NoError(t, err)
+	select {
+	case ev := <-got:
+		require.Equal(t, 30, ev.Fields["input_tokens"])
+		require.Equal(t, 12, ev.Fields["output_tokens"])
+	default:
+		t.Fatal("expected an EventLLMUsage to be published")
+	}
+}
+
+// usageProvider reports fixed token usage so the budgeted wrapper records
+// and publishes a usage event.
+type usageProvider struct {
+	in  int
+	out int
+}
+
+func (usageProvider) Model() string { return "usage" }
+func (p *usageProvider) Ask(context.Context, string, ...llm.CallOption) (string, llm.Usage, error) {
+	return "ok", llm.Usage{InputTokens: p.in, OutputTokens: p.out}, nil
+}
+func (usageProvider) Stream(context.Context, string, ...llm.CallOption) iter.Seq2[string, error] {
+	return func(func(string, error) bool) {}
+}

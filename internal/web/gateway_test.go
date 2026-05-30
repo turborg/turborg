@@ -1215,6 +1215,51 @@ func TestTBOpSummarizeZeroCap(t *testing.T) {
 	assert.Contains(t, got["message"], "not available on your plan")
 }
 
+func TestTBOpUsageReportsBudget(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	opts := newOptions(t, "p")
+	// A BudgetedProvider exposes Budget()/Caps() the usage handler reads.
+	budget := llm.NewTokenBudget()
+	budget.Record(120, 60)
+	opts.LLMProvider = llm.NewBudgetedProvider(&testLLM{response: "x"}, budget, 4000, 1000, nil)
+	g, _, td := startGateway(t, opts, bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+
+	body, _ := json.Marshal(map[string]any{"op": "tb", "sub": "usage"})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	got := readJSON(t, conn)
+	assert.Equal(t, "tb_result", got["op"])
+	assert.Equal(t, "usage", got["sub"])
+	assert.Equal(t, float64(120), got["input_used"])
+	assert.Equal(t, float64(60), got["output_used"])
+	assert.Equal(t, float64(4000), got["input_cap"])
+	assert.Equal(t, float64(1000), got["output_cap"])
+}
+
+func TestTBOpUsageZeroWithoutBudgetedProvider(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	opts := newOptions(t, "p")
+	opts.LLMProvider = &testLLM{response: "x"} // not budgeted
+	g, _, td := startGateway(t, opts, bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+
+	body, _ := json.Marshal(map[string]any{"op": "tb", "sub": "usage"})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	got := readJSON(t, conn)
+	assert.Equal(t, "tb_result", got["op"])
+	assert.Equal(t, float64(0), got["input_used"])
+}
+
 func TestTBOpUnknownSubcommand(t *testing.T) {
 	bridge := newFakeBridge("turborg")
 	g, _, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
