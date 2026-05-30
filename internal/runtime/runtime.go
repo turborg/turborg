@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/turborg/turborg/internal/activity"
+	"github.com/turborg/turborg/internal/budgetrefresh"
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/commands"
 	"github.com/turborg/turborg/internal/config"
@@ -44,6 +45,9 @@ type Built struct {
 	LLM       llm.Provider       // nil when Anthropic is not configured
 	Activity  *activity.Notifier // never nil; no-op when ACTIVITY_URL is unset
 	StatePush *statepush.Emitter // never nil; inert no-op when STATE_WEBHOOK_URL is unset
+	// BudgetRefresh keeps the token budget's account baseline current while the
+	// agent runs. Nil when the provider isn't budgeted or no endpoint is set.
+	BudgetRefresh *budgetrefresh.Refresher
 }
 
 // Build wires the agent + connectors + gateway from settings. Callers
@@ -163,6 +167,22 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		LLM:       provider,
 		Activity:  notifier,
 		StatePush: stateEmitter,
+	}
+
+	// Live budget refresh: when the provider is budgeted and a refresh endpoint
+	// is configured, poll it so the account baseline tracks sibling agents and
+	// this agent's pre-restart usage while it runs (the env seed above is only a
+	// boot-time snapshot). startedAt is sent as `since` so the control plane
+	// excludes what this process counts locally. nil when not budgeted/unset.
+	if bp, ok := provider.(*llm.BudgetedProvider); ok {
+		built.BudgetRefresh = budgetrefresh.New(
+			s.LLMBudgetURL,
+			s.LLMBudgetToken,
+			s.LLMBudgetRefreshSeconds,
+			time.Now(),
+			bp.Budget(),
+			log,
+		)
 	}
 
 	if s.GatewayEnabled() {
@@ -621,8 +641,32 @@ func Run(ctx context.Context, b *Built) error {
 	if b.StatePush != nil {
 		defer b.StatePush.Stop()
 	}
+
+	rootCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Background budget refresher: keeps the token baseline fresh under rootCtx.
+	// It is NOT part of the cross-stop race (it doesn't gate process lifetime),
+	// but we drain it before returning so no goroutine outlives Run.
+	var refreshDone chan struct{}
+	if b.BudgetRefresh != nil {
+		refreshDone = make(chan struct{})
+		go func() {
+			defer close(refreshDone)
+			_ = b.BudgetRefresh.Run(rootCtx)
+		}()
+	}
+	waitRefresh := func() {
+		if refreshDone != nil {
+			<-refreshDone
+		}
+	}
+
 	if b.Gateway == nil {
-		return b.Agent.Run(ctx)
+		err := b.Agent.Run(rootCtx)
+		cancel()
+		waitRefresh()
+		return err
 	}
 
 	type result struct {
@@ -630,8 +674,6 @@ func Run(ctx context.Context, b *Built) error {
 		err  error
 	}
 	results := make(chan result, 2)
-	rootCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 
 	go func() {
 		err := b.Agent.Run(rootCtx)
@@ -647,6 +689,7 @@ func Run(ctx context.Context, b *Built) error {
 	cancel()
 	b.Gateway.Stop()
 	second := <-results
+	waitRefresh()
 
 	if first.err != nil && !errors.Is(first.err, context.Canceled) {
 		return fmt.Errorf("%s: %w", first.from, first.err)

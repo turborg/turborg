@@ -136,6 +136,22 @@ type Settings struct {
 	LLMInputTokensUsed  int `env:"LLM_INPUT_TOKENS_USED"`
 	LLMOutputTokensUsed int `env:"LLM_OUTPUT_TOKENS_USED"`
 
+	// LLMBudgetURL is an optional endpoint the agent polls to keep the token
+	// budget's account baseline current while it runs (the boot seed above is
+	// only a point-in-time value). SaaS deployments point it at the sidecar's
+	// per-container budget handler, which forwards to the control plane; the
+	// agent sends its start time as `?since=` so the response can exclude what
+	// it counts locally. Empty = no live refresh (the boot seed is all there
+	// is, which is correct for self-host single-agent installs).
+	LLMBudgetURL string `env:"LLM_BUDGET_URL"`
+	// LLMBudgetToken is the bearer sent on every budget poll. Defaults to
+	// MessageSinkToken via normalize() when unset — both terminate at the same
+	// per-container endpoint with the same bearer.
+	LLMBudgetToken string `env:"LLM_BUDGET_TOKEN"`
+	// LLMBudgetRefreshSeconds is the poll interval. 0 uses the package default
+	// (15s); values below the floor are clamped up by the refresher.
+	LLMBudgetRefreshSeconds int `env:"LLM_BUDGET_REFRESH_SECONDS"`
+
 	// CustomCommandsMax caps the dynamic-command registry. 0 = no
 	// commands, -1 = unrestricted. Bounds the command set loaded from
 	// TURBORG_COMMANDS (and any later runtime registrations).
@@ -279,6 +295,11 @@ func (s *Settings) normalize() error {
 	// for read vs. write set MESSAGE_STORE_TOKEN explicitly.
 	if s.MessageStoreToken == "" {
 		s.MessageStoreToken = s.MessageSinkToken
+	}
+	// The budget-refresh poll terminates at the same per-container endpoint as
+	// the message sink, so it reuses that bearer unless overridden.
+	if s.LLMBudgetToken == "" {
+		s.LLMBudgetToken = s.MessageSinkToken
 	}
 	return nil
 }

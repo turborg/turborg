@@ -109,6 +109,31 @@ func TestCommandsOnlyChange(t *testing.T) {
 		"a channel change alongside a command change is not commands-only")
 }
 
+func TestLiveUpdatableOnlyChangeIgnoresTokenUsageBaseline(t *testing.T) {
+	base := specWithChannel("x", "#one")
+	base.PlanCapabilities = &PlanCapabilities{LLMInputTokensPerDay: 4000, LLMInputTokensUsed: 100}
+
+	// Only the usage baseline moved (the feed refreshes it every poll).
+	movedBaseline := specWithChannel("x", "#one")
+	movedBaseline.PlanCapabilities = &PlanCapabilities{LLMInputTokensPerDay: 4000, LLMInputTokensUsed: 3900}
+	require.True(t, liveUpdatableOnlyChange(base, movedBaseline),
+		"a change confined to the usage baseline must be applied without a reconnect")
+	require.True(t, commandSetsEqual(base.Commands, movedBaseline.Commands),
+		"command sets are unchanged here")
+
+	// A real cap change (not just usage) must still force a restart.
+	capChange := specWithChannel("x", "#one")
+	capChange.PlanCapabilities = &PlanCapabilities{LLMInputTokensPerDay: 40000, LLMInputTokensUsed: 3900}
+	require.False(t, liveUpdatableOnlyChange(base, capChange),
+		"a plan-cap change is not a live-updatable-only change")
+
+	// A channel change alongside a baseline move must still force a restart.
+	chChange := specWithChannel("x", "#two")
+	chChange.PlanCapabilities = movedBaseline.PlanCapabilities
+	require.False(t, liveUpdatableOnlyChange(base, chChange),
+		"a connector change is not a live-updatable-only change")
+}
+
 func TestReloadCommandsSwapsInPlace(t *testing.T) {
 	a := agent.NewWithPrefix(testLogger(), "!")
 	a.Commands.SetMaxDynamic(-1)
@@ -217,6 +242,50 @@ func TestUpdateCommandsOnlyReloadsWithoutRestart(t *testing.T) {
 	events <- TenantEvent{Kind: TenantUpserted, Spec: chSpec}
 	require.Eventually(t, func() bool { return runs.Load() == 2 }, 2*time.Second, 10*time.Millisecond,
 		"a connector change must restart the work loop")
+
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+}
+
+// TestUpdateTokenUsageBaselineDoesNotRestart guards the regression the
+// account-wide budget change could introduce: the feed refreshes
+// llm_*_tokens_used on every poll as tokens accrue, and that must NOT drop the
+// IRC session. A spec that differs only in the usage baseline is a no-op for
+// the work loop.
+func TestUpdateTokenUsageBaselineDoesNotRestart(t *testing.T) {
+	var runs atomic.Int32
+	base := TenantSpec{
+		TurborgID:        "x",
+		RuntimeMode:      "pooled",
+		Connectors:       []ConnectorSpec{{Type: "irc", Config: map[string]any{"owner_mode": "self"}, Secrets: map[string]any{}}},
+		PlanCapabilities: &PlanCapabilities{LLMInputTokensPerDay: 4000, LLMInputTokensUsed: 0},
+	}
+
+	events := make(chan TenantEvent)
+	src := &StaticSource{Tenants: []TenantSpec{base}, Events: events}
+	srv := New(src, testLogger())
+	srv.workFactory = func(tn *Tenant) func(context.Context) error {
+		return func(ctx context.Context) error {
+			runs.Add(1)
+			<-ctx.Done()
+			return ctx.Err()
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+
+	require.Eventually(t, func() bool { return runs.Load() == 1 }, 2*time.Second, 5*time.Millisecond)
+
+	// Three successive feed polls, each reporting more usage. None may restart.
+	for _, used := range []int{1000, 2500, 3900} {
+		s := base
+		s.PlanCapabilities = &PlanCapabilities{LLMInputTokensPerDay: 4000, LLMInputTokensUsed: used}
+		events <- TenantEvent{Kind: TenantUpserted, Spec: s}
+	}
+	require.Never(t, func() bool { return runs.Load() != 1 }, 200*time.Millisecond, 20*time.Millisecond,
+		"a usage-baseline-only change must never restart the work loop")
 
 	cancel()
 	require.ErrorIs(t, <-done, context.Canceled)

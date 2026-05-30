@@ -203,7 +203,7 @@ func BuildBudgetedProvider(a *agent.Agent, provider llm.Provider, inputCap, outp
 		log = slog.Default()
 	}
 	budget := llm.NewTokenBudget()
-	budget.Seed(usedInput, usedOutput)
+	budget.SetBaseline(usedInput, usedOutput)
 	return llm.NewBudgetedProvider(provider, budget, inputCap, outputCap, func(u llm.Usage) {
 		inTotal, outTotal := budget.Totals()
 		log.Info("llm_usage",

@@ -535,11 +535,24 @@ func (t *Tenant) update(spec TenantSpec) {
 	cancel := t.runCancel
 	t.mu.Unlock()
 
-	// Command-only change: reload in place, no reconnect. Falls through to a
-	// restart only if the tenant isn't currently running (between runs).
-	if commandsOnlyChange(prev, spec) && t.reloadCommands(spec.Commands) {
-		t.log.Info("tenant commands reloaded in place", "commands", len(spec.Commands))
-		return
+	// In-place, no-reconnect changes. The LLM-usage baseline (llm_*_tokens_used)
+	// is refreshed on every feed poll as tokens accrue, so it must NOT trigger a
+	// reconnect — that would drop the IRC session every few seconds. For pooled
+	// tenants the per-account cap equals the per-tenant cap (a pooled account
+	// owns one turborg), so local in-process counting is exact and the baseline
+	// only matters as the restart-recovery seed applied at build time; a live
+	// change to it alone is a no-op here. A command-set change still reloads in
+	// place. Anything else falls through to a restart.
+	if liveUpdatableOnlyChange(prev, spec) {
+		if commandSetsEqual(prev.Commands, spec.Commands) {
+			return // only the usage baseline moved — nothing to reconnect for
+		}
+		if t.reloadCommands(spec.Commands) {
+			t.log.Info("tenant commands reloaded in place", "commands", len(spec.Commands))
+			return
+		}
+		// Not currently running — fall through to a restart, which re-seeds the
+		// budget from the new spec at build time.
 	}
 
 	t.log.Info("tenant spec changed; restarting", "connectors", t.connectorTypes())
@@ -560,6 +573,36 @@ func (t *Tenant) update(spec TenantSpec) {
 func commandsOnlyChange(a, b TenantSpec) bool {
 	a.Commands = nil
 	b.Commands = nil
+	return reflect.DeepEqual(a, b)
+}
+
+// liveUpdatableOnlyChange reports whether two differing specs differ in nothing
+// but fields that can be applied to a running tenant WITHOUT a reconnect: the
+// command set and the LLM-usage baseline (llm_*_tokens_used, which the feed
+// refreshes continuously). Both the command set and the baseline are zeroed
+// before comparison so a change confined to them returns true.
+func liveUpdatableOnlyChange(a, b TenantSpec) bool {
+	a.Commands, b.Commands = nil, nil
+	a.PlanCapabilities = capsWithoutTokenUsage(a.PlanCapabilities)
+	b.PlanCapabilities = capsWithoutTokenUsage(b.PlanCapabilities)
+	return reflect.DeepEqual(a, b)
+}
+
+// capsWithoutTokenUsage returns a copy of caps with the live LLM-usage baseline
+// fields zeroed, so spec comparisons can ignore them. Returns nil unchanged
+// (never dereferences a nil pointer or mutates the caller's struct).
+func capsWithoutTokenUsage(caps *PlanCapabilities) *PlanCapabilities {
+	if caps == nil {
+		return nil
+	}
+	c := *caps
+	c.LLMInputTokensUsed = 0
+	c.LLMOutputTokensUsed = 0
+	return &c
+}
+
+// commandSetsEqual reports whether two command slices are identical.
+func commandSetsEqual(a, b []commands.Definition) bool {
 	return reflect.DeepEqual(a, b)
 }
 

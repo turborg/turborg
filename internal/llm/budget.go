@@ -16,11 +16,27 @@ type tokenEntry struct {
 // TokenBudget tracks LLM token consumption in a rolling time window.
 // Goroutine-safe; entries older than the window are pruned on every
 // mutating call.
+//
+// Enforcement is the sum of two parts:
+//
+//   - locally recorded entries — what THIS process has consumed since it
+//     started (exact, in-memory).
+//   - a baseline — consumption attributed to the rest of the account for the
+//     same window (other agents, and this agent's own pre-restart usage),
+//     supplied by an external authority and refreshed live via SetBaseline.
+//
+// Splitting the two is what makes the cap hold per account/window rather than
+// per process: a fresh process starts with locals at zero but inherits the
+// account baseline, so it can't reset the window by restarting or being
+// recreated. The baseline is a replaceable snapshot (not pruned) — the
+// authority recomputes it over the rolling window on each refresh.
 type TokenBudget struct {
-	mu      sync.Mutex
-	entries []tokenEntry
-	window  time.Duration
-	now     func() time.Time // injectable clock for tests
+	mu             sync.Mutex
+	entries        []tokenEntry
+	baselineInput  int
+	baselineOutput int
+	window         time.Duration
+	now            func() time.Time // injectable clock for tests
 }
 
 func NewTokenBudget() *TokenBudget {
@@ -42,37 +58,28 @@ func (b *TokenBudget) Record(input, output int) {
 	})
 }
 
-// Seed pre-loads consumption that happened before this budget existed — the
-// totals an external authority (the control plane) reports for the rolling
-// window across the whole account, including sibling and previously-destroyed
-// agents. Without it, the window resets to zero every time an agent restarts
-// or is recreated, so the cap would be enforced per agent-instance rather than
-// per account/window: an operator could reset the budget at will by recreating
-// the agent. Seeding closes that.
+// SetBaseline replaces the account baseline — consumption attributed to the
+// rest of the account (other agents + this agent's pre-restart usage) over the
+// rolling window. The external authority recomputes it on each refresh; the
+// caller arranges for the baseline to EXCLUDE what this process counts locally
+// so the two halves never double-count. Negative values are clamped to zero.
 //
-// The seed is anchored at the current time because the per-entry ages of the
-// reported total aren't carried across, so it influences the budget for a full
-// window from process start. That is deliberately conservative — it never
-// under-counts prior usage. A zero/negative seed is a no-op.
-func (b *TokenBudget) Seed(input, output int) {
-	if input <= 0 && output <= 0 {
-		return
-	}
+// Called once at startup (the seed) and then periodically as the authority
+// reports fresh account totals. Cheap and safe to call on every refresh tick.
+func (b *TokenBudget) SetBaseline(input, output int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.entries = append(b.entries, tokenEntry{
-		ts:     b.now(),
-		input:  max(0, input),
-		output: max(0, output),
-	})
+	b.baselineInput = max(0, input)
+	b.baselineOutput = max(0, output)
 }
 
-// Totals returns the sum of input and output tokens consumed within
-// the rolling window.
+// Totals returns total input and output tokens for the window: the account
+// baseline plus everything this process has recorded locally.
 func (b *TokenBudget) Totals() (input, output int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.prune()
+	input, output = b.baselineInput, b.baselineOutput
 	for _, e := range b.entries {
 		input += e.input
 		output += e.output
