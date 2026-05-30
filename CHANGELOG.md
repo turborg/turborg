@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.9.0](https://github.com/turborg/turborg/compare/v0.8.1...v0.9.0) (2026-05-30)
+
+
+### Features
+
+* **commands:** data-driven user commands + LLM router ([#61](https://github.com/turborg/turborg/issues/61)) ([58b1518](https://github.com/turborg/turborg/commit/58b1518b0b7f35328008bb593422445e5d394c96))
+* **llm:** token tracking + rolling-24h budget enforcement ([#63](https://github.com/turborg/turborg/issues/63)) ([911159b](https://github.com/turborg/turborg/commit/911159bb757cefe51b752edf69aa2c30b53964d1))
+
 ## [0.8.1](https://github.com/turborg/turborg/compare/v0.8.0...v0.8.1) (2026-05-28)
 
 
