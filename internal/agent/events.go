@@ -34,6 +34,7 @@ const (
 	EventWhoisResult    EventType = "WHOIS_RESULT"
 	EventListResult     EventType = "LIST_RESULT"
 	EventWhoResult      EventType = "WHO_RESULT"
+	EventLLMUsage       EventType = "LLM_USAGE"
 	EventError          EventType = "ERROR"
 	EventRaw            EventType = "RAW"
 )

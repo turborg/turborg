@@ -79,20 +79,24 @@ func (p *Provider) Model() string { return p.model }
 
 // Ask sends prompt to Claude and returns the assembled text response.
 // Streams under the hood so large outputs don't time out the request.
-func (p *Provider) Ask(ctx context.Context, prompt string, opts ...llm.CallOption) (string, error) {
+func (p *Provider) Ask(ctx context.Context, prompt string, opts ...llm.CallOption) (string, llm.Usage, error) {
 	params := p.buildParams(prompt, opts)
 	stream := p.client.Messages.NewStreaming(ctx, params)
 
 	var message sdk.Message
 	for stream.Next() {
 		if err := message.Accumulate(stream.Current()); err != nil {
-			return "", fmt.Errorf("anthropic accumulate: %w", err)
+			return "", llm.Usage{}, fmt.Errorf("anthropic accumulate: %w", err)
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return "", fmt.Errorf("anthropic stream: %w", err)
+		return "", llm.Usage{}, fmt.Errorf("anthropic stream: %w", err)
 	}
-	return joinText(message), nil
+	usage := llm.Usage{
+		InputTokens:  int(message.Usage.InputTokens),
+		OutputTokens: int(message.Usage.OutputTokens),
+	}
+	return joinText(message), usage, nil
 }
 
 // Stream yields text deltas as iter.Seq2[string, error]. The error is

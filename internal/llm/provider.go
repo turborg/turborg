@@ -7,20 +7,33 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"iter"
 )
 
+// Usage reports the token consumption of a single LLM call.
+type Usage struct {
+	InputTokens  int
+	OutputTokens int
+}
+
+// ErrBudgetExhausted is returned by BudgetedProvider when the rolling
+// 24h token budget has been spent. Callers should render a user-friendly
+// message instead of treating it as an internal error.
+var ErrBudgetExhausted = errors.New("daily AI token budget exhausted")
+
 // Provider is the minimal surface every LLM backend exposes.
 //
-// Ask returns the assembled text response. Stream yields text deltas
-// as iter.Seq2[string, error] — the second value carries any error
-// encountered mid-stream; once non-nil, iteration ends.
+// Ask returns the assembled text response and the token usage for the
+// call. Stream yields text deltas as iter.Seq2[string, error] — the
+// second value carries any error encountered mid-stream; once non-nil,
+// iteration ends.
 //
 // Both methods accept per-call CallOptions to override defaults (max
 // tokens, system prompt, model) without rebuilding the provider.
 type Provider interface {
 	Model() string
-	Ask(ctx context.Context, prompt string, opts ...CallOption) (string, error)
+	Ask(ctx context.Context, prompt string, opts ...CallOption) (string, Usage, error)
 	Stream(ctx context.Context, prompt string, opts ...CallOption) iter.Seq2[string, error]
 }
 

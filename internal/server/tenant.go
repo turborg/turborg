@@ -359,7 +359,13 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			// and message-store submitters, so the two modes can't drift. Owner-
 			// trust config travels in the connector config (the feed reuses the
 			// same connectorList() shape the dedicated spawn payload does).
-			if err := runtime.WireCommon(a, conn, t.commonParams(cs, caps, settings.Nick, store, ignoredNicks, cmds), t.log); err != nil {
+			// Build the budgeted provider once so the same budget instance is
+			// shared by the connector/commands (WireCommon) and the web gateway
+			// below. WireCommon's own wrap is idempotent on this.
+			cp := t.commonParams(cs, caps, settings.Nick, store, ignoredNicks, cmds)
+			budgetedProvider := runtime.BuildBudgetedProvider(a, cp.LLM, cp.LLMInputCap, cp.LLMOutputCap, t.log)
+			cp.LLM = budgetedProvider
+			if err := runtime.WireCommon(a, conn, cp, t.log); err != nil {
 				t.log.Error("skipping irc connector: wiring failed", "err", err)
 				continue
 			}
@@ -388,7 +394,7 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 				if caps != nil {
 					tbCap = caps.TBSummarizeMaxMessages
 				}
-				gw, err := buildTenantGateway(conn, gatewayToken, t.log, store, t.llmProvider, tbCap)
+				gw, err := buildTenantGateway(conn, gatewayToken, t.log, store, budgetedProvider, tbCap)
 				if err != nil {
 					t.log.Error("skipping web gateway", "err", err)
 					continue
@@ -440,7 +446,7 @@ func (t *Tenant) applyTierSettings(s *irc.Settings, caps *PlanCapabilities) {
 // dedicated runtime does (from TURBORG_COMMANDS).
 func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick string, store messages.Store, ignoredNicks []string, cmds []commands.Definition) runtime.CommonParams {
 	var limits irc.ClientLimits
-	var outMax, outWin, nudge, cmdMax, cmdWin, customCmdMax int
+	var outMax, outWin, nudge, cmdMax, cmdWin, customCmdMax, llmInCap, llmOutCap int
 	if caps != nil {
 		limits = irc.ClientLimits{
 			NickLocked:             caps.NickLocked,
@@ -452,6 +458,7 @@ func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick 
 		nudge = caps.OwnerDMNudgeEvery
 		cmdMax, cmdWin = caps.CommandMaxPerWindow, caps.CommandWindowSeconds
 		customCmdMax = caps.CustomCommandsMax
+		llmInCap, llmOutCap = caps.LLMInputTokensPerDay, caps.LLMOutputTokensPerDay
 	}
 
 	// Activity hook: mark this tenant active in the pool's coalescing
@@ -481,6 +488,8 @@ func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick 
 		OwnerNick:             ownerNick,
 		OwnerDMNudgeEvery:     nudge,
 		LLM:                   t.llmProvider,
+		LLMInputCap:           llmInCap,
+		LLMOutputCap:          llmOutCap,
 		ActivityHook:          activityHook,
 		Store:                 store,
 	}

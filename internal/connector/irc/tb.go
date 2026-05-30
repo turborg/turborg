@@ -2,6 +2,7 @@ package irc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -90,8 +91,11 @@ func (h *tbHandler) tbSummarize(ctx context.Context, channel string, n int, cap 
 	ctx, cancel := context.WithTimeout(ctx, tbSummarizeTimeout)
 	defer cancel()
 
-	summary, err := provider.Ask(ctx, prompt, llm.WithSystem(tbSummarizeSystemPrompt), llm.WithMaxTokens(300))
+	summary, _, err := provider.Ask(ctx, prompt, llm.WithSystem(tbSummarizeSystemPrompt), llm.WithMaxTokens(300))
 	if err != nil {
+		if errors.Is(err, llm.ErrBudgetExhausted) {
+			return "", fmt.Errorf("daily AI token budget spent — resets on a rolling 24h window")
+		}
 		h.log.Warn("tb summarize LLM error", "channel", channel, "err", err)
 		return "", fmt.Errorf("LLM request failed: %w", err)
 	}

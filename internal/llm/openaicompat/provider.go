@@ -108,6 +108,10 @@ type chatResponse struct {
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
 }
 
 func (p *Provider) buildRequest(prompt string, opts []llm.CallOption) chatRequest {
@@ -147,27 +151,32 @@ func (p *Provider) post(ctx context.Context, body chatRequest) (*http.Response, 
 }
 
 // Ask sends prompt and returns the assembled (non-streamed) text response.
-func (p *Provider) Ask(ctx context.Context, prompt string, opts ...llm.CallOption) (string, error) {
+func (p *Provider) Ask(ctx context.Context, prompt string, opts ...llm.CallOption) (string, llm.Usage, error) {
 	resp, err := p.post(ctx, p.buildRequest(prompt, opts))
 	if err != nil {
-		return "", err
+		return "", llm.Usage{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	var decoded chatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-		return "", fmt.Errorf("openaicompat decode (status %d): %w", resp.StatusCode, err)
+		return "", llm.Usage{}, fmt.Errorf("openaicompat decode (status %d): %w", resp.StatusCode, err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		if decoded.Error != nil && decoded.Error.Message != "" {
-			return "", fmt.Errorf("openaicompat: %s (status %d)", decoded.Error.Message, resp.StatusCode)
+			return "", llm.Usage{}, fmt.Errorf("openaicompat: %s (status %d)", decoded.Error.Message, resp.StatusCode)
 		}
-		return "", fmt.Errorf("openaicompat: unexpected status %d", resp.StatusCode)
+		return "", llm.Usage{}, fmt.Errorf("openaicompat: unexpected status %d", resp.StatusCode)
 	}
 	if len(decoded.Choices) == 0 {
-		return "", fmt.Errorf("openaicompat: no choices in response")
+		return "", llm.Usage{}, fmt.Errorf("openaicompat: no choices in response")
 	}
-	return decoded.Choices[0].Message.Content, nil
+	var usage llm.Usage
+	if decoded.Usage != nil {
+		usage.InputTokens = decoded.Usage.PromptTokens
+		usage.OutputTokens = decoded.Usage.CompletionTokens
+	}
+	return decoded.Choices[0].Message.Content, usage, nil
 }
 
 // streamChunk is one server-sent delta in a streamed completion.

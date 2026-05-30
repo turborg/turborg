@@ -21,8 +21,8 @@ type fakeLLM struct {
 }
 
 func (f *fakeLLM) Model() string { return "fake" }
-func (f *fakeLLM) Ask(_ context.Context, _ string, _ ...llm.CallOption) (string, error) {
-	return f.response, f.err
+func (f *fakeLLM) Ask(_ context.Context, _ string, _ ...llm.CallOption) (string, llm.Usage, error) {
+	return f.response, llm.Usage{}, f.err
 }
 func (f *fakeLLM) Stream(_ context.Context, _ string, _ ...llm.CallOption) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {}

@@ -46,7 +46,7 @@ func TestAskSendsModelAndSystemAndReturnsContent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "default-model", p.Model())
 
-	out, err := p.Ask(context.Background(), "ping",
+	out, _, err := p.Ask(context.Background(), "ping",
 		llm.WithModel("override-model"),
 		llm.WithSystem("be terse"),
 		llm.WithMaxTokens(123),
@@ -74,7 +74,7 @@ func TestAskSurfacesAPIError(t *testing.T) {
 	p, err := openaicompat.New(openaicompat.Settings{APIKey: "k", BaseURL: srv.URL, HTTPClient: srv.Client()})
 	require.NoError(t, err)
 
-	_, err = p.Ask(context.Background(), "hi")
+	_, _, err = p.Ask(context.Background(), "hi")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "rate limited")
 }
@@ -96,7 +96,7 @@ func TestAskWithoutSystemSendsSingleMessage(t *testing.T) {
 
 	p, err := openaicompat.New(openaicompat.Settings{APIKey: "k", BaseURL: srv.URL, HTTPClient: srv.Client()})
 	require.NoError(t, err)
-	out, err := p.Ask(context.Background(), "hi")
+	out, _, err := p.Ask(context.Background(), "hi")
 	require.NoError(t, err)
 	assert.Equal(t, "ok", out)
 	msgs, _ := gotBody["messages"].([]any)
@@ -111,7 +111,7 @@ func TestAskErrorsOnEmptyChoices(t *testing.T) {
 
 	p, err := openaicompat.New(openaicompat.Settings{APIKey: "k", BaseURL: srv.URL, HTTPClient: srv.Client()})
 	require.NoError(t, err)
-	_, err = p.Ask(context.Background(), "hi")
+	_, _, err = p.Ask(context.Background(), "hi")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no choices")
 }
@@ -125,7 +125,7 @@ func TestAskErrorsOnNon200WithoutErrorBody(t *testing.T) {
 
 	p, err := openaicompat.New(openaicompat.Settings{APIKey: "k", BaseURL: srv.URL, HTTPClient: srv.Client()})
 	require.NoError(t, err)
-	_, err = p.Ask(context.Background(), "hi")
+	_, _, err = p.Ask(context.Background(), "hi")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unexpected status 500")
 }
@@ -137,7 +137,7 @@ func TestAskErrorsOnConnectionFailure(t *testing.T) {
 
 	p, err := openaicompat.New(openaicompat.Settings{APIKey: "k", BaseURL: url})
 	require.NoError(t, err)
-	_, err = p.Ask(context.Background(), "hi")
+	_, _, err = p.Ask(context.Background(), "hi")
 	require.Error(t, err)
 }
 

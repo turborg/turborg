@@ -96,6 +96,11 @@ type PlanCapabilities struct {
 	// subcommand can consume in a single invocation. 0 = feature disabled.
 	TBSummarizeMaxMessages int `json:"tb_summarize_max_messages"`
 
+	// LLMInputTokensPerDay / LLMOutputTokensPerDay are the rolling-24h
+	// token budget caps. 0 = unrestricted.
+	LLMInputTokensPerDay  int `json:"llm_input_tokens_per_day"`
+	LLMOutputTokensPerDay int `json:"llm_output_tokens_per_day"`
+
 	// LLM carries the OpenAI-compatible router config for LLM-type commands.
 	// Documentation-only on the turborg side: the pooled process builds one
 	// shared provider from its own env (the API key is a server-side secret,

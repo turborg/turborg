@@ -91,7 +91,7 @@ func TestAskAccumulatesStreamedDeltas(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	got, err := p.Ask(context.Background(), "say hi")
+	got, _, err := p.Ask(context.Background(), "say hi")
 	require.NoError(t, err)
 	assert.Equal(t, "hello world.", got)
 }
@@ -104,7 +104,7 @@ func TestAskWrapsServerError(t *testing.T) {
 	defer srv.Close()
 
 	p, _ := anthropic.New(anthropic.Settings{APIKey: "test", BaseURL: srv.URL})
-	_, err := p.Ask(context.Background(), "x")
+	_, _, err := p.Ask(context.Background(), "x")
 	require.Error(t, err)
 }
 
@@ -161,7 +161,7 @@ func TestAskSendsSystemBlockWithCacheControl(t *testing.T) {
 		SystemPrompt:      "you are a helpful bot",
 		CacheSystemPrompt: true,
 	})
-	_, err := p.Ask(context.Background(), "say hi")
+	_, _, err := p.Ask(context.Background(), "say hi")
 	require.NoError(t, err)
 	require.NotNil(t, captured)
 
@@ -189,7 +189,7 @@ func TestAskOmitsCacheControlWhenDisabled(t *testing.T) {
 		SystemPrompt:      "short",
 		CacheSystemPrompt: false,
 	})
-	_, err := p.Ask(context.Background(), "x")
+	_, _, err := p.Ask(context.Background(), "x")
 	require.NoError(t, err)
 
 	system := captured["system"].([]any)
@@ -214,7 +214,7 @@ func TestAskRespectsPerCallOverrides(t *testing.T) {
 		Model:     "claude-sonnet-4-6",
 		MaxTokens: 100,
 	})
-	_, err := p.Ask(context.Background(), "x",
+	_, _, err := p.Ask(context.Background(), "x",
 		llm.WithSystem("override"),
 		llm.WithMaxTokens(50),
 		llm.WithModel("claude-opus-4-7"),
@@ -236,7 +236,7 @@ func TestAskOmitsSystemWhenEmpty(t *testing.T) {
 	defer srv.Close()
 
 	p, _ := anthropic.New(anthropic.Settings{APIKey: "test", BaseURL: srv.URL})
-	_, err := p.Ask(context.Background(), "x")
+	_, _, err := p.Ask(context.Background(), "x")
 	require.NoError(t, err)
 	_, ok := captured["system"]
 	assert.False(t, ok, "system field must be omitted when no system prompt is configured")
@@ -253,7 +253,7 @@ func TestAskSendsAPIKeyHeader(t *testing.T) {
 	defer srv.Close()
 
 	p, _ := anthropic.New(anthropic.Settings{APIKey: "sk-live-abc123", BaseURL: srv.URL})
-	_, err := p.Ask(context.Background(), "x")
+	_, _, err := p.Ask(context.Background(), "x")
 	require.NoError(t, err)
 	assert.Equal(t, "sk-live-abc123", key, "SDK must propagate APIKey via x-api-key header")
 }
@@ -356,7 +356,7 @@ func TestAskReturnsEmptyForBlankResponse(t *testing.T) {
 	defer srv.Close()
 
 	p, _ := anthropic.New(anthropic.Settings{APIKey: "test", BaseURL: srv.URL})
-	got, err := p.Ask(context.Background(), "x")
+	got, _, err := p.Ask(context.Background(), "x")
 	require.NoError(t, err)
 	assert.Equal(t, "", got, "joinText must return empty when the message has no text blocks")
 }
@@ -378,7 +378,7 @@ func TestNewDefaultsMaxTokensOnZero(t *testing.T) {
 		BaseURL:   srv.URL,
 		MaxTokens: 0,
 	})
-	_, err := p.Ask(context.Background(), "x")
+	_, _, err := p.Ask(context.Background(), "x")
 	require.NoError(t, err)
 	assert.Equal(t, float64(anthropic.DefaultMaxTokens), captured["max_tokens"],
 		"MaxTokens=0 must fall back to DefaultMaxTokens")
