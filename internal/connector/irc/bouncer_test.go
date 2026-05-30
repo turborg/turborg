@@ -1689,3 +1689,58 @@ func TestBouncerTBSummarizeNoCap(t *testing.T) {
 	}
 	assert.True(t, gotError, "TB SUMMARIZE with cap=0 should produce an error")
 }
+
+func TestBouncerTBUnknownSubcommand(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	b.AttachState(state, "turborg", "ident", "host")
+
+	conn, r := bouncerClient(t, addr)
+	defer conn.Close()
+	authSimple(t, conn, r, "hunter2")
+
+	writeLine(t, conn, "TB BOGUS")
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var gotUnknown bool
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		if strings.Contains(line, "Unknown") {
+			gotUnknown = true
+			break
+		}
+	}
+	assert.True(t, gotUnknown, "TB BOGUS should produce unknown-subcommand hint")
+}
+
+func TestBouncerTBSummarizeWithN(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#test")
+	b.AttachState(state, "turborg", "ident", "host")
+	b.AttachClientLimits(irc.ClientLimits{TBSummarizeMaxMessages: 200})
+
+	conn, r := bouncerClient(t, addr)
+	defer conn.Close()
+	authSimple(t, conn, r, "hunter2")
+
+	// No LLM provider attached — will error, but N parsing is exercised.
+	writeLine(t, conn, "TB SUMMARIZE #test 50")
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var gotResponse bool
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		if strings.Contains(line, "Summarizing") || strings.Contains(line, "Error") || strings.Contains(line, "no LLM") {
+			gotResponse = true
+			break
+		}
+	}
+	assert.True(t, gotResponse, "TB SUMMARIZE #test 50 should produce a response")
+}
