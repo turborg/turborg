@@ -109,9 +109,9 @@ func TestBuildActivityNoopWhenURLUnset(t *testing.T) {
 
 func TestBuildActivityEnabledWhenURLSet(t *testing.T) {
 	s := &config.Settings{
-		CommandPrefix:           "!",
-		ActivityURL:             "http://observer.local/mark",
-		ActivityToken:           "shh",
+		CommandPrefix:               "!",
+		ActivityURL:                 "http://observer.local/mark",
+		ActivityToken:               "shh",
 		GatewayPassword:             "hunter2",
 		GatewayHost:                 "127.0.0.1",
 		GatewayPort:                 0,
@@ -548,7 +548,6 @@ func TestRunWithGatewayUnwindsWhileConnectorRetries(t *testing.T) {
 		t.Fatal("Run did not unwind the gateway/agent pair on ctx cancel")
 	}
 }
-
 
 // --- LoadIRCSettings ------------------------------------------------------
 

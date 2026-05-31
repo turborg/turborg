@@ -32,9 +32,9 @@ type RateLimiter struct {
 	Lockout     time.Duration
 	now         Clock
 
-	mu           sync.Mutex
-	failures     map[string][]time.Time
-	lockedUntil  map[string]time.Time
+	mu          sync.Mutex
+	failures    map[string][]time.Time
+	lockedUntil map[string]time.Time
 }
 
 func NewRateLimiter(maxFailures int, window, lockout time.Duration, clock Clock) (*RateLimiter, error) {

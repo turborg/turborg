@@ -18,11 +18,11 @@ type ChannelInfo struct {
 	// case-insensitive but display preserves the form the server used.
 	Name string
 
-	Topic        string
-	TopicSet     bool
-	TopicSetBy   string
-	TopicSetAt   int64
-	Members      map[string]string // nick → mode prefix ("", "@", "+", "%", "&", "~")
+	Topic         string
+	TopicSet      bool
+	TopicSetBy    string
+	TopicSetAt    int64
+	Members       map[string]string // nick → mode prefix ("", "@", "+", "%", "&", "~")
 	NamesComplete bool
 }
 
