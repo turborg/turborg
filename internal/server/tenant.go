@@ -631,10 +631,8 @@ func (t *Tenant) reloadCommands(defs []commands.Definition) bool {
 		IgnoredNicks:  ignoredNicks,
 		BotNick:       conn.CurrentNick(),
 	}
-	built := commands.Build(defs, t.llmProvider, func(d commands.Definition) agent.CommandGuard {
-		return runtime.PerCommandGuard(string(d.Access), d.Allowlist, owner)
-	}, t.log)
-	a.Commands.ReplaceDynamic(built)
+	// Same in-place swap the dedicated runtime's command refresher uses.
+	runtime.ApplyCommands(a, defs, t.llmProvider, owner, t.log)
 	return true
 }
 

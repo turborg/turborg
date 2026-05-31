@@ -18,10 +18,10 @@ type Conn struct {
 
 	inbox chan *agent.InboundEnvelope
 
-	mu       sync.Mutex
-	sent     []*agent.OutboundEnvelope
-	started  bool
-	stopped  bool
+	mu          sync.Mutex
+	sent        []*agent.OutboundEnvelope
+	started     bool
+	stopped     bool
 	inboxClosed bool
 }
 
@@ -33,9 +33,9 @@ func New(name string) *Conn {
 	}
 }
 
-func (c *Conn) Name() string                                { return c.NameStr }
-func (c *Conn) Inbound() <-chan *agent.InboundEnvelope      { return c.inbox }
-func (c *Conn) ClaimSupervision() bool                      { return c.SupervisedB }
+func (c *Conn) Name() string                           { return c.NameStr }
+func (c *Conn) Inbound() <-chan *agent.InboundEnvelope { return c.inbox }
+func (c *Conn) ClaimSupervision() bool                 { return c.SupervisedB }
 
 func (c *Conn) Start(_ context.Context) error {
 	c.mu.Lock()

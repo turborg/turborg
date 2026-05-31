@@ -28,9 +28,9 @@ func quietLogger() *slog.Logger {
 // sidecar/messages_sink_test.go pins the other end of the same wire.
 func TestSinkWireShape(t *testing.T) {
 	var (
-		mu      sync.Mutex
-		got     []*http.Request
-		bodies  [][]byte
+		mu     sync.Mutex
+		got    []*http.Request
+		bodies [][]byte
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -307,7 +307,7 @@ func TestRequestBuildErrorIsAbsorbed(t *testing.T) {
 	// Push directly into the buffer and call flushOnce — bypasses the
 	// goroutine so the test stays deterministic.
 	s.buffer = []Entry{{
-		MsgID: "01HX0000000000000000000000",
+		MsgID:   "01HX0000000000000000000000",
 		Channel: "#x", Nick: "n", Text: "t",
 		Ts: "2026-06-01T00:00:00.000000Z",
 	}}

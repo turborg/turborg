@@ -226,13 +226,13 @@ func TestAgentDrainReturnsOnInboundChannelClose(t *testing.T) {
 
 type failingStart struct{ fakeconn.Conn }
 
-func (f *failingStart) Name() string                                { return "failing" }
-func (f *failingStart) Start(_ context.Context) error               { return errors.New("nope") }
-func (f *failingStart) Run(_ context.Context) error                 { return nil }
-func (f *failingStart) Stop(_ context.Context) error                { return nil }
-func (f *failingStart) Inbound() <-chan *agent.InboundEnvelope      { return nil }
-func (f *failingStart) Send(_ *agent.OutboundEnvelope) error        { return nil }
-func (f *failingStart) ClaimSupervision() bool                      { return false }
+func (f *failingStart) Name() string                           { return "failing" }
+func (f *failingStart) Start(_ context.Context) error          { return errors.New("nope") }
+func (f *failingStart) Run(_ context.Context) error            { return nil }
+func (f *failingStart) Stop(_ context.Context) error           { return nil }
+func (f *failingStart) Inbound() <-chan *agent.InboundEnvelope { return nil }
+func (f *failingStart) Send(_ *agent.OutboundEnvelope) error   { return nil }
+func (f *failingStart) ClaimSupervision() bool                 { return false }
 
 type sendFails struct {
 	*fakeconn.Conn

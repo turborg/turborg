@@ -142,8 +142,12 @@ func TestCommandRegistryHandlerError(t *testing.T) {
 
 func TestCommandRegistryNames(t *testing.T) {
 	r := agent.NewCommandRegistry("!")
-	r.Register("a", func(context.Context, *agent.InboundEnvelope, []string) (*agent.OutboundEnvelope, error) { return nil, nil }, nil)
-	r.Register("b", func(context.Context, *agent.InboundEnvelope, []string) (*agent.OutboundEnvelope, error) { return nil, nil }, nil)
+	r.Register("a", func(context.Context, *agent.InboundEnvelope, []string) (*agent.OutboundEnvelope, error) {
+		return nil, nil
+	}, nil)
+	r.Register("b", func(context.Context, *agent.InboundEnvelope, []string) (*agent.OutboundEnvelope, error) {
+		return nil, nil
+	}, nil)
 	assert.ElementsMatch(t, []string{"a", "b"}, r.Names())
 }
 

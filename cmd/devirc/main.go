@@ -75,12 +75,12 @@ type server struct {
 }
 
 type client struct {
-	conn  net.Conn
-	nick  string
-	w     *bufio.Writer
-	wmu   sync.Mutex
-	saslState string // "", "PLAIN", "done"
-	capLS bool
+	conn       net.Conn
+	nick       string
+	w          *bufio.Writer
+	wmu        sync.Mutex
+	saslState  string // "", "PLAIN", "done"
+	capLS      bool
 	registered bool
 }
 

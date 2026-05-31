@@ -152,6 +152,21 @@ type Settings struct {
 	// (15s); values below the floor are clamped up by the refresher.
 	LLMBudgetRefreshSeconds int `env:"LLM_BUDGET_REFRESH_SECONDS"`
 
+	// CommandsURL is an optional endpoint the agent polls to hot-reload its
+	// data-driven command set while it runs — no reconnect. SaaS deployments
+	// point it at the sidecar's per-container commands handler, which forwards
+	// the tenant's resolved command set from the control plane. Empty = no live
+	// reload (the boot TURBORG_COMMANDS set is fixed, correct for self-host).
+	// This gives a dedicated agent the same in-place ReplaceDynamic the pooled
+	// runtime already does from its tenant feed.
+	CommandsURL string `env:"COMMANDS_URL"`
+	// CommandsToken is the bearer sent on every commands poll. Defaults to
+	// MessageSinkToken via normalize() when unset — same per-container endpoint.
+	CommandsToken string `env:"COMMANDS_TOKEN"`
+	// CommandsRefreshSeconds is the poll interval. 0 uses the package default;
+	// values below the floor are clamped up by the refresher.
+	CommandsRefreshSeconds int `env:"COMMANDS_REFRESH_SECONDS"`
+
 	// CustomCommandsMax caps the dynamic-command registry. 0 = no
 	// commands, -1 = unrestricted. Bounds the command set loaded from
 	// TURBORG_COMMANDS (and any later runtime registrations).
@@ -300,6 +315,11 @@ func (s *Settings) normalize() error {
 	// the message sink, so it reuses that bearer unless overridden.
 	if s.LLMBudgetToken == "" {
 		s.LLMBudgetToken = s.MessageSinkToken
+	}
+	// The commands poll terminates at the same per-container endpoint, so it
+	// reuses that bearer unless overridden.
+	if s.CommandsToken == "" {
+		s.CommandsToken = s.MessageSinkToken
 	}
 	return nil
 }
