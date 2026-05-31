@@ -22,8 +22,9 @@ import (
 	"time"
 
 	"github.com/turborg/turborg/internal/activity"
-	"github.com/turborg/turborg/internal/budgetrefresh"
 	"github.com/turborg/turborg/internal/agent"
+	"github.com/turborg/turborg/internal/budgetrefresh"
+	"github.com/turborg/turborg/internal/commandrefresh"
 	"github.com/turborg/turborg/internal/commands"
 	"github.com/turborg/turborg/internal/config"
 	"github.com/turborg/turborg/internal/connector/irc"
@@ -48,6 +49,10 @@ type Built struct {
 	// BudgetRefresh keeps the token budget's account baseline current while the
 	// agent runs. Nil when the provider isn't budgeted or no endpoint is set.
 	BudgetRefresh *budgetrefresh.Refresher
+	// CommandRefresh hot-reloads the data-driven command set in place while the
+	// agent runs (the dedicated mirror of the pooled feed-driven reload). Nil
+	// when COMMANDS_URL is unset (self-host: the boot set is fixed).
+	CommandRefresh *commandrefresh.Refresher
 }
 
 // Build wires the agent + connectors + gateway from settings. Callers
@@ -112,6 +117,20 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	// idempotent on an already-budgeted provider.
 	provider = BuildBudgetedProvider(a, provider, s.LLMInputTokensPerDay, s.LLMOutputTokensPerDay, s.LLMInputTokensUsed, s.LLMOutputTokensUsed, log)
 
+	// Owner-trust + per-sender guard config, shared by the initial command
+	// wiring and the live command refresher so a hot reload rebuilds handlers
+	// with exactly the same access rules.
+	owner := GuardParams{
+		OwnerMode:            s.OwnerMode,
+		OwnerNick:            s.OwnerNick,
+		OwnerAccount:         s.OwnerAccount,
+		OwnerHostmask:        s.OwnerHostmask,
+		IgnoredNicks:         s.IgnoredNicks,
+		BotNick:              ircCfg.Nick,
+		CommandMaxPerWindow:  s.CommandMaxPerWindow,
+		CommandWindowSeconds: s.CommandWindowSeconds,
+	}
+
 	// The connector-agnostic, transport-independent wiring — builtins, owner
 	// guard, throttles, nudge, store submitters. The pooled runtime calls this
 	// same WireCommon from its tenant builder, so the two modes can't drift.
@@ -124,16 +143,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 			MaxChannels:            s.MaxChannels,
 			TBSummarizeMaxMessages: s.TBSummarizeMaxMessages,
 		},
-		Owner: GuardParams{
-			OwnerMode:            s.OwnerMode,
-			OwnerNick:            s.OwnerNick,
-			OwnerAccount:         s.OwnerAccount,
-			OwnerHostmask:        s.OwnerHostmask,
-			IgnoredNicks:         s.IgnoredNicks,
-			BotNick:              ircCfg.Nick,
-			CommandMaxPerWindow:  s.CommandMaxPerWindow,
-			CommandWindowSeconds: s.CommandWindowSeconds,
-		},
+		Owner:                     owner,
 		OutboundMaxPerWindow:      s.OutboundMaxPerWindow,
 		OutboundWindowSeconds:     s.OutboundWindowSeconds,
 		OwnerNick:                 s.OwnerNick,
@@ -184,6 +194,18 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 			log,
 		)
 	}
+
+	// Live command hot-reload: when COMMANDS_URL is set, poll the per-container
+	// commands endpoint and swap the dynamic command set in place — the same
+	// ReplaceDynamic the pooled runtime does from its feed, so a dedicated
+	// container picks up skill attach/detach/edit without a respawn/reconnect.
+	built.CommandRefresh = commandrefresh.New(
+		s.CommandsURL,
+		s.CommandsToken,
+		s.CommandsRefreshSeconds,
+		func(defs []commands.Definition) { ApplyCommands(a, defs, provider, owner, log) },
+		log,
+	)
 
 	if s.GatewayEnabled() {
 		gw, err := buildGateway(s, ircConn, a, log, notifier, store, provider)
@@ -260,13 +282,13 @@ func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, lo
 		return nil, fmt.Errorf("runtime: gateway ratelimit: %w", err)
 	}
 	opts := web.Options{
-		Host:         s.GatewayHost,
-		Port:         s.GatewayPort,
-		Verifier:     verifier,
-		RateLimiter:  rl,
-		Log:          log,
-		MessageStore: store,
-		LLMProvider:  llmProvider,
+		Host:                   s.GatewayHost,
+		Port:                   s.GatewayPort,
+		Verifier:               verifier,
+		RateLimiter:            rl,
+		Log:                    log,
+		MessageStore:           store,
+		LLMProvider:            llmProvider,
 		TBSummarizeMaxMessages: s.TBSummarizeMaxMessages,
 	}
 	if notifier.Enabled() {
@@ -416,20 +438,20 @@ func isChannelTarget(s string) bool {
 // are inert until the operator opts in.
 //
 //   - "none":     refuse every !command. Bots running as pure relays,
-//                 log-only agents, or personal-bouncer use cases sit
-//                 here. Throttle still runs against anonymous scope so
-//                 a misconfigured throttle gate doesn't silently allow.
+//     log-only agents, or personal-bouncer use cases sit
+//     here. Throttle still runs against anonymous scope so
+//     a misconfigured throttle gate doesn't silently allow.
 //   - "self":     trust messages where the sender's nick equals the
-//                 bot's own nick. Useful for personal AI assistants
-//                 where the operator attaches via the bouncer and IS
-//                 the bot. The IRC network won't allow nick collisions,
-//                 so the sender check is sufficient on its own.
+//     bot's own nick. Useful for personal AI assistants
+//     where the operator attaches via the bouncer and IS
+//     the bot. The IRC network won't allow nick collisions,
+//     so the sender check is sufficient on its own.
 //   - "external": trust messages from OwnerNick, verified via the
-//                 IRCv3 account-tag. OwnerAccount overrides the
-//                 expected account name (defaults to OwnerNick). When
-//                 the network has no services and no account-tag
-//                 arrives, fall back to hostmask matching against
-//                 OwnerHostmask when it's set. Without either, deny.
+//     IRCv3 account-tag. OwnerAccount overrides the
+//     expected account name (defaults to OwnerNick). When
+//     the network has no services and no account-tag
+//     arrives, fall back to hostmask matching against
+//     OwnerHostmask when it's set. Without either, deny.
 //
 // Owner checks fail closed: ambiguous signals never resolve to "trust".
 // This matters most precisely when the verification pipeline is
@@ -645,20 +667,28 @@ func Run(ctx context.Context, b *Built) error {
 	rootCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Background budget refresher: keeps the token baseline fresh under rootCtx.
-	// It is NOT part of the cross-stop race (it doesn't gate process lifetime),
-	// but we drain it before returning so no goroutine outlives Run.
-	var refreshDone chan struct{}
-	if b.BudgetRefresh != nil {
-		refreshDone = make(chan struct{})
+	// Background refreshers: keep the token baseline and the command set fresh
+	// under rootCtx. Neither gates process lifetime (they're not in the cross-
+	// stop race), but we drain them before returning so no goroutine outlives
+	// Run. Each exposes Run(ctx) error and exits when rootCtx is cancelled.
+	var refreshDones []chan struct{}
+	startRefresher := func(run func(context.Context) error) {
+		done := make(chan struct{})
+		refreshDones = append(refreshDones, done)
 		go func() {
-			defer close(refreshDone)
-			_ = b.BudgetRefresh.Run(rootCtx)
+			defer close(done)
+			_ = run(rootCtx)
 		}()
 	}
+	if b.BudgetRefresh != nil {
+		startRefresher(b.BudgetRefresh.Run)
+	}
+	if b.CommandRefresh != nil {
+		startRefresher(b.CommandRefresh.Run)
+	}
 	waitRefresh := func() {
-		if refreshDone != nil {
-			<-refreshDone
+		for _, done := range refreshDones {
+			<-done
 		}
 	}
 

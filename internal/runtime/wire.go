@@ -168,11 +168,27 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 
 	// Install the tenant's data-driven commands. The dynamic set is fully
 	// owned by ReplaceDynamic, so a later hot reload swaps it atomically.
-	built := commands.Build(p.Commands, provider, func(d commands.Definition) agent.CommandGuard {
-		return PerCommandGuard(string(d.Access), d.Allowlist, p.Owner)
+	ApplyCommands(a, p.Commands, provider, p.Owner, log)
+	return nil
+}
+
+// ApplyCommands rebuilds the data-driven command set from defs and swaps it
+// into the agent's registry in place via ReplaceDynamic — an atomic, no-
+// reconnect hot reload. It is the single source of truth for turning command
+// Definitions into live handlers, shared by initial wiring (WireCommon), the
+// pooled runtime's feed-driven reload, and the dedicated runtime's command
+// refresher, so the three can't drift in how a command is built or
+// access-gated. The registry-wide ignore/throttle guard set at wire time is
+// untouched; per-command access (owner / allowlist / everyone) is reapplied
+// from each Definition.
+func ApplyCommands(a *agent.Agent, defs []commands.Definition, provider llm.Provider, owner GuardParams, log *slog.Logger) {
+	if log == nil {
+		log = slog.Default()
+	}
+	built := commands.Build(defs, provider, func(d commands.Definition) agent.CommandGuard {
+		return PerCommandGuard(string(d.Access), d.Allowlist, owner)
 	}, log)
 	a.Commands.ReplaceDynamic(built)
-	return nil
 }
 
 // BuildBudgetedProvider wraps an llm.Provider with rolling-24h budget
