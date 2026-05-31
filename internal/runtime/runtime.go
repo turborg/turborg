@@ -142,6 +142,10 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 			RealnameLocked:         s.RealnameLocked,
 			MaxChannels:            s.MaxChannels,
 			TBSummarizeMaxMessages: s.TBSummarizeMaxMessages,
+			// Per-connector network policy (the strict-network AI gate)
+			// lives on the IRC settings, not the top-level config.
+			AIStrict:        ircCfg.AIStrict,
+			AIStrictMessage: ircCfg.AIStrictMessage,
 		},
 		Owner:                     owner,
 		OutboundMaxPerWindow:      s.OutboundMaxPerWindow,

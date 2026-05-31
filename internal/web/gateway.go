@@ -877,6 +877,15 @@ func (g *Gateway) handleTBSummarize(ctx context.Context, c *client, channel stri
 		g.sendTo(ctx, c, map[string]any{"op": "tb_error", "message": "/tb summarize is not available on your plan."})
 		return
 	}
+
+	// On a strict network, AI history commands require the bot to hold
+	// channel-operator status in the target channel — the same gate the
+	// bouncer applies, sourced from the shared ClientLimits.
+	if limits := g.bridge.ClientLimits(); limits.AIStrict && !g.bridge.State().IsOperator(channel, g.bridge.CurrentNick()) {
+		g.sendTo(ctx, c, map[string]any{"op": "tb_error", "message": limits.AIStrictDenyMessage()})
+		return
+	}
+
 	if n <= 0 {
 		n = 200
 	}

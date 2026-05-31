@@ -90,6 +90,17 @@ type Settings struct {
 	CTCPMaxPerWindow  int  `env:"CTCP_MAX_PER_WINDOW" envDefault:"3"`
 	CTCPWindowSeconds int  `env:"CTCP_WINDOW_SECONDS" envDefault:"30"`
 
+	// AIStrict requires the bot to hold channel-operator status (+o) in a
+	// channel before AI commands that read its history (e.g. /tb summarize)
+	// will run there. Off by default; set it on networks whose bot policy
+	// requires operator consent for LLM processing of channel messages.
+	AIStrict bool `env:"AI_STRICT"`
+
+	// AIStrictMessage overrides the notice sent when an AI history command
+	// is denied under AIStrict. Empty uses the neutral built-in default;
+	// set it to a network's specific policy wording/URL.
+	AIStrictMessage string `env:"AI_STRICT_MESSAGE"`
+
 	// UpstreamWarnAfter is the dwell time in disconnected_transient
 	// before the reconnect supervisor fires its operator-visible warn
 	// hook. 0 disables the warn step.

@@ -462,6 +462,12 @@ func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick 
 		llmInUsed, llmOutUsed = caps.LLMInputTokensUsed, caps.LLMOutputTokensUsed
 	}
 
+	// The strict-network AI gate is a per-connector network policy, not a
+	// plan cap — source it from the connector spec so it applies regardless
+	// of whether caps were supplied.
+	limits.AIStrict = boolField(cs.Config, "ai_strict", false)
+	limits.AIStrictMessage = stringField(cs.Config, "ai_strict_message")
+
 	// Activity hook: mark this tenant active in the pool's coalescing
 	// aggregator. Nil when no control plane is configured.
 	var activityHook func(string)
