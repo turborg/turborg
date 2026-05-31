@@ -10,6 +10,13 @@ import (
 // containment.
 const memberPrefixes = "@+%&~"
 
+// operatorPrefixes are the member-prefix characters that denote channel-
+// operator status (mode +o) or higher in the standard prefix hierarchy
+// (~ owner > & admin > @ op). Halfop (%) and voice (+) rank below an
+// operator and are deliberately excluded — "operator" here means +o or
+// above.
+const operatorPrefixes = "@&~"
+
 // ChannelInfo is per-channel state cached from observed server messages.
 // The bouncer replays this to new clients on auth so they pick up the
 // bot's view of the network instead of starting blank.
@@ -49,6 +56,31 @@ func (s *ChannelState) Get(channel string) *ChannelInfo {
 		return nil
 	}
 	return cloneChannelInfo(info)
+}
+
+// IsOperator reports whether nick currently holds channel-operator status
+// (mode +o) or higher in channel, per the tracked RPL_NAMREPLY / MODE
+// member prefixes. Channel lookup is case-insensitive (matching Get); the
+// nick comparison folds ASCII case so a bot nick observed in a different
+// case than the caller supplies still matches. Returns false when the
+// receiver is nil, the nick is empty, the channel is unknown, or the nick
+// carries no operator-level prefix.
+func (s *ChannelState) IsOperator(channel, nick string) bool {
+	if s == nil || nick == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	info, ok := s.channels[strings.ToLower(channel)]
+	if !ok {
+		return false
+	}
+	for member, prefix := range info.Members {
+		if strings.EqualFold(member, nick) {
+			return strings.ContainsAny(prefix, operatorPrefixes)
+		}
+	}
+	return false
 }
 
 // Count returns how many channels are currently joined. Cheap (no

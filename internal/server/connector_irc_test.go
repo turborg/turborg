@@ -42,6 +42,23 @@ func TestSettingsFromConnectorSpec(t *testing.T) {
 	require.Equal(t, "p", s.SASLPassword)
 }
 
+func TestSettingsMapsAIStrictPolicy(t *testing.T) {
+	// Absent → the strict-network AI gate stays off (the default).
+	s, err := settingsFromConnectorSpec(ircConfig(nil))
+	require.NoError(t, err)
+	require.False(t, s.AIStrict)
+	require.Empty(t, s.AIStrictMessage)
+
+	// Present → ai_strict + its notice map onto the connector settings.
+	s, err = settingsFromConnectorSpec(ircConfig(map[string]any{
+		"ai_strict":         true,
+		"ai_strict_message": "op consent required here",
+	}))
+	require.NoError(t, err)
+	require.True(t, s.AIStrict)
+	require.Equal(t, "op consent required here", s.AIStrictMessage)
+}
+
 func TestSettingsWiresBouncerPasswordFromSecrets(t *testing.T) {
 	// The spec carries bouncer_password in secrets; settingsFromConnectorSpec
 	// must read it so the (listenerless) bouncer the SNI router feeds is enabled.

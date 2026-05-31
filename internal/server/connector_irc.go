@@ -38,6 +38,10 @@ func settingsFromConnectorSpec(cs ConnectorSpec) (*irc.Settings, error) {
 		AuthMode: stringField(cs.Config, "auth_mode"),
 		Channels: stringSlice(cs.Config, "channels"),
 
+		// Per-connector network policy: the strict-network AI gate.
+		AIStrict:        boolField(cs.Config, "ai_strict", false),
+		AIStrictMessage: stringField(cs.Config, "ai_strict_message"),
+
 		SASLUser:         stringField(cs.Secrets, "sasl_user"),
 		SASLPassword:     stringField(cs.Secrets, "sasl_password"),
 		NickServPassword: stringField(cs.Secrets, "nickserv_password"),

@@ -438,6 +438,16 @@ func (b *Bouncer) handleTBSummarize(client *BouncerClient, args []string) {
 	}
 
 	limits := b.currentClientLimits()
+
+	// On a strict network, AI history commands require the bot to hold
+	// channel-operator status in the target channel (an op granting the
+	// bot +o is the consent signal). Applies to every history-consuming
+	// /tb AI subcommand; non-AI subcommands (e.g. usage) are unaffected.
+	if limits.AIStrict && !b.botIsChannelOperator(channel) {
+		b.notifyService(client, limits.AIStrictDenyMessage())
+		return
+	}
+
 	cap := limits.TBSummarizeMaxMessages
 	store := b.currentMessageStore()
 
@@ -459,6 +469,18 @@ func (b *Bouncer) handleTBSummarize(client *BouncerClient, args []string) {
 		}
 		b.notifyService(client, "["+channel+" summary] "+summary)
 	}()
+}
+
+// botIsChannelOperator reports whether the bot's own upstream nick holds
+// channel-operator status (+o or higher) in channel, per the tracked
+// upstream channel state. Used to gate AI history commands on strict
+// networks. False when state isn't attached yet.
+func (b *Bouncer) botIsChannelOperator(channel string) bool {
+	b.upstreamMu.RLock()
+	state := b.state
+	nick := b.upstreamNick
+	b.upstreamMu.RUnlock()
+	return state.IsOperator(channel, nick)
 }
 
 func (b *Bouncer) AttachUpstream(send SendUpstreamFunc) {

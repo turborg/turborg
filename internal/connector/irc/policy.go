@@ -34,6 +34,38 @@ type ClientLimits struct {
 	// TBSummarizeMaxMessages caps how many channel messages /tb summarize
 	// can consume. 0 = feature disabled.
 	TBSummarizeMaxMessages int
+
+	// AIStrict gates the channel-history-consuming /tb AI command family
+	// (e.g. /tb summarize) behind channel-operator consent, for upstream
+	// networks whose bot policy requires it. When true, those commands only
+	// run if the bot holds channel-operator status (mode +o or higher) in
+	// the target channel — an op granting the bot +o is the consent signal.
+	// False (the default) leaves the AI commands unrestricted. Other /tb
+	// subcommands (e.g. usage) are never gated by this flag.
+	AIStrict bool
+
+	// AIStrictMessage is the operator-facing notice returned when an AI
+	// history command is blocked under AIStrict because the bot lacks
+	// channel-operator status. Empty falls back to DefaultAIStrictMessage,
+	// so a strict network's specific policy text can be supplied by the
+	// operator without baking any one network's wording into the framework.
+	AIStrictMessage string
+}
+
+// DefaultAIStrictMessage is the network-neutral notice sent when an AI
+// history command is denied under AIStrict and no AIStrictMessage override
+// was configured. Operators on a network with a published bot policy
+// typically override it with that policy's specific wording and URL.
+const DefaultAIStrictMessage = "AI commands that read channel history require channel-operator status here, per this network's bot policy."
+
+// AIStrictDenyMessage returns the notice to send when an AI history command
+// is blocked under AIStrict — the configured override, or the neutral
+// default when none is set.
+func (l ClientLimits) AIStrictDenyMessage() string {
+	if l.AIStrictMessage != "" {
+		return l.AIStrictMessage
+	}
+	return DefaultAIStrictMessage
 }
 
 // CapHitKind maps an IRC command to the canonical "kind" label used in
