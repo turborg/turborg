@@ -137,6 +137,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	if err := WireCommon(a, ircConn, CommonParams{
 		CustomCommandsMax: s.CustomCommandsMax,
 		Commands:          cmds,
+		Platform:          ircCfg.Hostname,
 		Limits: irc.ClientLimits{
 			NickLocked:             s.NickLocked,
 			RealnameLocked:         s.RealnameLocked,
@@ -207,7 +208,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		s.CommandsURL,
 		s.CommandsToken,
 		s.CommandsRefreshSeconds,
-		func(defs []commands.Definition) { ApplyCommands(a, defs, provider, owner, log) },
+		func(defs []commands.Definition) { ApplyCommands(a, defs, provider, owner, ircCfg.Hostname, log) },
 		log,
 	)
 
