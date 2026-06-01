@@ -188,6 +188,20 @@ func TestNormalizeAcceptsMaxConnectorsPerAgentUnrestricted(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestNormalizeRejectsNegativeLLMInputTokensUsed(t *testing.T) {
+	t.Setenv("TURBORG_LLM_INPUT_TOKENS_USED", "-1")
+	_, err := config.Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "LLM_INPUT_TOKENS_USED")
+}
+
+func TestNormalizeRejectsNegativeLLMOutputTokensUsed(t *testing.T) {
+	t.Setenv("TURBORG_LLM_OUTPUT_TOKENS_USED", "-1")
+	_, err := config.Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "LLM_OUTPUT_TOKENS_USED")
+}
+
 func TestNormalizeRejectsNegativeMaxConnectorsPerAgent(t *testing.T) {
 	t.Setenv("TURBORG_MAX_CONNECTORS_PER_AGENT", "-1")
 	_, err := config.Load()

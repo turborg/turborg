@@ -115,6 +115,19 @@ func TestBuildLLMReportsProviderError(t *testing.T) {
 	assert.Contains(t, out.Text, "rate limited")
 }
 
+func TestBuildLLMReportsBudgetExhausted(t *testing.T) {
+	prov := &recordingProvider{err: llm.ErrBudgetExhausted}
+	built := commands.Build([]commands.Definition{
+		{Name: "ask", Type: commands.TypeLLM, Template: "{args}", Access: commands.AccessOwner},
+	}, prov, nil, nil)
+	require.Len(t, built, 1)
+
+	out := dispatch(t, built[0], agent.NewInbound("irc", "#room", "bob", "!ask hi"), []string{"hi"})
+	require.NotNil(t, out)
+	assert.Contains(t, out.Text, "budget")
+	assert.NotContains(t, out.Text, "sorry", "budget exhaustion gets its own message, not the generic error reply")
+}
+
 func TestBuildSkipsLLMCommandWithoutProvider(t *testing.T) {
 	built := commands.Build([]commands.Definition{
 		{Name: "ask", Type: commands.TypeLLM, Template: "{args}", Access: commands.AccessOwner},
