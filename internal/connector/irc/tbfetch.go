@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -32,6 +33,39 @@ const (
 // and so it survives the wrapping http.Client.Do applies to dial errors.
 var errBlockedAddress = errors.New("destination address is not permitted")
 
+// blockedCIDRs are ranges the URL fetcher must refuse that Go's standard
+// IP classifiers (IsPrivate/IsLoopback/…) do not cover. Parsed once at init.
+//
+//   - 100.64.0.0/10   carrier-grade NAT (RFC 6598) — routes to internal infra
+//     in many cloud/NAT topologies
+//   - 192.0.0.0/24    IETF protocol assignments (RFC 6890)
+//   - 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24  TEST-NET-1/2/3
+//   - 198.18.0.0/15   benchmarking (RFC 2544)
+//   - 192.88.99.0/24  6to4 relay anycast (deprecated)
+//   - 240.0.0.0/4     reserved / former Class E
+//   - 64:ff9b::/96    NAT64 well-known prefix (RFC 6052) — embeds an IPv4
+//     target the v4 rules below would otherwise never see
+var blockedCIDRs = func() []*net.IPNet {
+	raw := []string{
+		"100.64.0.0/10",
+		"192.0.0.0/24",
+		"192.0.2.0/24",
+		"198.51.100.0/24",
+		"203.0.113.0/24",
+		"198.18.0.0/15",
+		"192.88.99.0/24",
+		"240.0.0.0/4",
+		"64:ff9b::/96",
+	}
+	out := make([]*net.IPNet, 0, len(raw))
+	for _, c := range raw {
+		if _, n, err := net.ParseCIDR(c); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}()
+
 // isBlockedIP reports whether ip falls in a range the URL fetcher must
 // refuse to connect to. This is the heart of the SSRF guard: it is applied
 // to every IP returned by DNS, and the connection is then pinned to a vetted
@@ -40,12 +74,21 @@ var errBlockedAddress = errors.New("destination address is not permitted")
 // internal target past it.
 //
 // Covered: loopback (127/8, ::1), RFC1918 + unique-local (10/8, 172.16/12,
-// 192.168/16, fc00::/7), link-local unicast/multicast (169.254/16, fe80::/10),
-// any multicast, interface-local multicast, and the unspecified address
-// (0.0.0.0, ::). A nil IP is treated as blocked.
+// 192.168/16, fc00::/7), link-local unicast/multicast (169.254/16, fe80::/10)
+// — which includes the cloud metadata endpoint 169.254.169.254 — any
+// multicast, interface-local multicast, the unspecified address (0.0.0.0, ::),
+// and the extra reserved/CGNAT/NAT64 ranges in blockedCIDRs. A nil IP is
+// treated as blocked.
 func isBlockedIP(ip net.IP) bool {
 	if ip == nil {
 		return true
+	}
+	// Check the explicit CIDRs against the address as given, before any v4
+	// normalization, so the IPv6 NAT64 prefix is matched on its v6 form.
+	for _, n := range blockedCIDRs {
+		if n.Contains(ip) {
+			return true
+		}
 	}
 	// Normalize IPv4-in-IPv6 so e.g. ::ffff:127.0.0.1 is judged by the
 	// IPv4 rules rather than slipping through as a "global" v6 address.
@@ -59,6 +102,19 @@ func isBlockedIP(ip net.IP) bool {
 		ip.IsInterfaceLocalMulticast() ||
 		ip.IsMulticast() ||
 		ip.IsUnspecified()
+}
+
+// contentTagPattern matches the <content> / </content> fence (and loose
+// whitespace variants) used to wrap untrusted page text in the LLM prompt.
+var contentTagPattern = regexp.MustCompile(`(?i)<\s*/?\s*content\s*>`)
+
+// neutralizeContentDelimiters defangs any <content>/</content> markers found
+// inside fetched text, so a page can't forge the fence and "break out" of the
+// data section of the prompt — a delimiter-based prompt-injection attack. For
+// text/html these are already gone (stripHTMLToText drops all tags), but
+// text/plain pages pass through verbatim, so this closes that path uniformly.
+func neutralizeContentDelimiters(s string) string {
+	return contentTagPattern.ReplaceAllString(s, "[content]")
 }
 
 // safeDialContext builds a DialContext that resolves the target host,

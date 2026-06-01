@@ -34,6 +34,13 @@ func TestIsBlockedIP(t *testing.T) {
 		{"::", true},                    // unspecified v6
 		{"224.0.0.1", true},             // multicast
 		{"::ffff:127.0.0.1", true},      // v4-mapped loopback must not slip through
+		{"169.254.169.254", true},       // cloud metadata endpoint (link-local)
+		{"100.64.0.1", true},            // CGNAT (RFC 6598)
+		{"198.18.0.1", true},            // benchmarking range
+		{"192.0.2.1", true},             // TEST-NET-1
+		{"203.0.113.5", true},           // TEST-NET-3
+		{"240.0.0.1", true},             // reserved / Class E
+		{"64:ff9b::a9fe:a9fe", true},    // NAT64-embedded 169.254.169.254
 		{"8.8.8.8", false},              // public
 		{"1.1.1.1", false},              // public
 		{"2606:4700:4700::1111", false}, // public v6
@@ -164,6 +171,14 @@ func TestStripHTMLToText(t *testing.T) {
 	assert.Equal(t, "keep", stripHTMLToText("<script>drop()</script>keep"))
 	assert.Equal(t, "before", stripHTMLToText("before<script>unclosed")) // unclosed block dropped to EOF
 	assert.Equal(t, "x y", stripHTMLToText("x<style>.a{color:red}</style> y"))
+}
+
+func TestNeutralizeContentDelimiters(t *testing.T) {
+	assert.Equal(t, "a [content] b", neutralizeContentDelimiters("a </content> b"))
+	assert.Equal(t, "[content]x[content]", neutralizeContentDelimiters("<content>x</content>"))
+	// Loose whitespace / case variants are still caught.
+	assert.Equal(t, "[content]", neutralizeContentDelimiters("< / CONTENT >"))
+	assert.Equal(t, "no tags here", neutralizeContentDelimiters("no tags here"))
 }
 
 func TestClampContent(t *testing.T) {

@@ -180,6 +180,9 @@ func (h *tbHandler) tbTLDR(ctx context.Context, userKey, rawURL string) (string,
 		}
 		return "", err
 	}
+	// Defang any forged <content> fence in the body before wrapping, then
+	// bound the size handed to the model.
+	content = neutralizeContentDelimiters(content)
 	content = clampContent(content, tbTLDRMaxContentChars)
 
 	// The page text is wrapped in <content></content>; the system prompt
@@ -194,8 +197,10 @@ func (h *tbHandler) tbTLDR(ctx context.Context, userKey, rawURL string) (string,
 		if errors.Is(err, llm.ErrBudgetExhausted) {
 			return "", fmt.Errorf("daily AI token budget spent — resets on a rolling 24h window")
 		}
+		// Log the detail; return a generic message so a configured LLM
+		// endpoint URL (or other backend detail) can't surface to the user.
 		h.log.Warn("tb tldr LLM error", "err", err)
-		return "", fmt.Errorf("LLM request failed: %w", err)
+		return "", fmt.Errorf("summarization failed — please try again later")
 	}
 	return strings.TrimSpace(summary), nil
 }
