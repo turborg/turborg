@@ -55,6 +55,10 @@ type IRCBridge interface {
 	// state transition, and gate WS send_message frames on the
 	// `registered` state.
 	UpstreamState() *irc.UpstreamStateMachine
+	// TBTLDR runs the /tb tldr pipeline (SSRF-guarded fetch + LLM TL;DR)
+	// and returns the summary. Shared with the bouncer so a user with both
+	// surfaces open draws from one per-hour rate-limit bucket.
+	TBTLDR(ctx context.Context, url string) (string, error)
 }
 
 // Sender is the agent surface for outbound envelopes — the gateway
@@ -909,13 +913,44 @@ func (g *Gateway) handleTBOp(ctx context.Context, c *client, p map[string]any) {
 			n = int(v)
 		}
 		g.handleTBSummarize(ctx, c, channel, n)
+	case "tldr":
+		rawURL, _ := p["url"].(string)
+		g.handleTBTLDR(ctx, c, rawURL)
 	case "usage":
 		g.handleTBUsage(ctx, c)
 	default:
 		g.sendTo(ctx, c, map[string]any{
-			"op": "tb_error", "message": "Unknown /tb subcommand. Available: summarize, usage",
+			"op": "tb_error", "message": "Unknown /tb subcommand. Available: summarize, tldr, usage",
 		})
 	}
+}
+
+// handleTBTLDR fetches a URL and returns an LLM TL;DR privately to the
+// invoking WS client only — never broadcast. The SSRF guard, size/time
+// caps, and shared per-hour rate limit all live behind bridge.TBTLDR.
+func (g *Gateway) handleTBTLDR(ctx context.Context, c *client, rawURL string) {
+	if strings.TrimSpace(rawURL) == "" {
+		g.sendTo(ctx, c, map[string]any{"op": "tb_error", "message": "A URL is required."})
+		return
+	}
+
+	g.sendTo(ctx, c, map[string]any{"op": "tb_status", "message": "Fetching " + rawURL + "..."})
+
+	go func(c *client) { //nolint:gosec // intentionally detached — fetch+LLM outlive the WS frame
+		bgCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		summary, err := g.bridge.TBTLDR(bgCtx, rawURL)
+		if err != nil {
+			g.sendTo(bgCtx, c, map[string]any{"op": "tb_error", "message": err.Error()})
+			return
+		}
+		g.sendTo(bgCtx, c, map[string]any{
+			"op":      "tb_result",
+			"sub":     "tldr",
+			"url":     rawURL,
+			"summary": summary,
+		})
+	}(c)
 }
 
 func (g *Gateway) handleTBUsage(ctx context.Context, c *client) {

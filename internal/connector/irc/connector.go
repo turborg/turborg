@@ -117,6 +117,12 @@ type Connector struct {
 	// so /tb subcommands can call the LLM.
 	llmProvider llm.Provider
 
+	// tb is the shared /tb command handler. Owned by the connector (not
+	// just the bouncer) so the WS gateway can reach it via TBTLDR and both
+	// surfaces draw from one rate-limit bucket. The bouncer adopts this
+	// same instance at startBouncer time via attachTBHandler.
+	tb *tbHandler
+
 	// onUpstreamWarn fires from the escalation watchdog once per
 	// transient-outage window when UpstreamWarnAfter elapses without
 	// a successful reconnect. Wired by the bouncer to broadcast a
@@ -240,6 +246,7 @@ func New(s *Settings, log *slog.Logger, events *agent.EventBus) *Connector {
 		machine:     NewUpstreamStateMachine(log),
 		wanted:      NewWantedChannels(s.NormalizedChannels()),
 		currentNick: s.Nick,
+		tb:          newTBHandler(log),
 		storm: newReconnectStorm(
 			defaultReconnectStormWindow,
 			defaultReconnectStormMax,
@@ -334,9 +341,21 @@ func (c *Connector) SetMessageStore(s messages.Store) { c.messageStore = s }
 // default in place.
 func (c *Connector) SetBouncerWelcomeReplayDepth(n int) { c.bouncerWelcomeReplayDepth = n }
 
-// SetLLMProvider wires the LLM provider for /tb subcommands.
-// Forwarded to the bouncer at startBouncer time.
-func (c *Connector) SetLLMProvider(p llm.Provider) { c.llmProvider = p }
+// SetLLMProvider wires the LLM provider for /tb subcommands. It updates the
+// shared handler directly so the gateway path (TBTLDR) works even when no
+// bouncer is running; the bouncer adopts the same handler at startBouncer.
+func (c *Connector) SetLLMProvider(p llm.Provider) {
+	c.llmProvider = p
+	c.tb.setLLM(p)
+}
+
+// TBTLDR runs the /tb tldr pipeline (SSRF-guarded fetch + LLM TL;DR) for the
+// WS gateway. It shares the bouncer's handler, so the per-hour rate limit is
+// enforced once across both surfaces. The returned error is already phrased
+// for the requesting user.
+func (c *Connector) TBTLDR(ctx context.Context, url string) (string, error) {
+	return c.tb.tbTLDR(ctx, tbDefaultRateLimitKey, url)
+}
 
 // SetBouncerListenerless selects the pooled-runtime bouncer path: the bouncer
 // comes up without binding a TCP port and is fed connections by the pool's
@@ -751,7 +770,10 @@ func (c *Connector) startBouncer(ctx context.Context) error {
 	b.AttachWantedChannels(c.wanted)
 	b.AttachPreferredNickHook(c.SetPreferredNick)
 	b.AttachMessageStore(c.messageStore)
-	b.AttachLLMProvider(c.llmProvider)
+	// Share the connector's /tb handler so the bouncer and WS gateway draw
+	// from one rate-limit bucket. The handler already has the LLM provider
+	// (set via SetLLMProvider before Start).
+	b.attachTBHandler(c.tb)
 	b.AttachWelcomeReplayDepth(c.bouncerWelcomeReplayDepth)
 	// Reuse the existing onUpstreamWarn hook slot: the supervisor's
 	// long-outage watchdog calls into the bouncer's broadcast so

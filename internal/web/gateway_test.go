@@ -35,6 +35,8 @@ type fakeBridge struct {
 	sent     []string
 	limits   irc.ClientLimits
 	throttle *irc.Throttle
+	// tldrFn stubs TBTLDR. nil returns a fixed summary.
+	tldrFn func(ctx context.Context, url string) (string, error)
 }
 
 func newFakeBridge(nick string) *fakeBridge {
@@ -52,6 +54,12 @@ func (f *fakeBridge) State() *irc.ChannelState                 { return f.state 
 func (f *fakeBridge) ClientLimits() irc.ClientLimits           { return f.limits }
 func (f *fakeBridge) OutboundThrottle() *irc.Throttle          { return f.throttle }
 func (f *fakeBridge) UpstreamState() *irc.UpstreamStateMachine { return f.machine }
+func (f *fakeBridge) TBTLDR(ctx context.Context, url string) (string, error) {
+	if f.tldrFn != nil {
+		return f.tldrFn(ctx, url)
+	}
+	return "tldr of " + url, nil
+}
 func (f *fakeBridge) SendRaw(line string) error {
 	f.sentMu.Lock()
 	defer f.sentMu.Unlock()
@@ -1243,6 +1251,75 @@ func TestTBOpSummarizeZeroCap(t *testing.T) {
 	got := readJSON(t, conn)
 	assert.Equal(t, "tb_error", got["op"])
 	assert.Contains(t, got["message"], "not available on your plan")
+}
+
+func TestTBOpTLDRSuccess(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	bridge.tldrFn = func(_ context.Context, url string) (string, error) {
+		assert.Equal(t, "http://example.com/post", url)
+		return "the gist", nil
+	}
+	g, _, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+
+	body, _ := json.Marshal(map[string]any{
+		"op": "tb", "sub": "tldr", "url": "http://example.com/post",
+	})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	// First frame: tb_status (fetching).
+	status := readJSON(t, conn)
+	assert.Equal(t, "tb_status", status["op"])
+
+	// Second frame: tb_result with the summary, delivered to this client only.
+	result := readJSON(t, conn)
+	assert.Equal(t, "tb_result", result["op"])
+	assert.Equal(t, "tldr", result["sub"])
+	assert.Equal(t, "http://example.com/post", result["url"])
+	assert.Equal(t, "the gist", result["summary"])
+}
+
+func TestTBOpTLDRMissingURL(t *testing.T) {
+	g, _, td := startGateway(t, newOptions(t, "p"), newFakeBridge("turborg"), &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+
+	body, _ := json.Marshal(map[string]any{"op": "tb", "sub": "tldr", "url": "   "})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	got := readJSON(t, conn)
+	assert.Equal(t, "tb_error", got["op"])
+	assert.Contains(t, got["message"], "URL is required")
+}
+
+func TestTBOpTLDRErrorRelayed(t *testing.T) {
+	bridge := newFakeBridge("turborg")
+	bridge.tldrFn = func(context.Context, string) (string, error) {
+		return "", errors.New("that URL resolves to a private or local address and can't be fetched")
+	}
+	g, _, td := startGateway(t, newOptions(t, "p"), bridge, &fakeSender{})
+	defer td()
+
+	conn := dialWS(t, g.Addr(), "p")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	drainInitialFrames(t, conn)
+
+	body, _ := json.Marshal(map[string]any{
+		"op": "tb", "sub": "tldr", "url": "http://localhost/admin",
+	})
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText, body))
+
+	_ = readJSON(t, conn) // tb_status
+	got := readJSON(t, conn)
+	assert.Equal(t, "tb_error", got["op"])
+	assert.Contains(t, got["message"], "private or local address")
 }
 
 func TestTBOpUsageReportsBudget(t *testing.T) {
