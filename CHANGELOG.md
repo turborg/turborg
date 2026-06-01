@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.11.0](https://github.com/turborg/turborg/compare/v0.10.0...v0.11.0) (2026-06-01)
+
+
+### Features
+
+* **activity:** count only genuine owner presence for idle auto-pause ([#70](https://github.com/turborg/turborg/issues/70)) ([e63ab59](https://github.com/turborg/turborg/commit/e63ab5954666463cd8c4e10fd5ebaeae0b60965e))
+
 ## [0.10.0](https://github.com/turborg/turborg/compare/v0.9.1...v0.10.0) (2026-06-01)
 
 
