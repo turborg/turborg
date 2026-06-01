@@ -21,8 +21,14 @@ const (
 	tbFetchTimeout = 10 * time.Second
 	// tbFetchMaxBodyBytes caps how many bytes we read off the wire. The
 	// reader is hard-limited, so a server that streams forever (or lies in
-	// Content-Length) can't exhaust memory.
-	tbFetchMaxBodyBytes = 512 * 1024 // 512 KiB
+	// Content-Length) can't exhaust memory. Sized generously (2 MiB) because
+	// large single-page apps front-load hundreds of KiB of inline script
+	// before the <head> metadata we extract — e.g. YouTube places its
+	// og:title/og:description past the 600 KiB mark. The bound stays small
+	// in absolute terms and the fetch is rate-limited, so the DoS surface is
+	// negligible; the text actually handed to the model is clamped far
+	// tighter (tbTLDRMaxContentChars).
+	tbFetchMaxBodyBytes = 2 * 1024 * 1024 // 2 MiB
 	// tbFetchMaxRedirects bounds redirect chains; each hop is re-validated
 	// by the dialer and the scheme check below.
 	tbFetchMaxRedirects = 5
