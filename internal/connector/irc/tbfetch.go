@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"mime"
 	"net"
@@ -231,13 +232,120 @@ func fetchURL(ctx context.Context, rawURL string, blocked func(net.IP) bool) (st
 
 	text := string(body)
 	if mediaType == "text/html" {
-		text = stripHTMLToText(text)
+		text = buildHTMLText(text)
 	}
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return "", errors.New("page had no readable text content")
 	}
 	return text, nil
+}
+
+// pageMetadata holds the human-meaningful header fields lifted from an HTML
+// document's <head>: a title and a description. Either may be empty.
+type pageMetadata struct {
+	title       string
+	description string
+}
+
+var (
+	titleTagPattern = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+	metaTagPattern  = regexp.MustCompile(`(?is)<meta\b[^>]*>`)
+	// attrPattern pulls name="value" / name='value' / name=value attribute
+	// pairs out of a single tag, independent of their order.
+	attrPattern = regexp.MustCompile(`(?is)([a-z][a-z0-9:_-]*)\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'>]+))`)
+)
+
+// extractMetadata reads the <title> and the OpenGraph / Twitter-card / plain
+// <meta name="description"> fields from HTML. Preference order: og: > twitter:
+// > the bare tag. All regexes are RE2 (linear-time) and run against the
+// already size-capped body, so there's no backtracking-DoS exposure.
+func extractMetadata(htmlStr string) pageMetadata {
+	var md pageMetadata
+	if m := titleTagPattern.FindStringSubmatch(htmlStr); m != nil {
+		md.title = cleanMeta(m[1])
+	}
+
+	var ogTitle, twTitle, ogDesc, twDesc, nameDesc string
+	for _, tag := range metaTagPattern.FindAllString(htmlStr, -1) {
+		key, content := metaKeyContent(tag)
+		switch key {
+		case "og:title":
+			ogTitle = content
+		case "twitter:title":
+			twTitle = content
+		case "og:description":
+			ogDesc = content
+		case "twitter:description":
+			twDesc = content
+		case "description":
+			nameDesc = content
+		}
+	}
+	if t := firstNonEmpty(ogTitle, twTitle); t != "" {
+		md.title = t // a card title beats the raw <title> when present
+	}
+	md.description = firstNonEmpty(ogDesc, twDesc, nameDesc)
+	return md
+}
+
+// metaKeyContent parses one <meta> tag into its identifying key (property=
+// preferred over name=, lowercased) and its content= value.
+func metaKeyContent(tag string) (key, content string) {
+	var prop, name, ct string
+	for _, a := range attrPattern.FindAllStringSubmatch(tag, -1) {
+		val := firstNonEmpty(a[3], a[4], a[5])
+		switch strings.ToLower(a[1]) {
+		case "property":
+			prop = strings.ToLower(val)
+		case "name":
+			name = strings.ToLower(val)
+		case "content":
+			ct = val
+		}
+	}
+	return firstNonEmpty(prop, name), cleanMeta(ct)
+}
+
+// cleanMeta unescapes HTML entities and collapses whitespace in a metadata
+// value. html.UnescapeString is stdlib and never executes anything.
+func cleanMeta(s string) string {
+	return collapseWhitespace(html.UnescapeString(s))
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// buildHTMLText renders an HTML document to summarizable text: a short header
+// carrying the page's title/description metadata, followed by the stripped
+// body prose. The header is what lets SPA/JS pages (YouTube, X, Reddit, …)
+// whose visible text is script-rendered still yield something to summarize —
+// their og:/twitter: tags survive in the initial HTML even when the body does
+// not. Returns "" only when neither metadata nor body prose is present.
+func buildHTMLText(htmlStr string) string {
+	md := extractMetadata(htmlStr)
+	body := stripHTMLToText(htmlStr)
+
+	var b strings.Builder
+	if md.title != "" {
+		fmt.Fprintf(&b, "Title: %s\n", md.title)
+	}
+	if md.description != "" {
+		fmt.Fprintf(&b, "Description: %s\n", md.description)
+	}
+	if body != "" {
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(body)
+	}
+	return b.String()
 }
 
 // stripHTMLToText produces a rough plain-text rendering of HTML: it drops the
