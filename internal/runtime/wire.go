@@ -52,6 +52,12 @@ type CommonParams struct {
 	// registry via ReplaceDynamic. Empty → the agent dispatches nothing.
 	Commands []commands.Definition
 
+	// Platform seeds the connector-agnostic {platform} template placeholder
+	// (and its IRC {network} alias) — the transport label a static skill can
+	// echo back. The IRC server hostname today; a Discord server / Slack
+	// workspace / "Web" once those connectors land.
+	Platform string
+
 	// LLM provider powering LLM-type commands. Nil → those commands are
 	// skipped at build time. Shared across pooled tenants (a stateless HTTP
 	// client) and per-process for dedicated.
@@ -170,7 +176,7 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 
 	// Install the tenant's data-driven commands. The dynamic set is fully
 	// owned by ReplaceDynamic, so a later hot reload swaps it atomically.
-	ApplyCommands(a, p.Commands, provider, p.Owner, log)
+	ApplyCommands(a, p.Commands, provider, p.Owner, p.Platform, log)
 	return nil
 }
 
@@ -183,13 +189,13 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 // access-gated. The registry-wide ignore/throttle guard set at wire time is
 // untouched; per-command access (owner / allowlist / everyone) is reapplied
 // from each Definition.
-func ApplyCommands(a *agent.Agent, defs []commands.Definition, provider llm.Provider, owner GuardParams, log *slog.Logger) {
+func ApplyCommands(a *agent.Agent, defs []commands.Definition, provider llm.Provider, owner GuardParams, platform string, log *slog.Logger) {
 	if log == nil {
 		log = slog.Default()
 	}
 	built := commands.Build(defs, provider, func(d commands.Definition) agent.CommandGuard {
 		return PerCommandGuard(string(d.Access), d.Allowlist, owner)
-	}, log)
+	}, platform, owner.OwnerNick, log)
 	a.Commands.ReplaceDynamic(built)
 }
 

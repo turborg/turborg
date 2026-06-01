@@ -363,6 +363,7 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			// shared by the connector/commands (WireCommon) and the web gateway
 			// below. WireCommon's own wrap is idempotent on this.
 			cp := t.commonParams(cs, caps, settings.Nick, store, ignoredNicks, cmds)
+			cp.Platform = settings.Hostname
 			budgetedProvider := runtime.BuildBudgetedProvider(a, cp.LLM, cp.LLMInputCap, cp.LLMOutputCap, cp.LLMInputUsed, cp.LLMOutputUsed, t.log)
 			cp.LLM = budgetedProvider
 			if err := runtime.WireCommon(a, conn, cp, t.log); err != nil {
@@ -642,8 +643,11 @@ func (t *Tenant) reloadCommands(defs []commands.Definition) bool {
 		IgnoredNicks:  ignoredNicks,
 		BotNick:       conn.CurrentNick(),
 	}
+	// {platform} echoes the IRC server hostname; the connector spec carries it
+	// as "host:port", so reuse the same split the spec→settings mapping does.
+	platform, _, _ := splitNetwork(stringField(cs.Config, "network"))
 	// Same in-place swap the dedicated runtime's command refresher uses.
-	runtime.ApplyCommands(a, defs, t.llmProvider, owner, t.log)
+	runtime.ApplyCommands(a, defs, t.llmProvider, owner, platform, t.log)
 	return true
 }
 
