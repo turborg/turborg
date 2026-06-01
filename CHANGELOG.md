@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.10.0](https://github.com/turborg/turborg/compare/v0.9.1...v0.10.0) (2026-06-01)
+
+
+### Features
+
+* **connector/irc:** gate AI history commands behind channel-op consent on strict networks ([#68](https://github.com/turborg/turborg/issues/68)) ([b0924f9](https://github.com/turborg/turborg/commit/b0924f97e977b0a1daf7638f8d89d70f5252e5d2))
+* **runtime:** live-reload data-driven commands on a single agent ([#66](https://github.com/turborg/turborg/issues/66)) ([ab25af6](https://github.com/turborg/turborg/commit/ab25af6fc4be9a7ace7f9372534f5f5af66db4aa))
+
 ## [0.9.1](https://github.com/turborg/turborg/compare/v0.9.0...v0.9.1) (2026-05-30)
 
 
