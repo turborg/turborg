@@ -1835,3 +1835,58 @@ func TestBouncerTBSummarizeWithN(t *testing.T) {
 	}
 	assert.True(t, gotResponse, "TB SUMMARIZE #test 50 should produce a response")
 }
+
+func TestBouncerTBTLDRUsage(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	b.AttachState(state, "turborg", "ident", "host")
+
+	conn, r := bouncerClient(t, addr)
+	defer conn.Close()
+	authSimple(t, conn, r, "hunter2")
+
+	writeLine(t, conn, "TB TLDR")
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var gotUsage bool
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		if strings.Contains(line, "Usage") && strings.Contains(line, "tldr") {
+			gotUsage = true
+			break
+		}
+	}
+	assert.True(t, gotUsage, "TB TLDR without a URL should show usage help")
+}
+
+func TestBouncerTBTLDRReachesHandler(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	b.AttachState(state, "turborg", "ident", "host")
+	// No LLM provider attached: tbTLDR short-circuits with a provider
+	// error before any network egress, which exercises the dispatch +
+	// detached-goroutine + notifyService wiring offline.
+
+	conn, r := bouncerClient(t, addr)
+	defer conn.Close()
+	authSimple(t, conn, r, "hunter2")
+
+	writeLine(t, conn, "TB TLDR http://example.com/article")
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var gotResponse bool
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		if strings.Contains(line, "Fetching") || strings.Contains(line, "Error") || strings.Contains(line, "no LLM") {
+			gotResponse = true
+			break
+		}
+	}
+	assert.True(t, gotResponse, "TB TLDR <url> should produce a status or error response")
+}

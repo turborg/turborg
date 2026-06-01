@@ -422,7 +422,7 @@ func (b *Bouncer) handleTB(client *BouncerClient, msg Message) {
 	}
 
 	if len(msg.Params) == 0 {
-		b.notifyService(client, "Usage: /tb summarize [#channel] [N]")
+		b.notifyService(client, "Usage: /tb summarize [#channel] [N] | /tb tldr <url>")
 		return
 	}
 
@@ -430,8 +430,10 @@ func (b *Bouncer) handleTB(client *BouncerClient, msg Message) {
 	switch sub {
 	case "summarize":
 		b.handleTBSummarize(client, args)
+	case "tldr":
+		b.handleTBTLDR(client, args)
 	default:
-		b.notifyService(client, "Unknown /tb subcommand: "+sub+". Available: summarize")
+		b.notifyService(client, "Unknown /tb subcommand: "+sub+". Available: summarize, tldr")
 	}
 }
 
@@ -484,6 +486,43 @@ func (b *Bouncer) handleTBSummarize(client *BouncerClient, args []string) {
 		}
 		b.notifyService(client, "["+channel+" summary] "+summary)
 	}()
+}
+
+// handleTBTLDR fetches a URL and returns an LLM TL;DR privately to the
+// requesting client only — the result is never written to a channel or
+// fanned to other attached clients, since the fetched page is the user's
+// own request, not channel traffic. The SSRF guard, size/time caps, and
+// per-hour rate limit all live in tbHandler.tbTLDR.
+func (b *Bouncer) handleTBTLDR(client *BouncerClient, args []string) {
+	rawURL := ""
+	if len(args) > 0 {
+		rawURL = args[0]
+	}
+	if rawURL == "" {
+		b.notifyService(client, "Usage: /tb tldr <url>")
+		return
+	}
+
+	b.notifyService(client, "Fetching "+rawURL+"...")
+
+	go func() {
+		summary, err := b.tb.tbTLDR(context.Background(), tbDefaultRateLimitKey, rawURL)
+		if err != nil {
+			b.notifyService(client, "Error: "+err.Error())
+			return
+		}
+		b.notifyService(client, "[tldr] "+summary)
+	}()
+}
+
+// attachTBHandler shares a single /tb handler between the bouncer and the
+// connector (and thus the WS gateway), so both surfaces draw from one
+// rate-limit bucket and one LLM wiring. Replaces the default handler the
+// bouncer minted in NewBouncer. nil is ignored, leaving that default.
+func (b *Bouncer) attachTBHandler(h *tbHandler) {
+	if h != nil {
+		b.tb = h
+	}
 }
 
 // botIsChannelOperator reports whether the bot's own upstream nick holds
