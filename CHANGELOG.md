@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.12.0](https://github.com/turborg/turborg/compare/v0.11.0...v0.12.0) (2026-06-01)
+
+
+### Features
+
+* **connector/irc:** add /tb tldr &lt;url&gt; command ([#72](https://github.com/turborg/turborg/issues/72)) ([94415bf](https://github.com/turborg/turborg/commit/94415bf1f7054022dae92bf5af6f7613e65eaf02))
+* **connector/irc:** extract title/description metadata for /tb tldr ([b52db4d](https://github.com/turborg/turborg/commit/b52db4d8fe885e26b3122ba79137c7f40317772e))
+
+
+### Bug Fixes
+
+* **connector/irc:** harden /tb tldr fetch against SSRF edges and prompt-injection breakout ([5b6e4df](https://github.com/turborg/turborg/commit/5b6e4df3924aecb26cdfe66776874a3a68c81958))
+* **connector/irc:** raise /tb tldr body cap so large pages' metadata is reached ([f794f39](https://github.com/turborg/turborg/commit/f794f39cffc671a91a2903dd58f4be4dac37bd19))
+
 ## [0.11.0](https://github.com/turborg/turborg/compare/v0.10.0...v0.11.0) (2026-06-01)
 
 
