@@ -394,7 +394,12 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 				if caps != nil {
 					tbCap = caps.TBSummarizeMaxMessages
 				}
-				gw, err := buildTenantGateway(conn, gatewayToken, t.log, store, budgetedProvider, tbCap)
+				gwActivity := func(string) {
+					if t.activity != nil {
+						t.activity.Mark(t.ID)
+					}
+				}
+				gw, err := buildTenantGateway(conn, gatewayToken, t.log, store, budgetedProvider, tbCap, gwActivity)
 				if err != nil {
 					t.log.Error("skipping web gateway", "err", err)
 					continue

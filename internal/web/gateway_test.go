@@ -276,13 +276,13 @@ func TestWSAuthAcceptsBearerHeader(t *testing.T) {
 	_ = conn.Close(websocket.StatusNormalClosure, "")
 }
 
-func TestWSAttachHookFiresOnSuccessfulHandshake(t *testing.T) {
+func TestWSActivityFiresOnOwnerMessageNotBareAttach(t *testing.T) {
 	var (
 		mu      sync.Mutex
 		reasons []string
 	)
 	opts := newOptions(t, "secret")
-	opts.OnClientAttached = func(reason string) {
+	opts.OnActivity = func(reason string) {
 		mu.Lock()
 		reasons = append(reasons, reason)
 		mu.Unlock()
@@ -293,17 +293,47 @@ func TestWSAttachHookFiresOnSuccessfulHandshake(t *testing.T) {
 	conn := dialWS(t, g.Addr(), "secret")
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
+	// A bare handshake (open dashboard, no interaction) is NOT activity.
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	n := len(reasons)
+	mu.Unlock()
+	require.Zero(t, n, "bare WS attach must not fire activity")
+
+	// An owner message is — fired before the upstream/throttle gates, so
+	// it counts even if the send itself is rejected.
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText,
+		[]byte(`{"op":"say","channel":"#test","text":"hi"}`)))
 	require.Eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return len(reasons) == 1 && reasons[0] == "ws_attach"
-	}, time.Second, 10*time.Millisecond)
+		for _, r := range reasons {
+			if r == "ws_message" {
+				return true
+			}
+		}
+		return false
+	}, time.Second, 10*time.Millisecond, "owner message must fire ws_message")
+
+	// An owner /tb is also an explicit action → tb_command.
+	require.NoError(t, conn.Write(context.Background(), websocket.MessageText,
+		[]byte(`{"op":"tb"}`)))
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, r := range reasons {
+			if r == "tb_command" {
+				return true
+			}
+		}
+		return false
+	}, time.Second, 10*time.Millisecond, "owner /tb must fire tb_command")
 }
 
-func TestWSAttachHookSilentOnAuthFailure(t *testing.T) {
+func TestWSActivitySilentOnAuthFailure(t *testing.T) {
 	var fired atomic.Bool
 	opts := newOptions(t, "right-secret")
-	opts.OnClientAttached = func(_ string) { fired.Store(true) }
+	opts.OnActivity = func(_ string) { fired.Store(true) }
 	g, _, td := startGateway(t, opts, newFakeBridge("turborg"), &fakeSender{})
 	defer td()
 

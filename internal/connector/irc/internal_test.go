@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1666,4 +1667,42 @@ func TestApplyPrefixModesToStateGuards(t *testing.T) {
 	require.NotNil(t, info)
 	_, present := info.Members["ghost"]
 	assert.False(t, present, "MODE for a non-member mustn't materialise the nick")
+}
+
+// TestBouncerActivityHeartbeat proves the presence heartbeat: while at
+// least one client is attached the bouncer re-asserts "presence" every
+// interval (so an attached client stays "active for its duration"); with
+// no client attached it stays silent. Exits cleanly on context cancel.
+func TestBouncerActivityHeartbeat(t *testing.T) {
+	old := activityHeartbeatInterval
+	activityHeartbeatInterval = 5 * time.Millisecond
+	t.Cleanup(func() { activityHeartbeatInterval = old })
+
+	var presence atomic.Int32
+	b := &Bouncer{
+		clients: map[*BouncerClient]struct{}{},
+		onAttach: func(reason string) {
+			if reason == "presence" {
+				presence.Add(1)
+			}
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	b.wg.Add(1)
+	go b.activityHeartbeat(ctx)
+
+	// No clients attached → no presence, even across several ticks.
+	time.Sleep(30 * time.Millisecond)
+	assert.Zero(t, presence.Load(), "no attached client must not heartbeat")
+
+	// Attach a client → presence fires for as long as it stays attached.
+	b.mu.Lock()
+	b.clients[&BouncerClient{}] = struct{}{}
+	b.mu.Unlock()
+	require.Eventually(t, func() bool { return presence.Load() >= 1 },
+		time.Second, 5*time.Millisecond, "attached client must heartbeat presence")
+
+	cancel()
+	b.wg.Wait()
 }

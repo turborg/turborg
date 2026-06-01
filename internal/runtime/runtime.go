@@ -296,7 +296,7 @@ func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, lo
 		TBSummarizeMaxMessages: s.TBSummarizeMaxMessages,
 	}
 	if notifier.Enabled() {
-		opts.OnClientAttached = notifier.Hook
+		opts.OnActivity = notifier.Hook
 	}
 	if s.IdleShutdownEnabled() {
 		opts.IdleShutdownSeconds = s.GatewayIdleShutdownSeconds

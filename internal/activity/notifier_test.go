@@ -25,14 +25,14 @@ func TestNotifier_DisabledWhenURLEmpty(t *testing.T) {
 	n := activity.New("", "", nil)
 	assert.False(t, n.Enabled())
 	// Calling Mark on a disabled notifier is safe and spawns no goroutine.
-	n.Mark(context.Background(), activity.ReasonBotSpoke)
+	n.Mark(context.Background(), activity.ReasonWSMessage)
 	n.Wait()
 }
 
 func TestNotifier_NilReceiverIsSafe(t *testing.T) {
 	var n *activity.Notifier
 	assert.False(t, n.Enabled())
-	n.Mark(context.Background(), activity.ReasonBotSpoke)
+	n.Mark(context.Background(), activity.ReasonWSMessage)
 	n.Wait()
 }
 
@@ -57,7 +57,7 @@ func TestNotifier_PostsReasonAndBearerToken(t *testing.T) {
 	n := activity.New(server.URL, "secret-token", nil)
 	require.True(t, n.Enabled())
 	n.Mark(context.Background(), activity.ReasonBouncerAttach)
-	n.Mark(context.Background(), activity.ReasonWSAttach)
+	n.Mark(context.Background(), activity.ReasonTBCommand)
 	n.Wait()
 
 	mu.Lock()
@@ -66,7 +66,7 @@ func TestNotifier_PostsReasonAndBearerToken(t *testing.T) {
 	assert.Equal(t, "Bearer secret-token", auth)
 	reasons := []string{received[0]["reason"], received[1]["reason"]}
 	assert.Contains(t, reasons, activity.ReasonBouncerAttach)
-	assert.Contains(t, reasons, activity.ReasonWSAttach)
+	assert.Contains(t, reasons, activity.ReasonTBCommand)
 }
 
 func TestNotifier_NoAuthHeaderWhenTokenEmpty(t *testing.T) {
@@ -79,7 +79,7 @@ func TestNotifier_NoAuthHeaderWhenTokenEmpty(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	n := activity.New(server.URL, "", nil)
-	n.Mark(context.Background(), activity.ReasonBotSpoke)
+	n.Mark(context.Background(), activity.ReasonWSMessage)
 	n.Wait()
 
 	assert.Empty(t, auth.Load().(string))
@@ -119,13 +119,13 @@ func TestNotifier_LogsAndSwallowsNon2xx(t *testing.T) {
 	doer := &stubDoer{status: http.StatusInternalServerError}
 	n := activity.New("http://example.invalid/", "", nil)
 	n.SetHTTPClient(doer)
-	n.Mark(context.Background(), activity.ReasonBotSpoke)
+	n.Mark(context.Background(), activity.ReasonWSMessage)
 	n.Wait()
 
 	doer.mu.Lock()
 	defer doer.mu.Unlock()
 	assert.Equal(t, 1, doer.calls)
-	assert.Contains(t, string(doer.lastBody), activity.ReasonBotSpoke)
+	assert.Contains(t, string(doer.lastBody), activity.ReasonWSMessage)
 }
 
 func TestNotifier_SwallowsTransportError(t *testing.T) {
@@ -133,7 +133,7 @@ func TestNotifier_SwallowsTransportError(t *testing.T) {
 	n := activity.New("http://example.invalid/", "", nil)
 	n.SetHTTPClient(doer)
 	// Must not panic or block.
-	n.Mark(context.Background(), activity.ReasonBotSpoke)
+	n.Mark(context.Background(), activity.ReasonWSMessage)
 	n.Wait()
 }
 
@@ -147,7 +147,7 @@ func TestNotifier_SwallowsBadRequestURL(t *testing.T) {
 	n := activity.New("http://bad\nurl/", "", nil)
 	doer := &stubDoer{}
 	n.SetHTTPClient(doer)
-	n.Mark(context.Background(), activity.ReasonBotSpoke)
+	n.Mark(context.Background(), activity.ReasonWSMessage)
 	n.Wait()
 	// The request never reached the doer because NewRequest failed.
 	doer.mu.Lock()

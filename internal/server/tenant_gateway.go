@@ -31,7 +31,7 @@ const (
 // router serves the shared Handler() per request. No MessageStore: pooled
 // scrollback lives in accounts-api and is a follow-up; live streaming works
 // without it.
-func buildTenantGateway(bridge *irc.Connector, token string, log *slog.Logger, store messages.Store, llmProvider llm.Provider, tbSummarizeCap int) (*web.Gateway, error) {
+func buildTenantGateway(bridge *irc.Connector, token string, log *slog.Logger, store messages.Store, llmProvider llm.Provider, tbSummarizeCap int, onActivity func(reason string)) (*web.Gateway, error) {
 	verifier, err := web.NewStaticPasswordVerifier(token)
 	if err != nil {
 		return nil, fmt.Errorf("gateway verifier: %w", err)
@@ -47,6 +47,10 @@ func buildTenantGateway(bridge *irc.Connector, token string, log *slog.Logger, s
 		MessageStore:           store,
 		LLMProvider:            llmProvider,
 		TBSummarizeMaxMessages: tbSummarizeCap,
+		// Owner-presence from the pooled web shell marks the tenant active
+		// in the pool's coalescing aggregator (same sink the bouncer attach
+		// hook uses) — engaged web session / owner /tb keep it alive.
+		OnActivity: onActivity,
 	})
 	if err != nil {
 		return nil, err
