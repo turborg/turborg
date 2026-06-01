@@ -127,13 +127,6 @@ type Connector struct {
 	// the configured owner nick. nil = disabled.
 	ownerNudge *OwnerNudge
 
-	// onBotSpoke, when non-nil, fires for each bot-originated outbound
-	// PRIVMSG. Wired by runtime so an external observer can distinguish
-	// bot-driven activity from incoming channel chatter. Bouncer-tunneled
-	// PRIVMSGs go through a different code path (AttachUpstream callback)
-	// and are NOT considered bot_spoke — those are bouncer-attach activity.
-	onBotSpoke func(reason string)
-
 	// currentNick is the live nick the server confirmed for us. It
 	// starts as settings.Nick (the requested value), gets updated by
 	// the 001 RPL_WELCOME (where the server tells us the nick it
@@ -323,14 +316,6 @@ func (c *Connector) OutboundThrottle() *Throttle { return c.outboundThrottle }
 // after each successful PRIVMSG write and the nudge emits a DM when
 // the count crosses a multiple of EveryN.
 func (c *Connector) SetOwnerNudge(n *OwnerNudge) { c.ownerNudge = n }
-
-// SetActivityHook installs a callback fired for each bot-originated
-// outbound PRIVMSG. Pass nil to disable. Wired by runtime so an
-// observer learns the bot is doing work, even on dashboard-only or
-// silent-channel deployments where log scraping for PRIVMSG would miss
-// the signal. Bouncer-tunneled and incoming PRIVMSG do NOT fire this
-// hook — those reflect user activity, not bot activity.
-func (c *Connector) SetActivityHook(hook func(reason string)) { c.onBotSpoke = hook }
 
 // SetBouncerAttachHook installs a callback the bouncer fires on each
 // successful client auth. Pass nil to disable. Must be called before
@@ -528,9 +513,6 @@ func (c *Connector) Send(env *agent.OutboundEnvelope) error {
 	// so the nudge DM doesn't recurse back through this method and
 	// double-count.
 	c.ownerNudge.Note(cli.WriteLine)
-	if c.onBotSpoke != nil {
-		c.onBotSpoke("bot_spoke")
-	}
 	return nil
 }
 

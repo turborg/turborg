@@ -28,6 +28,12 @@ const (
 	channelLogCap = 200
 )
 
+// activityHeartbeatInterval is how often an engaged web session
+// re-asserts owner presence. Well under any free-tier idle window (4h),
+// so an engaged, open dashboard never lets the bot idle-pause. A var,
+// not a const, so tests can shorten it.
+var activityHeartbeatInterval = 10 * time.Minute
+
 // IRCBridge is the narrow slice of the IRC connector the gateway
 // depends on. Keeps the package boundary clean — the gateway never
 // reaches into IRC-specific internals beyond these methods.
@@ -75,11 +81,13 @@ type Options struct {
 	IdleShutdownSeconds int
 	OnIdleShutdown      func()
 
-	// OnClientAttached fires once per successful WS handshake, with a
-	// stable reason identifier. nil = disabled. Wired by runtime so an
-	// external observer can learn that a dashboard client is actively
-	// using this agent — distinct from "bot is alive" log signal.
-	OnClientAttached func(reason string)
+	// OnActivity fires on owner-presence signals from the web session,
+	// with a stable reason identifier ("ws_message", "tb_command",
+	// "presence"). nil = disabled. A bare dashboard handshake is NOT a
+	// signal — only an owner who actually sends a chat message or /tb
+	// command counts as present, after which a periodic "presence"
+	// heartbeat keeps the session active for as long as it stays open.
+	OnActivity func(reason string)
 
 	// MessageStore is the read/write seam for channel history. The
 	// gateway calls Submit on every observed inbound + outbound
@@ -142,6 +150,11 @@ type Gateway struct {
 type client struct {
 	conn *websocket.Conn
 	addr string
+	// engaged flips true the first time this session sends an owner
+	// signal (a chat message or /tb). Only then does the presence
+	// heartbeat keep the session active — a bare idle tab never does.
+	// Guarded by Gateway.mu.
+	engaged bool
 }
 
 func New(bridge IRCBridge, sender Sender, opts Options) (*Gateway, error) {
@@ -348,9 +361,11 @@ func (g *Gateway) handleWS(w http.ResponseWriter, r *http.Request) {
 	g.metrics.connections++
 	g.metMu.Unlock()
 	g.log.Info("web auth success", "ip", ip)
-	if g.opts.OnClientAttached != nil {
-		g.opts.OnClientAttached("ws_attach")
-	}
+	// A bare handshake is NOT activity — opening the dashboard (or a tab
+	// left sitting for hours) must not keep a free-tier bot alive. The
+	// session only starts counting once the owner actually sends a
+	// message or /tb (see readLoop), after which this heartbeat keeps it
+	// active for the session's duration.
 
 	connectedAt := time.Now()
 	defer func() {
@@ -370,7 +385,56 @@ func (g *Gateway) handleWS(w http.ResponseWriter, r *http.Request) {
 	g.sendState(ctx, c)
 	g.sendInitialConnectorState(ctx, c)
 	g.replayBuffers(ctx, c)
+
+	// Presence heartbeat for the session, gated on engagement: it only
+	// fires once the owner has sent a message or /tb (see markEngaged),
+	// and stops when readLoop returns (disconnect). Scoped to this
+	// connection so it can't outlive it.
+	hbCtx, hbCancel := context.WithCancel(ctx)
+	hbDone := make(chan struct{})
+	go func() {
+		defer close(hbDone)
+		g.sessionHeartbeat(hbCtx, c)
+	}()
+
 	g.readLoop(ctx, c)
+	hbCancel()
+	<-hbDone
+}
+
+// sessionHeartbeat re-asserts owner presence on a fixed interval for as
+// long as the session stays engaged and connected — how a web session
+// counts as "active for its duration" against the single-timestamp idle
+// model. A session that never engages (bare tab) never fires.
+func (g *Gateway) sessionHeartbeat(ctx context.Context, c *client) {
+	t := time.NewTicker(activityHeartbeatInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			g.mu.Lock()
+			engaged := c.engaged
+			g.mu.Unlock()
+			if engaged && g.opts.OnActivity != nil {
+				g.opts.OnActivity("presence")
+			}
+		}
+	}
+}
+
+// markEngaged records that the owner took an explicit action in this
+// session (chat message or /tb) and fires the matching activity reason.
+// The first call flips the session engaged so sessionHeartbeat starts
+// keeping it alive; subsequent calls just re-pulse the timer.
+func (g *Gateway) markEngaged(c *client, reason string) {
+	g.mu.Lock()
+	c.engaged = true
+	g.mu.Unlock()
+	if g.opts.OnActivity != nil {
+		g.opts.OnActivity(reason)
+	}
 }
 
 // sendInitialConnectorState publishes a one-shot connector.state_changed
@@ -594,6 +658,10 @@ func (g *Gateway) dispatchInbound(ctx context.Context, c *client, p map[string]a
 		if ch == "" || text == "" {
 			return
 		}
+		// The owner typed and sent a message — genuine presence. Mark it
+		// before the upstream/throttle gates so engagement counts even
+		// when the send is rejected (the owner is still here).
+		g.markEngaged(c, "ws_message")
 		// Gate on upstream state — if the connector isn't registered
 		// the WS send_message would either silently disappear (state
 		// != registered, supervisor reconnecting) or race against
@@ -740,6 +808,12 @@ func (g *Gateway) dispatchInbound(ctx context.Context, c *client, p map[string]a
 	case "history":
 		g.handleHistoryOp(ctx, c, p)
 	case "tb":
+		// An owner /tb is an explicit action — resets the idle timer
+		// once. Unlike a chat message it does not flip the session
+		// engaged, so it alone won't start the presence heartbeat.
+		if g.opts.OnActivity != nil {
+			g.opts.OnActivity("tb_command")
+		}
 		g.handleTBOp(ctx, c, p)
 	}
 }

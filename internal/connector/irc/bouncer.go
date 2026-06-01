@@ -24,6 +24,12 @@ import (
 // https://ircv3.net/specs/extensions/server-time
 const serverTimeLayout = "2006-01-02T15:04:05.000Z"
 
+// activityHeartbeatInterval is how often the bouncer re-asserts owner
+// presence while a client is attached. Well under any free-tier idle
+// window (4h), so an attached client never lets the bot idle-pause. A
+// var, not a const, so tests can shorten it.
+var activityHeartbeatInterval = 10 * time.Minute
+
 const (
 	// defaultClientPingInterval is how often the bouncer PINGs each attached
 	// client. Two jobs: (1) keep an idle connection's bytes flowing so a NAT
@@ -406,6 +412,15 @@ func (b *Bouncer) currentMessageStore() messages.Store {
 // handleTB dispatches /tb subcommands from attached IRC clients.
 // Format: TB SUMMARIZE [#channel] [N]
 func (b *Bouncer) handleTB(client *BouncerClient, msg Message) {
+	// A /tb command is an explicit owner action — mark presence so it
+	// resets the idle timer even if no client heartbeat is due yet.
+	b.mu.Lock()
+	hook := b.onAttach
+	b.mu.Unlock()
+	if hook != nil {
+		hook("tb_command")
+	}
+
 	if len(msg.Params) == 0 {
 		b.notifyService(client, "Usage: /tb summarize [#channel] [N]")
 		return
@@ -684,7 +699,38 @@ func (b *Bouncer) start(ctx context.Context, listen bool) error {
 	} else {
 		b.log.Info("bouncer ready (listenerless; served via ServeConn)")
 	}
+
+	// Presence heartbeat: while at least one client stays attached, the
+	// owner is present, so keep re-asserting activity for the whole
+	// connection (a single attach pulse would let the idle timer stop a
+	// bot whose owner has HexChat open all day). Exits on Stop via bctx.
+	b.wg.Add(1)
+	go b.activityHeartbeat(bctx)
 	return nil
+}
+
+// activityHeartbeat fires the attach hook with the "presence" reason on a
+// fixed interval for as long as any client is attached. It is how a live
+// bouncer connection stays "active for its entire duration" against the
+// single-timestamp idle-pause model, without coupling to client traffic.
+func (b *Bouncer) activityHeartbeat(ctx context.Context) {
+	defer b.wg.Done()
+	t := time.NewTicker(activityHeartbeatInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			b.mu.Lock()
+			attached := len(b.clients)
+			hook := b.onAttach
+			b.mu.Unlock()
+			if attached > 0 && hook != nil {
+				hook("presence")
+			}
+		}
+	}
 }
 
 // ServeConn handles one already-accepted client connection instead of one

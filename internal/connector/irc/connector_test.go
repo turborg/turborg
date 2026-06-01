@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -456,55 +455,4 @@ func TestConnectorOutboundThrottleAccessors(t *testing.T) {
 	c.SetOutboundThrottle(tr)
 	assert.Same(t, tr, c.OutboundThrottle(),
 		"OutboundThrottle should return the exact pointer we set")
-}
-
-func TestConnectorActivityHookFiresOnBotOriginatedPrivmsg(t *testing.T) {
-	fs := fakeirc.New(t)
-	defer fs.Close()
-
-	conn := irc.New(&irc.Settings{
-		Hostname: "127.0.0.1",
-		Port:     fs.Port(),
-		Nick:     "turborg",
-		Channels: []string{"#test"},
-	}, nil, nil)
-
-	var (
-		mu      sync.Mutex
-		reasons []string
-	)
-	conn.SetActivityHook(func(reason string) {
-		mu.Lock()
-		reasons = append(reasons, reason)
-		mu.Unlock()
-	})
-
-	a := agent.New(nil)
-	a.AddConnector(conn)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- a.Run(ctx) }()
-
-	require.True(t,
-		fs.WaitFor(containsPrefix("JOIN #test"), 2*time.Second),
-		"connector did not JOIN; received: %v", fs.Received(),
-	)
-
-	require.NoError(t, conn.Send(&agent.OutboundEnvelope{
-		Connector: "irc", Channel: "#test", Text: "hi",
-	}))
-
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(reasons) == 1 && reasons[0] == "bot_spoke"
-	}, time.Second, 10*time.Millisecond, "Send must fire the activity hook with reason=bot_spoke")
-
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("agent did not shut down")
-	}
 }

@@ -69,11 +69,14 @@ type CommonParams struct {
 	LLMInputUsed  int
 	LLMOutputUsed int
 
-	// ActivityHook fires on connector activity (bouncer attach, message
-	// traffic). Nil → activity hooks are not attached. Dedicated passes its
-	// Notifier.Hook (a per-event POST to the local sidecar); pooled passes a
-	// hook that marks the tenant active in the pool's coalescing aggregator
-	// (a per-event POST per tenant would hammer the control plane).
+	// ActivityHook fires on owner-presence signals the bouncer raises:
+	// a client attaching, and a periodic presence heartbeat while a client
+	// stays attached. Nil → the attach hook is not wired. Dedicated passes
+	// its Notifier.Hook (a per-event POST to the local sidecar); pooled
+	// passes a hook that marks the tenant active in the pool's coalescing
+	// aggregator (a per-event POST per tenant would hammer the control
+	// plane). The bot's own outbound traffic is NOT activity and has no
+	// hook — only genuine owner presence resets the idle timer.
 	ActivityHook func(reason string)
 
 	// Store backs bouncer welcome replay + web-shell scrollback + CHATHISTORY.
@@ -118,7 +121,6 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 	ircConn.SetClientLimits(p.Limits)
 
 	if p.ActivityHook != nil {
-		ircConn.SetActivityHook(p.ActivityHook)
 		ircConn.SetBouncerAttachHook(p.ActivityHook)
 	}
 

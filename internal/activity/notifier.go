@@ -1,12 +1,17 @@
 // Package activity exposes a tiny fire-and-forget webhook client the agent
 // uses to signal meaningful runtime events to a remote observer.
 //
-// Three call sites in the wider tree fire Mark with a stable reason
-// string: the IRC outbound PRIVMSG/NOTICE path ("bot_spoke"), the
-// bouncer's post-auth attach pool ("bouncer_attach"), and the WS
-// gateway's handshake-complete branch ("ws_attach"). Each Mark is a
-// single POST with a small JSON body; failures are logged at debug and
-// never block the caller — the notifier is observability, not control.
+// Activity means genuine owner presence, never "the bot is doing work"
+// or "messages are flowing through the channel". Call sites fire Mark
+// only for owner-driven signals: a bouncer client attaching
+// ("bouncer_attach"), an owner message through the web chat
+// ("ws_message"), an owner /tb command ("tb_command"), and a periodic
+// presence heartbeat while a bouncer client is attached or a web session
+// is engaged ("presence"). Inbound channel traffic, the bot's own
+// replies, and bare idle dashboard tabs deliberately do NOT fire Mark.
+// Each Mark is a single POST with a small JSON body; failures are logged
+// at debug and never block the caller — the notifier is observability,
+// not control.
 //
 // When TURBORG_ACTIVITY_URL is unset the package returns a Notifier
 // whose Mark is a no-op, so self-host operators who don't run an
@@ -24,12 +29,13 @@ import (
 	"time"
 )
 
-// Reason identifiers for the three documented call sites. Stable values
+// Reason identifiers for the owner-presence call sites. Stable values
 // the observer can dispatch on without parsing free-form text.
 const (
-	ReasonBotSpoke      = "bot_spoke"
 	ReasonBouncerAttach = "bouncer_attach"
-	ReasonWSAttach      = "ws_attach"
+	ReasonWSMessage     = "ws_message"
+	ReasonTBCommand     = "tb_command"
+	ReasonPresence      = "presence"
 )
 
 // defaultTimeout caps individual HTTP POSTs so a wedged observer cannot
@@ -93,10 +99,10 @@ func (n *Notifier) Mark(_ context.Context, reason string) {
 
 // Hook returns a context-free callback shape suitable for handing to
 // surfaces that emit a stable reason string (the IRC connector's
-// SetActivityHook / SetBouncerAttachHook and the WS gateway's
-// OnClientAttached). Equivalent to calling Mark with a Background
-// context; exists so the runtime wires the notifier without an
-// in-line closure that the cover gate has to chase.
+// SetBouncerAttachHook and the WS gateway's OnActivity). Equivalent to
+// calling Mark with a Background context; exists so the runtime wires
+// the notifier without an in-line closure that the cover gate has to
+// chase.
 func (n *Notifier) Hook(reason string) {
 	n.Mark(context.Background(), reason)
 }
