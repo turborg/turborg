@@ -34,6 +34,16 @@ func TestMemoryStoreEmptyChannelNoop(t *testing.T) {
 	assert.Empty(t, got)
 }
 
+func TestMemoryStoreRecentUnknownChannelEmpty(t *testing.T) {
+	s := messages.NewMemoryStore(0)
+	require.NoError(t, s.Submit(context.Background(), mkMsg("#a", "alice", "hi", time.Now())))
+	// A channel name that was never written to has no bucket; Recent
+	// returns nil rather than panicking on the missing map entry.
+	got, err := s.Recent(context.Background(), "#never", time.Time{}, 10)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
 func TestMemoryStoreSubmitAndRecent(t *testing.T) {
 	s := messages.NewMemoryStore(0)
 	ctx := context.Background()

@@ -1098,6 +1098,8 @@ func TestChathistoryRejectsInvalidInputs(t *testing.T) {
 		{"bad limit", "CHATHISTORY LATEST #test * abc", "INVALID_PARAMS"},
 		{"unknown subcommand", "CHATHISTORY AROUND #test * 50", "UNKNOWN_COMMAND"},
 		{"bad selector", "CHATHISTORY BEFORE #test msgid=xyz 50", "INVALID_PARAMS"},
+		{"latest non-star bad selector", "CHATHISTORY LATEST #test garbage 50", "INVALID_PARAMS"},
+		{"zero limit", "CHATHISTORY LATEST #test * 0", "INVALID_PARAMS"},
 	}
 
 	for _, tc := range cases {
@@ -1122,6 +1124,95 @@ func TestChathistoryRejectsInvalidInputs(t *testing.T) {
 			assert.True(t, sawFail, "expected FAIL CHATHISTORY %s for %q", tc.code, tc.cmd)
 		})
 	}
+}
+
+// TestChathistoryLatestWithConcreteSelectorCapsLimit covers the two
+// LATEST branches that the happy-path `*` test skips: a concrete
+// timestamp selector (treated as an older-than bound) and a limit
+// above chathistoryMaxLimit, which is clamped rather than rejected.
+func TestChathistoryLatestWithConcreteSelectorCapsLimit(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#test")
+	b.AttachState(state, "turborg", "ident", "host")
+
+	base := time.Date(2026, 5, 21, 12, 0, 0, 0, time.UTC)
+	attachStoreWithSeed(t, b, []messages.Message{
+		{Channel: "#test", Nick: "a", Text: "old", TS: base},
+		{Channel: "#test", Nick: "b", Text: "newer", TS: base.Add(10 * time.Second)},
+	})
+
+	conn, r := bouncerClient(t, addr)
+	negotiateAndPass(t, conn, r, "batch draft/chathistory", "hunter2")
+	drainUntilEndOfWelcome(t, conn, r)
+
+	// Concrete selector → older-than bound (like BEFORE); limit 9999 is
+	// silently clamped to chathistoryMaxLimit instead of failing.
+	writeLine(t, conn, "CHATHISTORY LATEST #test timestamp=2026-05-21T12:00:10Z 9999")
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var historyLines []string
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if strings.HasPrefix(line, "BATCH -") {
+			break
+		}
+		if strings.Contains(line, "PRIVMSG #test") {
+			historyLines = append(historyLines, line)
+		}
+	}
+	require.Len(t, historyLines, 1)
+	assert.Contains(t, historyLines[0], ":old")
+}
+
+// TestChathistoryWithoutStoreReturnsEmptyBatch covers the nil-store
+// branch: when no message store is configured the bouncer answers with
+// an empty BATCH rather than a FAIL, since "no history available" is a
+// valid response.
+func TestChathistoryWithoutStoreReturnsEmptyBatch(t *testing.T) {
+	b, addr := freshBouncer(t, "hunter2")
+	state := irc.NewChannelState()
+	state.OnSelfJoin("#test")
+	b.AttachState(state, "turborg", "ident", "host")
+	// Deliberately no AttachMessageStore → currentMessageStore() is nil.
+
+	conn, r := bouncerClient(t, addr)
+	negotiateAndPass(t, conn, r, "batch draft/chathistory", "hunter2")
+	drainUntilEndOfWelcome(t, conn, r)
+
+	writeLine(t, conn, "CHATHISTORY LATEST #test * 50")
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var sawBatchStart, sawBatchEnd, sawFail bool
+	var historyLines int
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		line = strings.TrimRight(line, "\r\n")
+		switch {
+		case strings.HasPrefix(line, "BATCH +"):
+			sawBatchStart = true
+		case strings.HasPrefix(line, "BATCH -"):
+			sawBatchEnd = true
+		case strings.HasPrefix(line, "FAIL CHATHISTORY"):
+			sawFail = true
+		case strings.Contains(line, "PRIVMSG #test"):
+			historyLines++
+		}
+		if sawBatchEnd {
+			break
+		}
+	}
+	assert.True(t, sawBatchStart, "expected an opening BATCH")
+	assert.True(t, sawBatchEnd, "expected a closing BATCH")
+	assert.False(t, sawFail, "missing store must not FAIL")
+	assert.Zero(t, historyLines, "no store → no history lines")
 }
 
 // drainUntilEndOfWelcome reads until the welcome flush has settled so

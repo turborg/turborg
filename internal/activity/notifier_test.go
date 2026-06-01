@@ -155,6 +155,22 @@ func TestNotifier_SwallowsBadRequestURL(t *testing.T) {
 	assert.Equal(t, 0, doer.calls)
 }
 
+func TestNotifier_HookMarksWithBackgroundContext(t *testing.T) {
+	doer := &stubDoer{status: http.StatusNoContent}
+	n := activity.New("http://example.invalid/", "", nil)
+	n.SetHTTPClient(doer)
+	// Hook is the closure-free entry point the runtime wires into the
+	// connector/gateway attach callbacks; it must post the reason just
+	// like Mark with a Background context.
+	n.Hook(activity.ReasonBouncerAttach)
+	n.Wait()
+
+	doer.mu.Lock()
+	defer doer.mu.Unlock()
+	require.Equal(t, 1, doer.calls)
+	assert.Contains(t, string(doer.lastBody), activity.ReasonBouncerAttach)
+}
+
 func TestNotifier_SetHTTPClientOnNilReceiverIsSafe(t *testing.T) {
 	var n *activity.Notifier
 	// Must not panic.

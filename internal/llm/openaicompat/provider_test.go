@@ -79,6 +79,19 @@ func TestAskSurfacesAPIError(t *testing.T) {
 	assert.Contains(t, err.Error(), "rate limited")
 }
 
+func TestAskErrorsOnUndecodableBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("this is not json"))
+	}))
+	defer srv.Close()
+
+	p, err := openaicompat.New(openaicompat.Settings{APIKey: "k", BaseURL: srv.URL, HTTPClient: srv.Client()})
+	require.NoError(t, err)
+	_, _, err = p.Ask(context.Background(), "hi")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode")
+}
+
 func TestNewDefaultsBaseURLModelAndMaxTokens(t *testing.T) {
 	p, err := openaicompat.New(openaicompat.Settings{APIKey: "k"})
 	require.NoError(t, err)
