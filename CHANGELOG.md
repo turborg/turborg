@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.15.0](https://github.com/turborg/turborg/compare/v0.14.0...v0.15.0) (2026-06-02)
+
+
+### Features
+
+* **egress:** bind per-tenant source IP for pooled egress round-robin ([#84](https://github.com/turborg/turborg/issues/84)) ([3c93c7a](https://github.com/turborg/turborg/commit/3c93c7ae103dd057d508800ead127c4271c9dc6f))
+
+
+### Documentation
+
+* align comments and docs with framework-neutral framing ([#82](https://github.com/turborg/turborg/issues/82)) ([18104f3](https://github.com/turborg/turborg/commit/18104f3ee18032a4f5d690a9bff17679d74afc74))
+
 ## [0.14.0](https://github.com/turborg/turborg/compare/v0.13.0...v0.14.0) (2026-06-02)
 
 
