@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.15.1](https://github.com/turborg/turborg/compare/v0.15.0...v0.15.1) (2026-06-02)
+
+
+### Bug Fixes
+
+* **web:** scope nick-change notice to channels the user shares ([645bcc6](https://github.com/turborg/turborg/commit/645bcc667e6ce062e7a2a598b1c12cb38401d67c))
+
 ## [0.15.0](https://github.com/turborg/turborg/compare/v0.14.0...v0.15.0) (2026-06-02)
 
 
