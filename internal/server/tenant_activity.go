@@ -29,12 +29,12 @@ type httpDoer interface {
 // activityAggregator coalesces per-tenant activity signals into a coarse
 // periodic bulk POST to the control plane's /turborgs/activity endpoint.
 //
-// Dedicated containers report activity to their host's sidecar (in-memory),
-// which accounts-api pulls onto last_active_at. Pooled tenants have no sidecar
-// hop, so the pool batches active tenant IDs here and flushes them on a timer.
-// Without it a pooled tenant's last_active_at would never refresh and the idle
-// reaper would kill an actively-used free tenant. Inert (Mark is a no-op, run
-// returns immediately) when no control plane is configured.
+// The single-instance runtime reports activity to a co-located endpoint. Pooled
+// tenants have no such per-tenant hop, so the pool batches active tenant IDs
+// here and flushes them on a timer. Without it a pooled tenant's last_active_at
+// would never refresh and the idle reaper could kill an actively-used tenant.
+// Inert (Mark is a no-op, run returns immediately) when no control plane is
+// configured.
 type activityAggregator struct {
 	url      string
 	token    string

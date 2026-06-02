@@ -1,10 +1,10 @@
-// Command turborg-server runs the multi-tenant ("pooled") turborg runtime:
+// Command turborg-server runs the pooled (multi-instance) turborg runtime:
 // one process that holds N tenants, each an isolated agent. It runs alongside
-// the single-tenant `turborg` binary, which stays the default for env-driven
-// hobbyist/OSS deployments.
+// the single-instance `turborg` binary, which stays the default for env-driven
+// single-bot deployments.
 //
-// M1 is lifecycle-only — tenants attach/detach from a file source but run no
-// connector behaviour yet. See accounts-api/dev/PLAN-multi-tenancy.md (WS2).
+// Tenants attach and detach from a configurable source — a local JSON file or
+// an HTTP feed (see selectSource).
 package main
 
 import (
@@ -31,7 +31,7 @@ import (
 )
 
 // defaultAnthropicModel mirrors config.Settings' ANTHROPIC_MODEL envDefault so
-// the pooled process picks the same model the dedicated runtime does when the
+// the pooled process picks the same model the single-instance runtime does when the
 // operator doesn't override it.
 const defaultAnthropicModel = "claude-sonnet-4-6"
 
@@ -119,9 +119,9 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 
 	srv := server.New(source, log)
 	// Point each tenant's connector-state emitter at the control plane (the same
-	// accounts-api base the HTTP feed uses). Empty on the file-source/OSS path →
-	// state-sync stays off. The receiver authorizes via the host token + host-
-	// owns check, so the control-plane token suffices.
+	// base URL the HTTP feed uses). Empty on the file-source path → state-sync
+	// stays off. The receiver authorizes via the host token, so the
+	// control-plane token suffices.
 	srv.SetControlPlane(os.Getenv("TURBORG_CONTROL_PLANE_URL"), os.Getenv("TURBORG_CONTROL_PLANE_TOKEN"))
 
 	// Shared LLM provider for LLM-type commands, built once from the pool
@@ -157,14 +157,14 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 		func(a string) error { return srv.ServeBouncerRouter(ctx, a) })
 
 	// Pooled web-shell ingress: one HTTP router fronts every tenant's `/ws`
-	// gateway (the sidecar proxy forwards `/c/<turborg_id>` here when the tenant
-	// has no dedicated container). Same fail-fast contract as the bouncer router.
+	// gateway (an upstream proxy forwards `/c/<id>` here, addressed by tenant
+	// id). Same fail-fast contract as the bouncer router.
 	startOptionalRouter(ctx, "web-gateway-router", os.Getenv("TURBORG_GATEWAY_ROUTER_ADDR"), cancel, log,
 		func(a string) error { return srv.ServeWebGatewayRouter(ctx, a) })
 
-	// Ident router: the sidecar's RFC-1413 responder resolves an inbound ident
-	// query to (this container's IP, source port) via conntrack, then asks here
-	// for the tenant's ident. Empty addr disables it (no sidecar / OSS self-host).
+	// Ident router: an external RFC-1413 (ident) responder resolves an inbound
+	// query to (this host's IP, source port), then asks here for the matching
+	// tenant's ident. Empty addr disables it.
 	startOptionalRouter(ctx, "ident-router", os.Getenv("TURBORG_IDENT_ROUTER_ADDR"), cancel, log,
 		func(a string) error { return ident.ServeRouter(ctx, a, srv.Idents()) })
 
@@ -186,10 +186,10 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 }
 
 // applyMemoryLimit sets the Go soft memory limit (GOMEMLIMIT) from
-// TURBORG_GOMEMLIMIT_BYTES when present. The sidecar derives it from the pool
-// container's memory allocation so GC works harder near the ceiling instead of
-// the kernel OOM-killing a process that holds every pooled tenant. Unset keeps
-// Go's default (the runtime still honours a natively-set GOMEMLIMIT env).
+// TURBORG_GOMEMLIMIT_BYTES when present. Set it from the process's memory
+// allocation so GC works harder near the ceiling instead of the kernel
+// OOM-killing a process that holds every pooled tenant. Unset keeps Go's
+// default (the runtime still honours a natively-set GOMEMLIMIT env).
 func applyMemoryLimit(log *slog.Logger) {
 	v := os.Getenv("TURBORG_GOMEMLIMIT_BYTES")
 	if v == "" {
@@ -205,8 +205,8 @@ func applyMemoryLimit(log *slog.Logger) {
 }
 
 // selectSource picks the tenant source from the environment. When
-// TURBORG_CONTROL_PLANE_URL is set, the hosted HTTP feed (accounts-api) is
-// used; otherwise tenants come from the local JSON file (OSS / self-host).
+// TURBORG_CONTROL_PLANE_URL is set, the HTTP feed is used; otherwise tenants
+// come from the local JSON file.
 func selectSource(log *slog.Logger) (server.TenantSource, string) {
 	if base := os.Getenv("TURBORG_CONTROL_PLANE_URL"); base != "" {
 		return &server.HTTPSource{

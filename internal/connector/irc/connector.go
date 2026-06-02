@@ -63,7 +63,7 @@ type Connector struct {
 	// conn's LocalAddr is unreliable). 0 = nothing registered.
 	identPort int
 	// identReporter receives localPort→ident updates for the pooled RFC-1413
-	// responder. Nil in dedicated runtime / tests (reporting disabled).
+	// responder. Nil in single-instance runtime / tests (reporting disabled).
 	identReporter IdentReporter
 
 	// machine is the per-connector upstream state machine. External
@@ -76,7 +76,7 @@ type Connector struct {
 	bouncer *Bouncer
 	// bouncerListenerless brings the bouncer up without its own TCP listener
 	// (pooled runtime): the pool's SNI/PROXY-v2 router feeds connections in via
-	// ServeBouncerConn. Default false = dedicated mode (bouncer binds a port).
+	// ServeBouncerConn. Default false = single-instance mode (bouncer binds a port).
 	bouncerListenerless bool
 	ctcp                *Throttle
 
@@ -286,7 +286,7 @@ func (c *Connector) getClient() *Client {
 
 // SetIdentReporter installs the pooled ident reporter. Must be called before
 // Start so the first connect is reported. Nil (the default) disables ident
-// reporting — dedicated runtime + tests.
+// reporting — single-instance runtime + tests.
 func (c *Connector) SetIdentReporter(r IdentReporter) { c.identReporter = r }
 
 // setClient swaps the upstream client. Used by Start (initial dial) and
@@ -394,7 +394,7 @@ func (c *Connector) TBTLDR(ctx context.Context, url string) (string, error) {
 // SetBouncerListenerless selects the pooled-runtime bouncer path: the bouncer
 // comes up without binding a TCP port and is fed connections by the pool's
 // SNI/PROXY-v2 router via ServeBouncerConn, instead of its own accept loop.
-// Must be called before Start. Default (false) keeps dedicated mode, where the
+// Must be called before Start. Default (false) keeps single-instance mode, where the
 // bouncer binds its own host port.
 func (c *Connector) SetBouncerListenerless(v bool) { c.bouncerListenerless = v }
 

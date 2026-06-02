@@ -32,8 +32,8 @@ type Server struct {
 	workFactory func(*Tenant) func(context.Context) error
 
 	// controlPlaneURL/Token point each pooled tenant's connector-state emitter
-	// at accounts-api's /v1/internal/turborgs/<id>/state receiver. Empty URL
-	// (the OSS/file-source path) leaves state-sync off — the emitter is inert.
+	// at the control plane's per-tenant state receiver. Empty URL (the
+	// file-source path) leaves state-sync off — the emitter is inert.
 	controlPlaneURL   string
 	controlPlaneToken string
 
@@ -48,7 +48,7 @@ type Server struct {
 	activity *activityAggregator
 
 	// idents maps each tenant's upstream source port to its IRC ident, shared
-	// across all tenants and served to the sidecar's RFC-1413 responder by the
+	// across all tenants and served to an external RFC-1413 responder by the
 	// ident router. Always non-nil so connectors report into it unconditionally;
 	// the router is only bound when TURBORG_IDENT_ROUTER_ADDR is set.
 	idents *ident.Registry
@@ -74,9 +74,9 @@ func New(source TenantSource, log *slog.Logger) *Server {
 func (s *Server) Idents() *ident.Registry { return s.idents }
 
 // SetControlPlane configures where pooled tenants POST their connector-state
-// snapshots — accounts-api's internal receiver (TURBORG_CONTROL_PLANE_URL).
+// snapshots — the control plane's internal receiver (TURBORG_CONTROL_PLANE_URL).
 // Call before Run. An empty url leaves state-sync off (each tenant's emitter is
-// inert), matching the OSS/file-source deployment that has no control plane.
+// inert), matching the file-source deployment that has no control plane.
 func (s *Server) SetControlPlane(url, token string) {
 	s.controlPlaneURL = url
 	s.controlPlaneToken = token

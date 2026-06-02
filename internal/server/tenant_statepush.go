@@ -15,12 +15,12 @@ import (
 const tenantStateDebounce = 250 * time.Millisecond
 
 // buildTenantStateEmitter wires a connector-state emitter for one pooled tenant.
-// Unlike the dedicated path (which PUTs to the sidecar, which re-POSTs), the
-// pool POSTs each tenant's snapshot straight to accounts-api's per-turborg
+// Unlike the single-instance path (which PUTs to STATE_WEBHOOK_URL), the pool
+// POSTs each tenant's snapshot straight to the control plane's per-tenant
 // receiver — it already holds the control-plane URL + token (it polls the feed
-// from there), and the receiver authorizes it via the host token + host-owns
-// check. Returns nil when no control plane is configured (OSS/file-source), so
-// state-sync is simply off.
+// from there), and the receiver authorizes it via the host token. Returns nil
+// when no control plane is configured (the file-source path), so state-sync is
+// simply off.
 func buildTenantStateEmitter(conn *irc.Connector, turborgID, controlPlaneURL, token string, log *slog.Logger) *statepush.Emitter {
 	if controlPlaneURL == "" || turborgID == "" {
 		return nil

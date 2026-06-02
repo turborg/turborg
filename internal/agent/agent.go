@@ -28,8 +28,8 @@ func New(log *slog.Logger) *Agent {
 }
 
 // NewWithPrefix is the same as New but lets callers pick a non-default
-// command prefix (e.g. "." or ".bot"). Useful for SaaS multi-tenancy where
-// every agent owns its own prefix.
+// command prefix (e.g. "." or ".bot"). Useful for multi-instance deployments
+// where every agent owns its own prefix.
 //
 // Agents ship with no commands registered — all commands are user-defined
 // and installed via the registry's dynamic path (ReplaceDynamic), wired by

@@ -1,12 +1,11 @@
 // Package ident maintains the live mapping from an upstream IRC connection's
 // local TCP source port to the owning tenant's IRC ident (the USER value), and
-// serves it over HTTP for the sidecar's RFC-1413 (ident) responder.
+// serves it over HTTP for an external RFC-1413 (ident) responder.
 //
 // One Registry per turborg process: the pooled server shares a single Registry
-// across every tenant; a dedicated container holds a single entry. The sidecar
-// resolves an incoming ident query to (containerIP, sourcePort) via conntrack,
-// then asks that container's router for the ident — so this same code backs
-// both runtimes.
+// across every tenant; a single-instance process holds a single entry. The
+// responder resolves an incoming ident query to (hostIP, sourcePort), then asks
+// that process's router for the ident — so this same code backs both runtimes.
 package ident
 
 import "sync"

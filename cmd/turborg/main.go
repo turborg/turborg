@@ -108,14 +108,13 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Ident reporting for the sidecar's RFC-1413 responder — same mechanism as
-	// the pooled runtime, so a dedicated (paid) container names itself on
+	// Ident reporting for an external RFC-1413 (ident) responder — same
+	// mechanism as the pooled runtime, so the bot names itself on
 	// "identd required" networks and drops the ~ prefix. The connector reports
-	// its source port → ident; the router (this container's bridge IP) serves it
-	// to the sidecar, which resolved the query to us via conntrack. Set before
-	// runtime.Run starts the connector. Disabled when the addr is unset (OSS
-	// self-host with no sidecar); a bind failure is non-fatal — the bot still
-	// connects, just unverified.
+	// its source port → ident; the router (this host's IP) serves it to the
+	// responder, which resolved the inbound query to us. Set before runtime.Run
+	// starts the connector. Disabled when the addr is unset; a bind failure is
+	// non-fatal — the bot still connects, just unverified.
 	if built.IRC != nil {
 		idents := ident.NewRegistry()
 		built.IRC.SetIdentReporter(idents)

@@ -78,10 +78,10 @@ func NewClient(url, token string, log *slog.Logger) *Client {
 	return NewClientWithMethod(url, token, http.MethodPut, log)
 }
 
-// NewClientWithMethod is NewClient with an explicit HTTP method. The dedicated
-// path PUTs to the sidecar (which re-POSTs to accounts-api), but the pooled
-// runtime POSTs per-tenant state straight to accounts-api's
-// /v1/internal/turborgs/<id>/state receiver (a POST route), so it needs POST.
+// NewClientWithMethod is NewClient with an explicit HTTP method. The
+// single-instance path PUTs to STATE_WEBHOOK_URL, but the pooled runtime POSTs
+// per-tenant state straight to the control plane's per-tenant state receiver
+// (a POST route), so it needs POST.
 func NewClientWithMethod(url, token, method string, log *slog.Logger) *Client {
 	if log == nil {
 		log = slog.Default()

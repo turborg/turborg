@@ -37,8 +37,8 @@ func (c *Client) currentLog() *slog.Logger {
 
 // LocalPort returns the local TCP source port of the upstream connection, or 0
 // when unavailable. The pooled ident responder keys on this: SNAT preserves the
-// source port for the single pool container's egress, so the port an IRC server
-// queries on :113 is exactly this one, letting the sidecar map it back to the
+// source port for the pool process's egress, so the port an IRC server queries
+// on :113 is exactly this one, letting an external responder map it back to the
 // tenant's ident.
 func (c *Client) LocalPort() int {
 	if c.conn == nil {

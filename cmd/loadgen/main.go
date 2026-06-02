@@ -1,7 +1,7 @@
-// Command loadgen measures the pooled turborg runtime's footprint under load
-// (multi-tenancy plan WS2 M8). It boots N synthetic tenants against an
-// in-process fake IRC sink, waits for them all to register upstream, then
-// reports RAM + goroutine cost — the numbers that drive pool host sizing.
+// Command loadgen measures the pooled turborg runtime's footprint under load.
+// It boots N synthetic tenants against an in-process fake IRC sink, waits for
+// them all to register upstream, then reports RAM + goroutine cost — the
+// numbers that drive pool host sizing.
 //
 //	go run ./cmd/loadgen -tenants 10000 -channels 2 -duration 30s
 //

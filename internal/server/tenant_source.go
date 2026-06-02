@@ -1,12 +1,11 @@
-// Package server hosts the multi-tenant ("pooled") turborg runtime: one
+// Package server hosts the pooled (multi-instance) turborg runtime: one
 // long-lived process that holds N tenants, each an isolated agent. It runs
-// alongside the existing single-tenant binary (cmd/turborg), which stays the
-// default for hobbyist/OSS env-driven deployments.
+// alongside the single-instance binary (cmd/turborg), which stays the default
+// for env-driven single-bot deployments.
 //
-// M1 (this milestone) is lifecycle-only: the Server attaches and detaches
-// tenants from a TenantSource and supervises their goroutines. Real connector
-// behaviour, crash isolation, per-tenant limits, and the SNI bouncer router
-// land in later milestones (see accounts-api/dev/PLAN-multi-tenancy.md WS2).
+// The Server attaches and detaches tenants from a TenantSource and supervises
+// their goroutines, with crash isolation, per-tenant limits, and SNI-based
+// ingress routing.
 package server
 
 import (
@@ -19,8 +18,8 @@ import (
 	"github.com/turborg/turborg/internal/safe"
 )
 
-// ConnectorSpec describes one connector instance a tenant runs. Mirrors the
-// sidecar/accounts-api wire shape; Type matches turborg's connector names.
+// ConnectorSpec describes one connector instance a tenant runs. The Type field
+// matches turborg's connector names.
 type ConnectorSpec struct {
 	Type    string         `json:"type"`
 	Config  map[string]any `json:"config"`
@@ -28,8 +27,8 @@ type ConnectorSpec struct {
 }
 
 // TenantSpec is the desired state of a single tenant. Keyed by the logical
-// TurborgID — never a runtime identifier. Wire-compatible with the sidecar
-// TenantSpec so an HTTPSource (M5) can decode the same JSON.
+// TurborgID — never a runtime identifier. Both the FileSource and the
+// HTTPSource decode the same JSON shape.
 type TenantSpec struct {
 	TurborgID        string            `json:"turborg_id"`
 	ShardID          int               `json:"shard_id,omitempty"`
@@ -40,29 +39,27 @@ type TenantSpec struct {
 	Connectors       []ConnectorSpec   `json:"connectors"`
 	PlanCapabilities *PlanCapabilities `json:"plan_capabilities,omitempty"`
 
-	// IgnoredNicks is the owner's per-user ignore list: the command guard drops
-	// !commands from these nicks. Mirrors the dedicated spawn payload's field.
+	// IgnoredNicks is the owner's ignore list: the command guard drops
+	// !commands from these nicks. Mirrors the single-instance TURBORG_IGNORED_NICKS.
 	IgnoredNicks []string `json:"ignored_nicks,omitempty"`
 
 	// Commands is the tenant's data-driven command set (the same wire shape
-	// the dedicated payload carries as TURBORG_COMMANDS). The pooled runtime
+	// the single-instance runtime carries as TURBORG_COMMANDS). The pooled runtime
 	// swaps it into the agent's registry, and — uniquely — a change to ONLY
 	// this field is applied in place without dropping the IRC connection
 	// (see Tenant.update). Ordered; an empty slice means no commands.
 	Commands []commands.Definition `json:"commands,omitempty"`
 
-	// GatewayToken authorizes the per-tenant web shell (the appui `/ws`
-	// surface). It's the turborg's existing container_token, threaded through
-	// by accounts-api; an empty token means "no web shell for this tenant" and
-	// the pooled gateway is not built. The web router's StaticPasswordVerifier
-	// checks the `?token=` query against it.
+	// GatewayToken authorizes the per-tenant web shell (the `/ws` surface).
+	// An empty token means "no web shell for this tenant" and the pooled
+	// gateway is not built. The web router's StaticPasswordVerifier checks the
+	// `?token=` query against it.
 	GatewayToken string `json:"gateway_token,omitempty"`
 }
 
-// PlanCapabilities is the subset of accounts-api's plan-tier caps the pooled
-// runtime enforces per tenant (M4). Mirrors the sidecar PlanCapabilities wire
-// shape; container mode delegates these to cgroups + the connector's env,
-// pooled mode enforces them in-process. 0 = unrestricted by convention.
+// PlanCapabilities is the per-tenant capability limits the pooled runtime
+// enforces in-process. The single-instance binary expresses the same limits via
+// env vars; here they arrive in the tenant feed. 0 = unrestricted by convention.
 type PlanCapabilities struct {
 	NickLocked            bool `json:"nick_locked"`
 	RealnameLocked        bool `json:"realname_locked"`
@@ -70,21 +67,20 @@ type PlanCapabilities struct {
 	OutboundMsgsPerWindow int  `json:"outbound_msgs_per_window"`
 	OutboundWindowSeconds int  `json:"outbound_window_seconds"`
 	// OwnerDMNudgeEvery: DM the owner every N outbound PRIVMSGs with a usage
-	// summary (free=100). Fires only when an owner nick is configured.
+	// summary. Fires only when an owner nick is configured.
 	OwnerDMNudgeEvery int `json:"owner_dm_nudge_every"`
-	// CommandMaxPerWindow/WindowSeconds: per-sender !command throttle (free=3
-	// per 30s). 0 = unthrottled by convention.
+	// CommandMaxPerWindow/WindowSeconds: per-sender !command throttle.
+	// 0 = unthrottled by convention.
 	CommandMaxPerWindow  int `json:"command_max_per_window"`
 	CommandWindowSeconds int `json:"command_window_seconds"`
-	// CTCPMaxPerWindow/WindowSeconds: per-sender CTCP throttle (free=2/30).
-	// BouncerMaxFailedAttempts: bouncer auth-failure ceiling (free=3). All
+	// CTCPMaxPerWindow/WindowSeconds: per-sender CTCP throttle.
+	// BouncerMaxFailedAttempts: bouncer auth-failure ceiling. All
 	// 0 = fall back to the connector's ApplyDefaults values.
 	CTCPMaxPerWindow         int `json:"ctcp_max_per_window"`
 	CTCPWindowSeconds        int `json:"ctcp_window_seconds"`
 	BouncerMaxFailedAttempts int `json:"bouncer_max_failed_attempts"`
-	// QuitMessage is the per-tier IRC QUIT brand (e.g. "turborg.com — free,
-	// xshellz.com"), applied to the tenant's connector. Empty → the connector
-	// default. Mirrors the value the sidecar emits for dedicated.
+	// QuitMessage is the IRC QUIT brand applied to the tenant's connector.
+	// Empty → the connector default.
 	QuitMessage string `json:"quit_message"`
 
 	// CustomCommandsMax caps how many data-driven commands the tenant's
@@ -112,14 +108,13 @@ type PlanCapabilities struct {
 	// LLM carries the OpenAI-compatible router config for LLM-type commands.
 	// Documentation-only on the turborg side: the pooled process builds one
 	// shared provider from its own env (the API key is a server-side secret,
-	// never in the feed) and the model catalog is enforced upstream at
-	// attach time. Mirrors the block the sidecar emits as TURBORG_LLM_* for
-	// dedicated.
+	// never in the feed) and the model catalog is enforced upstream at attach
+	// time. Mirrors the single-instance TURBORG_LLM_* env.
 	LLM *LLMRouterConfig `json:"llm,omitempty"`
 }
 
 // LLMRouterConfig is the OpenAI-compatible LLM router block. It travels in
-// the plan capabilities for documentation + parity with the dedicated
+// the capability config for documentation + parity with the single-instance
 // TURBORG_LLM_* env; the secret API key is never carried here.
 type LLMRouterConfig struct {
 	Provider      string   `json:"provider"`
@@ -148,9 +143,9 @@ type TenantEvent struct {
 }
 
 // TenantSource feeds the Server its desired tenant set. Initial returns the
-// full snapshot at boot; Watch streams subsequent changes. Three
-// implementations are planned (plan WS1 F1): env (single tenant), file
-// (this package), and HTTP long-poll against accounts-api (M5).
+// full snapshot at boot; Watch streams subsequent changes. Implementations
+// include a JSON file (FileSource) and an HTTP poll against a control plane
+// (HTTPSource).
 type TenantSource interface {
 	Initial(ctx context.Context) ([]TenantSpec, error)
 	Watch(ctx context.Context) (<-chan TenantEvent, error)
@@ -161,12 +156,9 @@ type fileDoc struct {
 	Tenants []TenantSpec `json:"tenants"`
 }
 
-// FileSource loads tenants from a JSON file. M1 reads the snapshot once at
-// boot; live reload on file change lands in a later milestone (the Watch
-// channel simply stays open until ctx is cancelled for now).
-//
-// JSON rather than the plan's YAML to avoid promoting the indirect yaml.v3
-// dependency to a direct one without sign-off; the wire shape is identical.
+// FileSource loads tenants from a JSON file. It reads the snapshot once at
+// boot; the Watch channel stays open until ctx is cancelled (no live reload on
+// file change yet).
 type FileSource struct {
 	Path string
 }

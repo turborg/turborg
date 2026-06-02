@@ -1,6 +1,6 @@
 # Gateway
 
-turborg's **control-plane gateway** is a single HTTP server that
+turborg's **web gateway** is a single HTTP server that
 exposes:
 
 - `/ws` — a JSON-over-WebSocket protocol that streams agent events to
@@ -38,13 +38,13 @@ message composer.
 
 | Variable | Type | Default | Notes |
 |---|---|---|---|
-| `TURBORG_GATEWAY_PASSWORD` | string | `""` | **Set this to enable the gateway.** Unset = gateway disabled, no listener. SaaS deployments swap `StaticPasswordVerifier` for a JWT- or session-aware `TokenVerifier`; the wire protocol is unchanged. |
+| `TURBORG_GATEWAY_PASSWORD` | string | `""` | **Set this to enable the gateway.** Unset = gateway disabled, no listener. Embedders can swap `StaticPasswordVerifier` for a JWT- or session-aware `TokenVerifier`; the wire protocol is unchanged. |
 | `TURBORG_GATEWAY_HOST` | string | `127.0.0.1` | Listen interface. **Keep on loopback** unless you put a TLS-terminating reverse proxy in front — WebSocket auth tokens travel in cleartext over plain HTTP. |
 | `TURBORG_GATEWAY_PORT` | int | `8765` | HTTP listen port. |
 | `TURBORG_GATEWAY_MAX_FAILED_ATTEMPTS` | int | `5` | Per-IP brute-force cap on `/ws` auth. |
 | `TURBORG_GATEWAY_FAILURE_WINDOW_SECONDS` | int | `60` | Failure-counter window. |
 | `TURBORG_GATEWAY_LOCKOUT_SECONDS` | int | `300` | Lockout duration after the threshold trips. |
-| `TURBORG_GATEWAY_IDLE_SHUTDOWN_SECONDS` | int | `0` (disabled) | When > 0, the gateway calls its `OnIdleShutdown` callback N seconds after the **last WebSocket client** disconnects. The xshellz SaaS sidecar wires this to a `docker stop` for free-tier auto-pause. Bouncer connections do **not** extend the timer — only WS clients do, since the bouncer is intentionally a different SLA tier. |
+| `TURBORG_GATEWAY_IDLE_SHUTDOWN_SECONDS` | int | `0` (disabled) | When > 0, the gateway calls its `OnIdleShutdown` callback N seconds after the **last WebSocket client** disconnects. An embedder can wire this to a process/container stop for idle auto-pause; the bundled binary just logs it. Bouncer connections do **not** extend the timer — only WS clients do. |
 
 ---
 
@@ -52,9 +52,9 @@ message composer.
 
 - The reference UI at `/` is intentionally **vanilla JS / single file /
   no build step**. Polished, production-grade frontend work belongs in
-  a separate client (xshellz operates an Angular one downstream).
-- The wire protocol is byte-stable across patch releases. SaaS clients
-  rely on this — coordinate any change with the downstream UI team.
+  a separate client built against the same WS protocol.
+- The wire protocol is byte-stable across patch releases — embedders
+  with their own UI can rely on this.
 - **Port 0 is legal** in code (it tells `net.Listen` to pick an
   OS-assigned port). The env default is `8765`, so production
   deployments always get a stable port; port-0 is reserved for tests.
@@ -70,6 +70,5 @@ message composer.
 
 - **Sample env file:** [`/.env.example`](../.env.example)
 - **Source of truth:** `internal/web/gateway.go`, `internal/config/settings.go`
-  (the `Gateway*` fields).
-- **WS protocol details (SaaS-only):** `docs/ui/PLAN.md` (gitignored;
-  shared with downstream UI teams out-of-band).
+  (the `Gateway*` fields), and the bundled reference UI in
+  `internal/web/static/index.html`.
