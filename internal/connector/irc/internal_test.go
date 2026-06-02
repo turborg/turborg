@@ -484,7 +484,7 @@ func TestDialTLSPathRoundtrips(t *testing.T) {
 	// InsecureSkipVerify since this is a test-only path. Production
 	// callers go through Dial() which never sets this flag.
 	insecure := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true} //nolint:gosec
-	client, err := dial(context.Background(), host, port, true, insecure)
+	client, err := dial(context.Background(), host, port, true, "", insecure)
 	require.NoError(t, err)
 	require.NotNil(t, client)
 	require.NoError(t, client.Close())

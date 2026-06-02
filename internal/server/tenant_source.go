@@ -55,6 +55,13 @@ type TenantSpec struct {
 	// gateway is not built. The web router's StaticPasswordVerifier checks the
 	// `?token=` query against it.
 	GatewayToken string `json:"gateway_token,omitempty"`
+
+	// EgressIP is the tenant's assigned public egress IP (accounts-api's
+	// host_ip_id). The pool resolves it to its own local source IP on the
+	// matching egress network (via TURBORG_EGRESS_MAP) and binds the IRC dial to
+	// it, so the host SNAT egresses on this IP. Empty → default route (single-IP
+	// hosts / unconfigured).
+	EgressIP string `json:"egress_ip,omitempty"`
 }
 
 // PlanCapabilities is the per-tenant capability limits the pooled runtime
