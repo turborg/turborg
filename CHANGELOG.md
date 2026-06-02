@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.13.0](https://github.com/turborg/turborg/compare/v0.12.0...v0.13.0) (2026-06-01)
+
+
+### Features
+
+* **commands:** connector-agnostic static-skill template placeholders ([#74](https://github.com/turborg/turborg/issues/74)) ([027ec1d](https://github.com/turborg/turborg/commit/027ec1dbc4a86efe36e1c85e7a9c5fa2a49a2478))
+
 ## [0.12.0](https://github.com/turborg/turborg/compare/v0.11.0...v0.12.0) (2026-06-01)
 
 
