@@ -40,7 +40,7 @@ jobs:
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0  # GoReleaser inspects git history for the changelog.
       - uses: actions/setup-go@v6
