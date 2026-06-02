@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.14.0](https://github.com/turborg/turborg/compare/v0.13.0...v0.14.0) (2026-06-02)
+
+
+### Features
+
+* **ident:** serve per-tenant ident over an HTTP router for the sidecar responder ([#80](https://github.com/turborg/turborg/issues/80)) ([50c198c](https://github.com/turborg/turborg/commit/50c198c9c8b2138db03020a1a008523c3e7e879d))
+
 ## [0.13.0](https://github.com/turborg/turborg/compare/v0.12.0...v0.13.0) (2026-06-01)
 
 
