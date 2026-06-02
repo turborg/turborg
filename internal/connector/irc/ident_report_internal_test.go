@@ -37,7 +37,9 @@ type fakeConn struct {
 	port int
 }
 
-func (f fakeConn) LocalAddr() net.Addr { return &net.TCPAddr{IP: net.IPv4(10, 201, 1, 2), Port: f.port} }
+func (f fakeConn) LocalAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(10, 201, 1, 2), Port: f.port}
+}
 
 func TestSetClientReportsAndClearsIdent(t *testing.T) {
 	rep := newRecordingReporter()

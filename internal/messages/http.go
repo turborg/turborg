@@ -47,9 +47,9 @@ type HTTPStore struct {
 	log      *slog.Logger
 
 	// entropy + entropyMu mint ULIDs for messages submitted without an
-	// explicit ID. Receiver-side validators require a 26-char ULID; the
-	// previous "let the receiver mint it" contract turned out to be
-	// untrue in accounts-api, so the responsibility lives here.
+	// explicit ID. Receiver-side validators require a 26-char ULID; a
+	// "let the receiver mint it" contract proved unreliable, so the
+	// responsibility lives here.
 	entropy   *rand.Rand
 	entropyMu sync.Mutex
 }

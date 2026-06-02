@@ -125,7 +125,7 @@ func TestLiveUpdatableOnlyChangeIgnoresTokenUsageBaseline(t *testing.T) {
 	capChange := specWithChannel("x", "#one")
 	capChange.PlanCapabilities = &PlanCapabilities{LLMInputTokensPerDay: 40000, LLMInputTokensUsed: 3900}
 	require.False(t, liveUpdatableOnlyChange(base, capChange),
-		"a plan-cap change is not a live-updatable-only change")
+		"a capability change is not a live-updatable-only change")
 
 	// A channel change alongside a baseline move must still force a restart.
 	chChange := specWithChannel("x", "#two")

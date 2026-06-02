@@ -431,7 +431,7 @@ func TestBuildWiresBudgetRefreshWhenConfigured(t *testing.T) {
 
 	// With a URL + token, the refresher is wired.
 	withURL := *base
-	withURL.LLMBudgetURL = "http://sidecar.local/llm-budget"
+	withURL.LLMBudgetURL = "http://control-plane.local/llm-budget"
 	withURL.LLMBudgetToken = "tok"
 	b2, err := runtime.Build(&withURL, ircCfg, nil)
 	require.NoError(t, err)
@@ -444,7 +444,7 @@ func TestBuildNoBudgetRefreshWithoutCaps(t *testing.T) {
 		CommandPrefix:   "!",
 		AnthropicAPIKey: "sk-test",
 		AnthropicModel:  "claude-sonnet-4-6",
-		LLMBudgetURL:    "http://sidecar.local/llm-budget",
+		LLMBudgetURL:    "http://control-plane.local/llm-budget",
 		LLMBudgetToken:  "tok",
 	}
 	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}

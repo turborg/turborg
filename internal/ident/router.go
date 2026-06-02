@@ -11,18 +11,18 @@ import (
 )
 
 // routerReadHeaderTimeout bounds the header read on an accepted request so a
-// slow caller can't pin a connection. The only caller is the sidecar on the
-// same host, so this is generous.
+// slow caller can't pin a connection. The only caller is the ident responder on
+// the same host, so this is generous.
 const routerReadHeaderTimeout = 5 * time.Second
 
-// ServeRouter answers the sidecar's ident-backing lookups:
+// ServeRouter answers ident-backing lookups:
 //
 //	GET /ident?port=<localSourcePort>  → 200 text/plain <ident> | 404
 //
-// The sidecar resolves an inbound RFC-1413 query to (containerIP, sourcePort)
-// via conntrack, then asks the container that owns the connection — this router
-// — for the ident. Bound to TURBORG_IDENT_ROUTER_ADDR; the sidecar (host
-// network) reaches it on the container's bridge IP. Mirrors web_router.go.
+// An external RFC-1413 responder resolves an inbound ident query to
+// (hostIP, sourcePort), then asks the process that owns the connection — this
+// router — for the ident. Bound to TURBORG_IDENT_ROUTER_ADDR. Mirrors
+// web_router.go.
 //
 // Blocks until ctx is cancelled or the listener fails.
 func ServeRouter(ctx context.Context, addr string, reg *Registry) error {

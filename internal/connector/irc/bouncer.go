@@ -25,8 +25,8 @@ import (
 const serverTimeLayout = "2006-01-02T15:04:05.000Z"
 
 // activityHeartbeatInterval is how often the bouncer re-asserts owner
-// presence while a client is attached. Well under any free-tier idle
-// window (4h), so an attached client never lets the bot idle-pause. A
+// presence while a client is attached. Well under any reasonable idle
+// window, so an attached client never lets the bot idle-pause. A
 // var, not a const, so tests can shorten it.
 var activityHeartbeatInterval = 10 * time.Minute
 
@@ -697,7 +697,7 @@ func (b *Bouncer) Start(ctx context.Context) error {
 // connections are delivered by the caller via ServeConn instead of an accept
 // loop. This is the pooled-runtime path — one turborg-server process fronts
 // every tenant behind a single SNI/PROXY-v2 router, so per-tenant bouncers
-// must not each bind a port. Dedicated mode still uses Start (own host port).
+// must not each bind a port. Single-instance mode still uses Start (own host port).
 // Everything past the listener — auth, replay, state surfacing, keepalive —
 // is identical across both, so the bouncer behaviour is one source of truth.
 func (b *Bouncer) StartListenerless(ctx context.Context) error {

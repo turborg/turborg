@@ -4,7 +4,7 @@
 // policy, and — for LLM commands — an optional model override.
 //
 // The package is transport-agnostic: definitions arrive as JSON from the
-// tenant feed (pooled) or a TURBORG_COMMANDS env var (dedicated), are
+// tenant feed (pooled) or a TURBORG_COMMANDS env var (single-instance), are
 // decoded into Definition values, and built into agent.DynamicCommand
 // batches that the runtime swaps into a live registry via ReplaceDynamic.
 // Per-command guards are injected by the runtime (which owns owner-trust
@@ -52,7 +52,7 @@ const (
 )
 
 // Definition is one user-defined command. It is the byte-stable wire shape
-// shared by the pooled feed and the dedicated spawn payload.
+// shared by the pooled feed and the single-instance spawn payload.
 type Definition struct {
 	Name     string `json:"name"`
 	Type     Type   `json:"type"`

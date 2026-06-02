@@ -17,12 +17,12 @@ import (
 )
 
 // CommonParams are the per-tenant inputs the shared agent wiring consumes,
-// independent of where they were sourced (env for the dedicated CLI, the
+// independent of where they were sourced (env for the single-instance CLI, the
 // tenant feed for the pooled runtime) and independent of transport (port-bound
-// vs listenerless bouncer/gateway, sidecar-PUT vs control-plane-POST state).
+// vs listenerless bouncer/gateway, PUT vs POST state).
 //
 // It carries the wiring that historically drifted between the two runtimes:
-// the dedicated path built it in runtime.Build, the pooled path hand-rolled a
+// the single-instance path built it in runtime.Build, the pooled path hand-rolled a
 // subset in server.Tenant.buildConnectors, so connector features wired in one
 // place silently went missing in the other. WireCommon is now the single
 // owner of all of it.
@@ -60,7 +60,7 @@ type CommonParams struct {
 
 	// LLM provider powering LLM-type commands. Nil → those commands are
 	// skipped at build time. Shared across pooled tenants (a stateless HTTP
-	// client) and per-process for dedicated.
+	// client) and per-process for single-instance.
 	LLM llm.Provider
 
 	// LLMInputCap / LLMOutputCap are the rolling-24h token budget caps.
@@ -77,8 +77,8 @@ type CommonParams struct {
 
 	// ActivityHook fires on owner-presence signals the bouncer raises:
 	// a client attaching, and a periodic presence heartbeat while a client
-	// stays attached. Nil → the attach hook is not wired. Dedicated passes
-	// its Notifier.Hook (a per-event POST to the local sidecar); pooled
+	// stays attached. Nil → the attach hook is not wired. The single-instance
+	// path passes its Notifier.Hook (a per-event POST to ACTIVITY_URL); pooled
 	// passes a hook that marks the tenant active in the pool's coalescing
 	// aggregator (a per-event POST per tenant would hammer the control
 	// plane). The bot's own outbound traffic is NOT activity and has no
@@ -106,7 +106,7 @@ type GuardParams struct {
 }
 
 // WireCommon installs the connector-agnostic agent wiring shared by the
-// dedicated (cmd/turborg) and pooled (internal/server) runtimes onto an
+// single-instance (cmd/turborg) and pooled (internal/server) runtimes onto an
 // already-constructed agent + IRC connector: client limits, outbound throttle,
 // owner nudge, message store + event submitters, builtin commands, and the
 // command guard. It calls a.AddConnector itself.
@@ -115,7 +115,7 @@ type GuardParams struct {
 // gateway (listener vs router), bouncer listener mode, state-push transport —
 // and constructs the deps (LLM/activity/store) from its own config source.
 //
-// No process globals or shared mutable state: invoked once per dedicated
+// No process globals or shared mutable state: invoked once per single-instance
 // process and N times per pooled process, each call producing a fully
 // independent set of throttles/guards/submitters.
 func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slog.Logger) error {
@@ -184,7 +184,7 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 // into the agent's registry in place via ReplaceDynamic — an atomic, no-
 // reconnect hot reload. It is the single source of truth for turning command
 // Definitions into live handlers, shared by initial wiring (WireCommon), the
-// pooled runtime's feed-driven reload, and the dedicated runtime's command
+// pooled runtime's feed-driven reload, and the single-instance runtime's command
 // refresher, so the three can't drift in how a command is built or
 // access-gated. The registry-wide ignore/throttle guard set at wire time is
 // untouched; per-command access (owner / allowlist / everyone) is reapplied
@@ -201,7 +201,7 @@ func ApplyCommands(a *agent.Agent, defs []commands.Definition, provider llm.Prov
 
 // BuildBudgetedProvider wraps an llm.Provider with rolling-24h budget
 // enforcement when caps are set. The onUsage callback emits the
-// structured llm_usage log (scraped by the sidecar) and publishes
+// structured llm_usage log (for external scraping) and publishes
 // EventLLMUsage on the agent's bus (broadcast to WS clients).
 //
 // Idempotent: a provider that is already a *llm.BudgetedProvider is
@@ -253,7 +253,7 @@ func BuildBudgetedProvider(a *agent.Agent, provider llm.Provider, inputCap, outp
 
 // BuildLLMProvider mints an llm.Provider from a provider kind + endpoint +
 // key + default model. It is the single dispatcher both runtimes use so the
-// dedicated env loader and the pooled process select backends identically.
+// single-instance env loader and the pooled process select backends identically.
 //
 //   - "" / "anthropic": the Anthropic provider (back-compat default).
 //   - "openai_compat":  any OpenAI-Chat-Completions-compatible backend
@@ -285,7 +285,7 @@ func BuildLLMProvider(kind, baseURL, apiKey, model string) (llm.Provider, error)
 
 // NewAnthropicProvider builds the Anthropic LLM provider from an API key +
 // model. Returns (nil, nil) when the key is empty — the agent never fails for
-// lack of an LLM; !ask is simply not registered. Shared by the dedicated env
+// lack of an LLM; !ask is simply not registered. Shared by the single-instance env
 // loader and the pooled process so both mint the provider identically.
 func NewAnthropicProvider(apiKey, model string) (llm.Provider, error) {
 	if apiKey == "" {

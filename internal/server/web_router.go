@@ -13,13 +13,13 @@ import (
 // slow client can't pin a connection before the WS upgrade.
 const webRouterReadHeaderTimeout = 10 * time.Second
 
-// ServeWebGatewayRouter accepts the appui web-shell requests the sidecar proxy
+// ServeWebGatewayRouter accepts the web-shell requests an upstream proxy
 // forwards to the pool and routes each to the tenant it addresses. The path
-// carries the tenant id (`/c/<turborg_id>`) and the `?token=` query authorizes
+// carries the tenant id (`/c/<id>`) and the `?token=` query authorizes
 // the upgrade — unlike the bouncer router there's no PROXY-v2 / SNI to parse,
-// so this is a plain HTTP server. This is the pooled counterpart to a dedicated
-// container's own gateway port: one listener fronts every pooled tenant's web
-// shell, so the runtime doesn't reintroduce a per-tenant port pool.
+// so this is a plain HTTP server. This is the pooled counterpart to a
+// single-instance process's own gateway port: one listener fronts every pooled
+// tenant's web shell, so the runtime doesn't reintroduce a per-tenant port pool.
 //
 // Blocks until ctx is cancelled or the listener fails.
 func (s *Server) ServeWebGatewayRouter(ctx context.Context, addr string) error {

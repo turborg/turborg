@@ -22,7 +22,7 @@ const proxyHeaderReadTimeout = 5 * time.Second
 // the pool and routes each to the tenant it belongs to. HAProxy terminates the
 // wildcard TLS and sends a PROXY v2 header whose AUTHORITY TLV carries the
 // original TLS SNI (`<turborg_id>.bouncer.<domain>`); the connection payload is
-// plaintext IRC from there on. This is the pooled counterpart to a dedicated
+// plaintext IRC from there on. This is the pooled counterpart to a single-instance
 // container's own bouncer port — one listener fronts every pooled tenant, so
 // the runtime doesn't reintroduce a per-tenant port pool.
 //

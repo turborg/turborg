@@ -153,7 +153,7 @@ func parseChannelList(raw string) []string {
 // ApplyDefaults fills the operational fields a HAND-BUILT Settings leaves at
 // their zero value with the same defaults the env loader applies — so a Settings
 // built from a spec (the pooled runtime's settingsFromConnectorSpec) behaves
-// identically to the env-loaded dedicated path (CTCP auto-reply on, liveness
+// identically to the env-loaded single-instance path (CTCP auto-reply on, liveness
 // probing, reconnect escalation, …). The values mirror the `envDefault` tags
 // above; this is the single place the hand-built path picks them up.
 //

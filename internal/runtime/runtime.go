@@ -50,7 +50,7 @@ type Built struct {
 	// agent runs. Nil when the provider isn't budgeted or no endpoint is set.
 	BudgetRefresh *budgetrefresh.Refresher
 	// CommandRefresh hot-reloads the data-driven command set in place while the
-	// agent runs (the dedicated mirror of the pooled feed-driven reload). Nil
+	// agent runs (the single-instance mirror of the pooled feed-driven reload). Nil
 	// when COMMANDS_URL is unset (self-host: the boot set is fixed).
 	CommandRefresh *commandrefresh.Refresher
 }
@@ -82,12 +82,11 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	notifier := activity.New(s.ActivityURL, s.ActivityToken, log)
 	ircConn := irc.New(ircCfg, log, a.Events)
 
-	// State-webhook emitter (transport: PUT to STATE_WEBHOOK_URL, which the
-	// sidecar mirrors to accounts-api). Mirrors authoritative per-connector
-	// state whenever it changes; inert no-op when STATE_WEBHOOK_URL is unset.
-	// Wired before WireCommon so the connector's change hooks are observed from
-	// boot. This is the dedicated transport; the pooled runtime POSTs directly
-	// to the control plane instead.
+	// State-webhook emitter (transport: PUT to STATE_WEBHOOK_URL). Mirrors
+	// authoritative per-connector state whenever it changes; inert no-op when
+	// STATE_WEBHOOK_URL is unset. Wired before WireCommon so the connector's
+	// change hooks are observed from boot. This is the single-instance
+	// transport; the pooled runtime POSTs directly to the control plane instead.
 	stateClient := statepush.NewClient(s.StateWebhookURL, s.StateWebhookToken, log)
 	stateEmitter := statepush.NewEmitter(
 		stateClient,
@@ -102,7 +101,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	store, sink := buildMessageStore(s, log)
 	_ = sink // referenced for lifecycle parity; closing happens with the agent
 
-	// Dedicated activity transport: a per-event POST to the local sidecar via
+	// Single-instance activity transport: a per-event POST to ACTIVITY_URL via
 	// the Notifier. Only wired when configured; the pooled runtime supplies its
 	// own coalescing hook instead (per-event POSTs to the control plane don't
 	// scale across a pool).
@@ -187,7 +186,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	// Live budget refresh: when the provider is budgeted and a refresh endpoint
 	// is configured, poll it so the account baseline tracks sibling agents and
 	// this agent's pre-restart usage while it runs (the env seed above is only a
-	// boot-time snapshot). startedAt is sent as `since` so the control plane
+	// boot-time snapshot). startedAt is sent as `since` so the endpoint
 	// excludes what this process counts locally. nil when not budgeted/unset.
 	if bp, ok := provider.(*llm.BudgetedProvider); ok {
 		built.BudgetRefresh = budgetrefresh.New(
@@ -202,7 +201,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 
 	// Live command hot-reload: when COMMANDS_URL is set, poll the per-container
 	// commands endpoint and swap the dynamic command set in place — the same
-	// ReplaceDynamic the pooled runtime does from its feed, so a dedicated
+	// ReplaceDynamic the pooled runtime does from its feed, so a single-instance
 	// container picks up skill attach/detach/edit without a respawn/reconnect.
 	built.CommandRefresh = commandrefresh.New(
 		s.CommandsURL,
@@ -318,10 +317,10 @@ func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, lo
 // any) so the caller can own its lifecycle.
 //
 //   - MESSAGE_STORE_URL + MESSAGE_SINK_URL both set → HTTPStore
-//     (durable read + write through accounts-api).
+//     (durable read + write through the configured endpoints).
 //   - MESSAGE_SINK_URL set, MESSAGE_STORE_URL unset → MemoryStore for
 //     reads but writes still mirror through the sink (legacy half).
-//   - Neither set → MemoryStore only (self-host default).
+//   - Neither set → MemoryStore only (default).
 func buildMessageStore(s *config.Settings, log *slog.Logger) (messages.Store, *messagesink.Sink) {
 	if log == nil {
 		log = slog.Default()
@@ -351,7 +350,7 @@ func buildMessageStore(s *config.Settings, log *slog.Logger) (messages.Store, *m
 // sender — specifically EventMessageSent from agent.handle, where the
 // OutboundEnvelope has no Sender field (bot identity is implicit). The
 // receiving side validates nick as non-empty, so without this fallback
-// command replies (!ping → pong) silently 422'd at accounts-api and
+// command replies (!ping → pong) silently 422'd at the receiver and
 // never landed in the durable history. The callback shape lets us
 // re-resolve the nick on every event — handy when the bot renames
 // mid-session (NICK changes); avoids stamping the original boot-time
