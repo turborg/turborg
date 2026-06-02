@@ -661,7 +661,7 @@ func (c *Connector) bringUp(ctx context.Context) error {
 		dialTimeout = 20 * time.Second
 	}
 	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
-	cli, err := Dial(dctx, c.settings.Hostname, c.settings.Port, c.settings.UseTLS)
+	cli, err := Dial(dctx, c.settings.Hostname, c.settings.Port, c.settings.UseTLS, c.settings.SourceIP)
 	cancel()
 	if err != nil {
 		c.classifyFallback(ctx, err)

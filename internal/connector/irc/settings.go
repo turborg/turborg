@@ -19,6 +19,13 @@ type Settings struct {
 	Port     int    `env:"PORT"     envDefault:"6697"`
 	UseTLS   bool   `env:"USE_TLS"  envDefault:"true"`
 
+	// SourceIP, when set, is bound as the local address of the outbound IRC
+	// connection so the host SNAT (matched by source subnet) egresses on the
+	// tenant's assigned public IP. Empty = default route (single-IP hosts,
+	// unconfigured). Set by the pooled runtime per-tenant; also overridable via
+	// env for a dedicated/self-host bind.
+	SourceIP string `env:"SOURCE_IP"`
+
 	Nick     string `env:"NICK,required"`
 	Username string `env:"USERNAME"`
 	RealName string `env:"REAL_NAME" envDefault:"turborg agent"`

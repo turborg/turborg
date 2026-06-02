@@ -325,6 +325,7 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 	gatewayToken := t.spec.GatewayToken
 	ignoredNicks := t.spec.IgnoredNicks
 	cmds := t.spec.Commands
+	egressIP := t.spec.EgressIP
 	t.mu.Unlock()
 
 	for _, cs := range connectors {
@@ -339,6 +340,14 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			// the single-instance binary gets from env (QUIT brand + CTCP / bouncer
 			// auth-failure tightening) — all sourced from the tenant feed's caps.
 			t.applyTierSettings(settings, caps)
+			// Bind the tenant's assigned egress IP so its outbound IRC leaves on
+			// the right public IP (per-tenant egress round-robin). Empty/unresolved
+			// → default route; see egress.go.
+			if egressIP != "" {
+				if src := defaultEgressResolver.resolveSourceIP(egressIP); src != "" {
+					settings.SourceIP = src
+				}
+			}
 			// Wire the connector to the tenant-owned agent bus: the bouncer's
 			// outbound observer and the connector's join/part/topic/state events
 			// publish here, and the web gateway subscribes to the same bus so the
