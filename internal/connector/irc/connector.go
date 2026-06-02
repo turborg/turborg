@@ -57,6 +57,14 @@ type Connector struct {
 	// setClient().
 	clientMu sync.RWMutex
 	client   *Client
+	// identPort is the source port currently reported to identReporter for the
+	// live client, guarded by clientMu. Tracked separately from client so we can
+	// Clear the exact port we registered even after the conn is closed (a closed
+	// conn's LocalAddr is unreliable). 0 = nothing registered.
+	identPort int
+	// identReporter receives localPort→ident updates for the pooled RFC-1413
+	// responder. Nil in dedicated runtime / tests (reporting disabled).
+	identReporter IdentReporter
 
 	// machine is the per-connector upstream state machine. External
 	// surfaces (bouncer, web gateway) subscribe via UpstreamState() to
@@ -276,12 +284,38 @@ func (c *Connector) getClient() *Client {
 	return c.client
 }
 
+// SetIdentReporter installs the pooled ident reporter. Must be called before
+// Start so the first connect is reported. Nil (the default) disables ident
+// reporting — dedicated runtime + tests.
+func (c *Connector) SetIdentReporter(r IdentReporter) { c.identReporter = r }
+
 // setClient swaps the upstream client. Used by Start (initial dial) and
-// the reconnect supervisor (subsequent dials).
+// the reconnect supervisor (subsequent dials). It is the single chokepoint
+// for ident reporting: every successful connect installs a client (report its
+// source port → ident) and every teardown/failure installs nil (clear it).
 func (c *Connector) setClient(cli *Client) {
 	c.clientMu.Lock()
-	defer c.clientMu.Unlock()
 	c.client = cli
+	oldPort := c.identPort
+	newPort := 0
+	if cli != nil {
+		newPort = cli.LocalPort()
+	}
+	c.identPort = newPort
+	c.clientMu.Unlock()
+
+	// Report outside the lock — the registry has its own mutex, and connector
+	// lock ordering must never depend on it. SNAT preserves the source port, so
+	// newPort is exactly what the IRC server queries on :113.
+	if c.identReporter == nil {
+		return
+	}
+	if oldPort != 0 && oldPort != newPort {
+		c.identReporter.Clear(oldPort)
+	}
+	if newPort != 0 {
+		c.identReporter.Set(newPort, c.settings.EffectiveUsername())
+	}
 }
 
 // UpstreamState returns the per-connector upstream state machine.

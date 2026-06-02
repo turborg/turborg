@@ -16,6 +16,7 @@ import (
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/commands"
 	"github.com/turborg/turborg/internal/connector/irc"
+	"github.com/turborg/turborg/internal/ident"
 	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/messages"
 	"github.com/turborg/turborg/internal/messagesink"
@@ -116,6 +117,11 @@ type Tenant struct {
 	// (bouncer attach, message traffic). Nil when no control plane is set.
 	activity *activityAggregator
 
+	// idents is the shared (pool-wide) source-port → ident registry the
+	// connector reports into so the sidecar's RFC-1413 responder can name this
+	// tenant. Never nil (the Server always builds one).
+	idents *ident.Registry
+
 	// messageSink is the durable-message writer for the current run, owning a
 	// background flush goroutine. Captured so defaultWork can Close it on run
 	// end (goleak-clean across restarts). nil between runs / no control plane.
@@ -126,7 +132,7 @@ type Tenant struct {
 // workFactory builds the body to run (and re-run after a panic) from the
 // constructed Tenant; quarantineBase is the first backoff step (doubled per
 // consecutive failure, capped).
-func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger, quarantineBase time.Duration, workFactory func(*Tenant) func(context.Context) error, controlPlaneURL, controlPlaneToken string, llmProvider llm.Provider, activity *activityAggregator) *Tenant {
+func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger, quarantineBase time.Duration, workFactory func(*Tenant) func(context.Context) error, controlPlaneURL, controlPlaneToken string, llmProvider llm.Provider, activity *activityAggregator, idents *ident.Registry) *Tenant {
 	ctx, cancel := context.WithCancel(parent)
 	t := &Tenant{
 		ID:                spec.TurborgID,
@@ -141,6 +147,7 @@ func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger, quar
 		controlPlaneToken: controlPlaneToken,
 		llmProvider:       llmProvider,
 		activity:          activity,
+		idents:            idents,
 	}
 	t.work = workFactory(t)
 	safe.Go("supervise/"+spec.TurborgID, func() { t.supervise(ctx) })
@@ -341,6 +348,10 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			// router feeds it connections via ServeBouncerConn after PROXY-v2
 			// tenant resolution. Set before WireCommon adds the connector.
 			conn.SetBouncerListenerless(true)
+			// Report this tenant's upstream source port → ident so the sidecar's
+			// RFC-1413 responder can name it (kills the ~ prefix + satisfies
+			// "identd required" networks). Shared registry across all tenants.
+			conn.SetIdentReporter(t.idents)
 
 			// Durable message store (write-through to the control plane), so the
 			// bouncer welcome replay, web-shell scrollback, and the user's

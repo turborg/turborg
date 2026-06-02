@@ -21,6 +21,7 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
+	"github.com/turborg/turborg/internal/ident"
 	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/logging"
 	"github.com/turborg/turborg/internal/runtime"
@@ -72,6 +73,22 @@ behaviour yet.`,
 			return runE(cmd.OutOrStderr())
 		},
 	}
+}
+
+// startOptionalRouter launches a pool router (bouncer / web gateway / ident) in
+// a supervised goroutine when addr is non-empty; a non-graceful exit cancels the
+// process so we fail fast rather than serve tenants nobody can reach. Empty addr
+// is a no-op — the router is disabled (e.g. a file-source self-host).
+func startOptionalRouter(ctx context.Context, name, addr string, cancel context.CancelFunc, log *slog.Logger, serve func(string) error) {
+	if addr == "" {
+		return
+	}
+	safe.Go(name, func() {
+		if err := serve(addr); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error(name+" stopped", "err", err)
+			cancel()
+		}
+	})
 }
 
 func runE(stderr interface{ Write(p []byte) (int, error) }) error {
@@ -136,27 +153,20 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 	// alongside the tenant supervisor; a bind failure cancels the process so we
 	// fail fast rather than serve tenants nobody can attach to. Empty addr
 	// disables it (e.g. a file-source self-host that doesn't expose a bouncer).
-	if routerAddr := os.Getenv("TURBORG_BOUNCER_ROUTER_ADDR"); routerAddr != "" {
-		safe.Go("bouncer-router", func() {
-			if err := srv.ServeBouncerRouter(ctx, routerAddr); err != nil && !errors.Is(err, context.Canceled) {
-				log.Error("bouncer router stopped", "err", err)
-				cancel()
-			}
-		})
-	}
+	startOptionalRouter(ctx, "bouncer-router", os.Getenv("TURBORG_BOUNCER_ROUTER_ADDR"), cancel, log,
+		func(a string) error { return srv.ServeBouncerRouter(ctx, a) })
 
 	// Pooled web-shell ingress: one HTTP router fronts every tenant's `/ws`
 	// gateway (the sidecar proxy forwards `/c/<turborg_id>` here when the tenant
 	// has no dedicated container). Same fail-fast contract as the bouncer router.
-	// Empty addr disables it (e.g. a file-source self-host with no web shell).
-	if gatewayAddr := os.Getenv("TURBORG_GATEWAY_ROUTER_ADDR"); gatewayAddr != "" {
-		safe.Go("web-gateway-router", func() {
-			if err := srv.ServeWebGatewayRouter(ctx, gatewayAddr); err != nil && !errors.Is(err, context.Canceled) {
-				log.Error("web gateway router stopped", "err", err)
-				cancel()
-			}
-		})
-	}
+	startOptionalRouter(ctx, "web-gateway-router", os.Getenv("TURBORG_GATEWAY_ROUTER_ADDR"), cancel, log,
+		func(a string) error { return srv.ServeWebGatewayRouter(ctx, a) })
+
+	// Ident router: the sidecar's RFC-1413 responder resolves an inbound ident
+	// query to (this container's IP, source port) via conntrack, then asks here
+	// for the tenant's ident. Empty addr disables it (no sidecar / OSS self-host).
+	startOptionalRouter(ctx, "ident-router", os.Getenv("TURBORG_IDENT_ROUTER_ADDR"), cancel, log,
+		func(a string) error { return ident.ServeRouter(ctx, a, srv.Idents()) })
 
 	// Pool watchdog: periodic heap/goroutine/tenant sampling for observability
 	// and early warning (escalates to Warn above TURBORG_HEAP_WARN_BYTES). 0
