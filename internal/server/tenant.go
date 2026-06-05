@@ -577,15 +577,22 @@ func (t *Tenant) update(spec TenantSpec) {
 	// change to it alone is a no-op here. A command-set change still reloads in
 	// place. Anything else falls through to a restart.
 	if liveUpdatableOnlyChange(prev, spec) {
-		if commandSetsEqual(prev.Commands, spec.Commands) {
+		commandsChanged := !commandSetsEqual(prev.Commands, spec.Commands)
+		ignoresChanged := !reflect.DeepEqual(prev.IgnoredNicks, spec.IgnoredNicks)
+		if !commandsChanged && !ignoresChanged {
 			return // only the usage baseline moved — nothing to reconnect for
 		}
-		if t.reloadCommands(spec.Commands) {
-			t.log.Info("tenant commands reloaded in place", "commands", len(spec.Commands))
+		// Apply each changed facet in place. The command set swaps via
+		// ReplaceDynamic; the ignore list swaps the registry-wide guard. Either
+		// returning false means the tenant isn't running, so fall through to a
+		// restart that re-seeds everything from the new spec at build time.
+		okCommands := !commandsChanged || t.reloadCommands(spec.Commands)
+		okIgnores := !ignoresChanged || t.reloadGuard()
+		if okCommands && okIgnores {
+			t.log.Info("tenant settings reloaded in place",
+				"commands", len(spec.Commands), "ignored", len(spec.IgnoredNicks))
 			return
 		}
-		// Not currently running — fall through to a restart, which re-seeds the
-		// budget from the new spec at build time.
 	}
 
 	t.log.Info("tenant spec changed; restarting", "connectors", t.connectorTypes())
@@ -611,11 +618,14 @@ func commandsOnlyChange(a, b TenantSpec) bool {
 
 // liveUpdatableOnlyChange reports whether two differing specs differ in nothing
 // but fields that can be applied to a running tenant WITHOUT a reconnect: the
-// command set and the LLM-usage baseline (llm_*_tokens_used, which the feed
-// refreshes continuously). Both the command set and the baseline are zeroed
-// before comparison so a change confined to them returns true.
+// command set, the ignore list, and the LLM-usage baseline (llm_*_tokens_used,
+// which the feed refreshes continuously). The command set, the ignore list, and
+// the baseline are zeroed before comparison so a change confined to them returns
+// true. The ignore list only feeds the registry-wide command guard, which can be
+// hot-swapped in place, so an ignore edit must not drop the connection.
 func liveUpdatableOnlyChange(a, b TenantSpec) bool {
 	a.Commands, b.Commands = nil, nil
+	a.IgnoredNicks, b.IgnoredNicks = nil, nil
 	a.PlanCapabilities = capsWithoutTokenUsage(a.PlanCapabilities)
 	b.PlanCapabilities = capsWithoutTokenUsage(b.PlanCapabilities)
 	return reflect.DeepEqual(a, b)
@@ -669,6 +679,33 @@ func (t *Tenant) reloadCommands(defs []commands.Definition) bool {
 	platform, _, _ := splitNetwork(stringField(cs.Config, "network"))
 	// Same in-place swap the single-instance runtime's command refresher uses.
 	runtime.ApplyCommands(a, defs, t.llmProvider, owner, platform, t.log)
+	return true
+}
+
+// reloadGuard rebuilds the registry-wide guard (ignore list + per-sender
+// command throttle) and swaps it onto the live agent without a reconnect, so an
+// ignore-list edit takes effect in place. The throttle window is sourced from
+// the current caps so it is preserved across the swap. Returns false when the
+// tenant isn't running (no live agent), so the caller falls back to a restart.
+func (t *Tenant) reloadGuard() bool {
+	t.mu.Lock()
+	a := t.agentRef
+	caps := t.spec.PlanCapabilities
+	ignoredNicks := t.spec.IgnoredNicks
+	t.mu.Unlock()
+	if a == nil {
+		return false
+	}
+
+	var cmdMax, cmdWin int
+	if caps != nil {
+		cmdMax, cmdWin = caps.CommandMaxPerWindow, caps.CommandWindowSeconds
+	}
+	runtime.ApplyRegistryGuard(a, runtime.GuardParams{
+		IgnoredNicks:         ignoredNicks,
+		CommandMaxPerWindow:  cmdMax,
+		CommandWindowSeconds: cmdWin,
+	})
 	return true
 }
 
