@@ -199,6 +199,18 @@ func ApplyCommands(a *agent.Agent, defs []commands.Definition, provider llm.Prov
 	a.Commands.ReplaceDynamic(built)
 }
 
+// ApplyRegistryGuard rebuilds the registry-wide guard (ignore list + per-sender
+// command throttle) from p and swaps it onto a running agent. It lets an
+// operator's ignore-list edit take effect in place — no connection teardown —
+// the same way ApplyCommands hot-swaps the command set. The swap is atomic via
+// the registry's internal lock, so it is safe to call while the agent
+// dispatches. The throttle is rebuilt from p, so its window counters reset;
+// that is acceptable for an infrequent settings change and avoids threading a
+// live throttle through the swap.
+func ApplyRegistryGuard(a *agent.Agent, p GuardParams) {
+	a.Commands.SetGuard(buildRegistryGuard(p))
+}
+
 // BuildBudgetedProvider wraps an llm.Provider with rolling-24h budget
 // enforcement when caps are set. The onUsage callback emits the
 // structured llm_usage log (for external scraping) and publishes

@@ -301,3 +301,133 @@ func waitStr(t *testing.T, ch <-chan string) string {
 		return ""
 	}
 }
+
+func TestLiveUpdatableOnlyChangeAllowsIgnoreEdit(t *testing.T) {
+	base := specWithChannel("x", "#one")
+	base.IgnoredNicks = []string{"alice"}
+
+	// Only the ignore list moved — applicable in place, no reconnect.
+	ignoreEdit := specWithChannel("x", "#one")
+	ignoreEdit.IgnoredNicks = []string{"alice", "spammer"}
+	require.True(t, liveUpdatableOnlyChange(base, ignoreEdit),
+		"an ignore-list edit must be applied without a reconnect")
+
+	// An ignore edit alongside a connector change must still force a restart.
+	ignoreAndChannel := specWithChannel("x", "#two")
+	ignoreAndChannel.IgnoredNicks = ignoreEdit.IgnoredNicks
+	require.False(t, liveUpdatableOnlyChange(base, ignoreAndChannel),
+		"a connector change alongside an ignore edit is not live-updatable-only")
+}
+
+func TestReloadGuardFallsBackWhenNotRunning(t *testing.T) {
+	tn := &Tenant{ID: "t1", log: testLogger()}
+	require.False(t, tn.reloadGuard(),
+		"no live agent → guard reload defers to a restart")
+}
+
+// TestReloadGuardSwapsIgnoreInPlace is the fix: toggling the ignore list swaps
+// the registry-wide guard on the live agent with no reconnect, so an ignored
+// sender is blocked and an un-ignored one is allowed again immediately.
+func TestReloadGuardSwapsIgnoreInPlace(t *testing.T) {
+	a := agent.NewWithPrefix(testLogger(), "!")
+	a.Commands.SetMaxDynamic(-1)
+	cfg := &irc.Settings{Hostname: "irc.example", Nick: "bot"}
+	cfg.ApplyDefaults()
+	conn := irc.New(cfg, testLogger(), a.Events)
+	tn := &Tenant{
+		ID:  "t1",
+		log: testLogger(),
+		spec: TenantSpec{
+			Connectors: []ConnectorSpec{{Type: "irc", Config: map[string]any{"owner_mode": "self"}}},
+		},
+		agentRef: a,
+		ircConn:  conn,
+	}
+	require.True(t, tn.reloadCommands([]commands.Definition{staticCmd("ping", "pong")}))
+
+	ctx := context.Background()
+	send := func(sender string) bool {
+		out, err := a.Commands.Dispatch(ctx, &agent.InboundEnvelope{Text: "!ping", Sender: sender})
+		require.NoError(t, err)
+		return out != nil
+	}
+
+	// No ignore list yet → the sender is allowed.
+	require.True(t, tn.reloadGuard())
+	require.True(t, send("spammer"), "no ignore list → sender is allowed")
+
+	// Operator ignores the sender: the guard swaps in place, no reconnect.
+	tn.mu.Lock()
+	tn.spec.IgnoredNicks = []string{"spammer"}
+	tn.mu.Unlock()
+	require.True(t, tn.reloadGuard())
+	require.False(t, send("spammer"), "after the in-place swap the ignored sender is blocked")
+	require.True(t, send("alice"), "a non-ignored sender stays allowed")
+
+	// Operator un-ignores: the guard swaps back, the sender is allowed again.
+	tn.mu.Lock()
+	tn.spec.IgnoredNicks = nil
+	tn.mu.Unlock()
+	require.True(t, tn.reloadGuard())
+	require.True(t, send("spammer"), "after un-ignore the sender is allowed again")
+}
+
+// TestUpdateIgnoreOnlyReloadsWithoutRestart is the no-reconnect deliverable for
+// ignore edits: changing ONLY the ignore list swaps the live guard in place; the
+// work loop is never re-run, so the IRC session (and attached clients) survive.
+func TestUpdateIgnoreOnlyReloadsWithoutRestart(t *testing.T) {
+	var runs atomic.Int32
+	base := TenantSpec{
+		TurborgID:   "x",
+		RuntimeMode: "pooled",
+		Connectors:  []ConnectorSpec{{Type: "irc", Config: map[string]any{"owner_mode": "self"}, Secrets: map[string]any{}}},
+	}
+
+	events := make(chan TenantEvent)
+	src := &StaticSource{Tenants: []TenantSpec{base}, Events: events}
+	srv := New(src, testLogger())
+	srv.workFactory = func(tn *Tenant) func(context.Context) error {
+		return func(ctx context.Context) error {
+			runs.Add(1)
+			// Publish a live agent so an in-place guard reload can find it.
+			a := agent.NewWithPrefix(tn.log, "!")
+			a.Commands.SetMaxDynamic(-1)
+			cfg := &irc.Settings{Hostname: "irc.example", Nick: "bot"}
+			cfg.ApplyDefaults()
+			conn := irc.New(cfg, tn.log, a.Events)
+			tn.mu.Lock()
+			tn.agentRef = a
+			tn.ircConn = conn
+			tn.mu.Unlock()
+			<-ctx.Done()
+			tn.mu.Lock()
+			tn.agentRef = nil
+			tn.ircConn = nil
+			tn.mu.Unlock()
+			return ctx.Err()
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+
+	require.Eventually(t, func() bool { return runs.Load() == 1 }, 2*time.Second, 5*time.Millisecond)
+
+	// Ignore-only upsert: must reload the guard in place, not restart.
+	ignoreSpec := base
+	ignoreSpec.IgnoredNicks = []string{"spammer"}
+	events <- TenantEvent{Kind: TenantUpserted, Spec: ignoreSpec}
+	require.Never(t, func() bool { return runs.Load() != 1 }, 200*time.Millisecond, 20*time.Millisecond,
+		"an ignore-only change must never restart the work loop")
+
+	// A connector change still restarts.
+	chSpec := ignoreSpec
+	chSpec.Connectors = []ConnectorSpec{{Type: "irc", Config: map[string]any{"owner_mode": "self", "channels": []any{"#two"}}, Secrets: map[string]any{}}}
+	events <- TenantEvent{Kind: TenantUpserted, Spec: chSpec}
+	require.Eventually(t, func() bool { return runs.Load() == 2 }, 2*time.Second, 10*time.Millisecond,
+		"a connector change must restart the work loop")
+
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+}
