@@ -474,7 +474,7 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (g *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	g.metMu.Lock()
 	conns := g.metrics.connections
 	fails := g.metrics.authFailures
