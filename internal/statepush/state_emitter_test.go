@@ -113,10 +113,11 @@ func TestStateEmitter_NotifyChangeFiresPutWithZeroDebounce(t *testing.T) {
 		return statepush.Snapshot{
 			Connectors: map[string]statepush.ConnectorSnapshot{
 				"irc": {
-					State:    "registered",
+					State:    "disconnected_banned",
 					Since:    time.Unix(0, 0).UTC(),
 					Channels: []statepush.ChannelSnapshot{statepush.NewChannelSnapshot("#a", "")},
 					Nick:     "stefan",
+					Reason:   "Unsolicited advertisements/mass abuse.",
 				},
 			},
 		}
@@ -134,8 +135,9 @@ func TestStateEmitter_NotifyChangeFiresPutWithZeroDebounce(t *testing.T) {
 	var got statepush.Snapshot
 	require.NoError(t, json.Unmarshal(rec.bodyAt(0), &got))
 	require.Contains(t, got.Connectors, "irc")
-	assert.Equal(t, "registered", got.Connectors["irc"].State)
+	assert.Equal(t, "disconnected_banned", got.Connectors["irc"].State)
 	assert.Equal(t, "stefan", got.Connectors["irc"].Nick)
+	assert.Equal(t, "Unsolicited advertisements/mass abuse.", got.Connectors["irc"].Reason)
 	require.Len(t, got.Connectors["irc"].Channels, 1)
 	assert.Equal(t, "#a", got.Connectors["irc"].Channels[0].Name)
 }
