@@ -3,7 +3,7 @@ module github.com/turborg/turborg
 go 1.26.3
 
 require (
-	github.com/anthropics/anthropic-sdk-go v1.45.0
+	github.com/anthropics/anthropic-sdk-go v1.46.0
 	github.com/caarlos0/env/v11 v11.4.1
 	github.com/coder/websocket v1.8.14
 	github.com/google/uuid v1.6.0
