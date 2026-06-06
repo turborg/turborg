@@ -17,6 +17,13 @@ type Client struct {
 	reader *bufio.Reader
 	wmu    sync.Mutex
 
+	// tlsCfg non-nil means the TLS handshake is deferred: Dial returned right
+	// after the bare TCP connect — so the local source port is already known —
+	// and Handshake completes the negotiation. nil means plaintext, or the
+	// handshake already ran. ServerName is filled in by dial so the deferred
+	// Handshake still verifies the cert hostname.
+	tlsCfg *tls.Config
+
 	logMu sync.RWMutex
 	log   *slog.Logger
 }
@@ -68,25 +75,55 @@ func dial(ctx context.Context, host string, port int, useTLS bool, sourceIP stri
 	if ip := net.ParseIP(sourceIP); ip != nil {
 		nd.LocalAddr = &net.TCPAddr{IP: ip}
 	}
-	var conn net.Conn
-	var err error
+	// Always establish the bare TCP connection first, even for TLS. The local
+	// source port is assigned at connect, and an IRC server probes our :113
+	// ident the moment it accepts the TCP connection — i.e. before our TLS
+	// handshake finishes. Returning here lets the caller register that port with
+	// the ident responder, then complete the handshake via Handshake(). Folding
+	// the handshake into the dial (the old tls.Dialer path) registered the port
+	// only after the handshake and lost the race, yielding a ~-prefixed ident.
+	conn, err := nd.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("irc dial %s: %w", addr, err)
+	}
+	c := &Client{
+		conn:   conn,
+		reader: bufio.NewReaderSize(conn, 4096),
+	}
 	if useTLS {
 		cfg := tlsCfg
 		if cfg == nil {
 			cfg = &tls.Config{MinVersion: tls.VersionTLS12}
 		}
-		d := &tls.Dialer{NetDialer: &nd, Config: cfg}
-		conn, err = d.DialContext(ctx, "tcp", addr)
-	} else {
-		conn, err = nd.DialContext(ctx, "tcp", addr)
+		// tls.Dialer auto-filled ServerName from the dial host; tls.Client does
+		// not, so set it ourselves or cert verification fails. Clone first to
+		// avoid mutating a caller-supplied config.
+		if cfg.ServerName == "" {
+			cfg = cfg.Clone()
+			cfg.ServerName = host
+		}
+		c.tlsCfg = cfg
 	}
-	if err != nil {
-		return nil, fmt.Errorf("irc dial %s: %w", addr, err)
+	return c, nil
+}
+
+// Handshake completes a deferred TLS handshake on a connection returned by Dial,
+// and is a no-op on a plaintext connection. Separating it from the TCP connect
+// is what lets the caller register the (already-assigned) local source port with
+// the ident responder before the IRC server's :113 probe — which arrives on
+// TCP-accept, ahead of this handshake — has to be answered.
+func (c *Client) Handshake(ctx context.Context) error {
+	if c.tlsCfg == nil {
+		return nil
 	}
-	return &Client{
-		conn:   conn,
-		reader: bufio.NewReaderSize(conn, 4096),
-	}, nil
+	tlsConn := tls.Client(c.conn, c.tlsCfg)
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		return fmt.Errorf("irc tls handshake %s: %w", c.tlsCfg.ServerName, err)
+	}
+	c.conn = tlsConn
+	c.reader = bufio.NewReaderSize(tlsConn, 4096)
+	c.tlsCfg = nil
+	return nil
 }
 
 func (c *Client) WriteLine(line string) error {

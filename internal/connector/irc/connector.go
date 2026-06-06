@@ -296,11 +296,24 @@ func (c *Connector) SetIdentReporter(r IdentReporter) { c.identReporter = r }
 func (c *Connector) setClient(cli *Client) {
 	c.clientMu.Lock()
 	c.client = cli
-	oldPort := c.identPort
+	c.clientMu.Unlock()
+
 	newPort := 0
 	if cli != nil {
 		newPort = cli.LocalPort()
 	}
+	c.reportIdentPort(newPort)
+}
+
+// reportIdentPort updates the RFC-1413 source-port→ident mapping, clearing the
+// previously reported port if it changed. It is split out of setClient so the
+// connector can report the port right after the TCP connect — before the TLS
+// handshake — without installing the (not-yet-usable) client for writes.
+// bringUp calls it once early, then setClient calls it again on install; the
+// repeat Set for the same port is idempotent.
+func (c *Connector) reportIdentPort(newPort int) {
+	c.clientMu.Lock()
+	oldPort := c.identPort
 	c.identPort = newPort
 	c.clientMu.Unlock()
 
@@ -662,11 +675,29 @@ func (c *Connector) bringUp(ctx context.Context) error {
 	}
 	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	cli, err := Dial(dctx, c.settings.Hostname, c.settings.Port, c.settings.UseTLS, c.settings.SourceIP)
-	cancel()
 	if err != nil {
+		cancel()
 		c.classifyFallback(ctx, err)
 		return err
 	}
+
+	// Register the source port with the ident responder now — after the TCP
+	// connect (the port is already assigned) but before the TLS handshake. The
+	// IRC server probes :113 the instant it accepts the TCP connection, which is
+	// during, not after, our handshake; registering here is what lets the pooled
+	// responder answer with the verified ident instead of HIDDEN-USER. On
+	// handshake failure setClient(nil) clears it again.
+	c.reportIdentPort(cli.LocalPort())
+
+	if err := cli.Handshake(dctx); err != nil {
+		cancel()
+		_ = cli.Close()
+		c.setClient(nil)
+		c.classifyFallback(ctx, err)
+		return err
+	}
+	cancel()
+
 	cli.SetLog(c.log)
 	c.setClient(cli)
 
