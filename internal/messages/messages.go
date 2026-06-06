@@ -1,11 +1,11 @@
 // Package messages defines the durable channel-history seam turborg
 // uses for replay (on bouncer / WS attach) and on-demand scrollback
 // (CHATHISTORY for IRC clients, the WS `history` op for the bundled
-// reference UI and downstream UIs like xshellz's Angular client).
+// reference UI and any downstream client).
 //
 // Two implementations ship in this package:
 //
-//   - MemoryStore — bounded per-channel ring, the self-host default.
+//   - MemoryStore — bounded per-channel ring, the default.
 //     History is lost on restart; cap is 200 lines per channel,
 //     mirroring the prior in-memory rings the bouncer and gateway each
 //     held independently.

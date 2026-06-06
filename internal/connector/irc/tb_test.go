@@ -113,7 +113,7 @@ func TestTBSummarizeZeroCap(t *testing.T) {
 	h := newTBHandler(slog.Default())
 	h.setLLM(&fakeLLM{response: "ok"})
 	_, err := h.tbSummarize(context.Background(), "#test", 0, 0, messages.NewMemoryStore(100))
-	assert.ErrorContains(t, err, "not available on your plan")
+	assert.ErrorContains(t, err, "not enabled")
 }
 
 func TestTBSummarizeEmptyChannel(t *testing.T) {

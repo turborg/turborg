@@ -5,7 +5,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Go ≥1.26](https://img.shields.io/badge/go-%E2%89%A51.26-00ADD8.svg)](https://go.dev/dl/)
 [![CI](https://github.com/turborg/turborg/actions/workflows/ci.yml/badge.svg)](https://github.com/turborg/turborg/actions/workflows/ci.yml)
-[![Coverage](https://img.shields.io/badge/coverage-95%25-brightgreen.svg)](.testcoverage.yml)
+[![Coverage](https://img.shields.io/badge/coverage-94%25-brightgreen.svg)](.testcoverage.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/turborg/turborg)](https://goreportcard.com/report/github.com/turborg/turborg)
 
 ## What it does
@@ -14,7 +14,7 @@ turborg connects an IRC nick to a network, joins channels, runs commands you reg
 
 - **A real IRC connector** — TLS, SASL PLAIN, NickServ identify, IRCv3 `server-time` + `account-tag`, full PRIVMSG / JOIN / PART / KICK / NICK / TOPIC tracking, per-channel state cached from the wire.
 - **A built-in IRC bouncer** — local clients connect to the bot's loopback port, authenticate with a password, and tunnel through the bot's upstream session. The bot stays in control while a human can lurk and chat from their own client.
-- **A WebSocket gateway + reference web UI** — vanilla-JS single-page client at `/` with channel sidebar, member list, slash commands, IndexedDB-backed scrollback, browser notifications. The protocol is stable and documented so SaaS deployments can swap in their own UI.
+- **A WebSocket gateway + reference web UI** — vanilla-JS single-page client at `/` with channel sidebar, member list, slash commands, IndexedDB-backed scrollback, browser notifications. The protocol is stable and documented so embedders can swap in their own UI.
 - **A normalized `Envelope`** — the same handler that runs on IRC will also run on Discord / Telegram / Web when those connectors land.
 - **Data-driven commands** — the bot ships with none. Define commands as data (a trigger name, a `static` or `llm` type, a template, and an access policy); they're loaded from config and dispatched at runtime. No recompile to add or change one.
 - **Optional LLM, not the centerpiece** — point a command at an LLM (Anthropic, or any OpenAI-compatible endpoint via the router) and it answers prompts. Leave the LLM unset and the rest of the bot doesn't care.
@@ -162,17 +162,27 @@ LLM providers are **optional**. turborg runs perfectly fine as a pure command-dr
 
 ```
 turborg/
-├── cmd/turborg/                 entry point — wires cobra + config + runtime
+├── cmd/
+│   ├── turborg/                 single-bot entry point — cobra + config + runtime
+│   ├── turborg-server/          pooled runtime — many bots in one process
+│   ├── devirc/                  tiny IRC stub for local dev
+│   └── loadgen/                 footprint/load harness for the pooled runtime
 ├── examples/turborg_irc/        minimal embeddable example (runnable)
 ├── internal/
 │   ├── agent/                   Agent, EventBus, CommandRegistry, Envelope
 │   ├── connector/irc/           IRC connector + bouncer + protocol + state
-│   ├── llm/anthropic/           Anthropic Claude with streaming + prompt caching
+│   ├── llm/                     Provider interface + budget; anthropic/ + openaicompat/
 │   ├── web/                     WebSocket gateway + embedded reference UI
+│   ├── commands/                data-driven command definitions → handlers/guards
+│   ├── messages/ messagesink/   channel-history store + durable forwarding
+│   ├── statepush/ activity/     optional state + activity webhooks
+│   ├── budgetrefresh/ commandrefresh/  optional live budget + command hot-reload
+│   ├── ident/                   source-port → ident registry (RFC-1413 backing)
+│   ├── server/                  pooled multi-instance runtime internals
 │   ├── config/                  TURBORG_* settings (env-driven)
 │   ├── runtime/                 build the wired agent from settings
 │   ├── hive/                    Hive client (noop stub today)
-│   ├── logging/                 slog handler factory
+│   ├── logging/ safe/           slog handler factory + goroutine helpers
 │   └── version/                 single Version constant
 ├── tests/fixtures/              FakeIRCServer + FakeConnector for tests
 └── .github/workflows/           ci + release + cla
@@ -187,7 +197,7 @@ make cover-gate            # enforce per-package + total thresholds (.testcovera
 make lint                  # golangci-lint run ./...
 ```
 
-CI runs the same gates plus a Go 1.26 test job and a build smoke test. **Total coverage gate: ≥ 95%.**
+CI runs the same gates plus a Go 1.26 test job and a build smoke test. **Total coverage gate: ≥ 94%.**
 
 ## Contributing
 

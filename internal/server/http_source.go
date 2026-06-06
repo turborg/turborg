@@ -13,18 +13,18 @@ import (
 	"github.com/turborg/turborg/internal/safe"
 )
 
-// HTTPSource feeds tenants from the hosted control plane (accounts-api),
-// the xshellz production TenantSource (plan WS1 F2 / WS2 M5). It fetches the
-// snapshot of pooled tenants assigned to this host and watches for changes.
+// HTTPSource feeds tenants from a control plane over HTTP — the production
+// TenantSource. It fetches the snapshot of pooled tenants assigned to this host
+// and watches for changes.
 //
 // Watch is poll-and-diff rather than SSE: it re-fetches the snapshot every
 // Interval and emits the delta. That trades a few seconds of propagation
 // latency for far less moving infrastructure (no long-lived stream or
-// server-side broadcast) and trivially survives accounts-api restarts. An
+// server-side broadcast) and trivially survives control-plane restarts. An
 // SSE/long-poll upgrade can replace the poll loop later without changing the
 // TenantSource contract.
 type HTTPSource struct {
-	// BaseURL is the internal API root, e.g. https://accounts-api/v1/internal
+	// BaseURL is the internal API root, e.g. https://control-plane/v1/internal
 	BaseURL string
 	Bearer  string
 	HostID  string

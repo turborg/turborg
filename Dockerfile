@@ -22,9 +22,9 @@ RUN CGO_ENABLED=0 go build \
     -ldflags="-s -w -X github.com/turborg/turborg/internal/version.Version=${VERSION}" \
     -o /turborg ./cmd/turborg
 
-# turborg-server: the pooled multi-tenant runtime. Shipped in the same image
-# so the hosted sidecar can run either binary — it overrides the entrypoint to
-# /turborg-server on pooled hosts. Single-tenant / OSS use keeps /turborg.
+# turborg-server: the pooled multi-instance runtime. Shipped in the same image
+# so an operator can run either binary — override the entrypoint to
+# /turborg-server to run a pool. Single-bot use keeps the default /turborg.
 RUN CGO_ENABLED=0 go build \
     -trimpath \
     -ldflags="-s -w -X github.com/turborg/turborg/internal/version.Version=${VERSION}" \

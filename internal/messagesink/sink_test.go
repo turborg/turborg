@@ -18,14 +18,13 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// TestSinkWireShape pins the contract with sidecar:
+// TestSinkWireShape pins the contract with the receiver:
 //   - POST to the configured endpoint, no path mutation
 //   - Authorization: Bearer <token>
 //   - Content-Type: application/json
 //   - Body: {"messages":[{msg_id, channel, nick, text, ts, kind?}, ...]}
 //
-// Any drift here breaks turborg → sidecar; the corresponding test in
-// sidecar/messages_sink_test.go pins the other end of the same wire.
+// Any drift here breaks the receiver's ingestion of this wire shape.
 func TestSinkWireShape(t *testing.T) {
 	var (
 		mu     sync.Mutex
@@ -96,7 +95,7 @@ func TestSinkWireShape(t *testing.T) {
 
 // TestSinkNilWhenUnconfigured matches the cap_hit + statepush
 // convention: missing env = nil constructor = silent no-op upstream.
-// Lets self-host turborg run without a SaaS backplane.
+// Lets turborg run without a message-store backend.
 func TestSinkNilWhenUnconfigured(t *testing.T) {
 	if got := New("", "tok", nil); got != nil {
 		t.Error("empty endpoint should yield nil sink")
@@ -153,7 +152,7 @@ func TestSizeTriggersFlushAheadOfTicker(t *testing.T) {
 }
 
 // TestNon2xxResponseDoesNotPanic exercises the error branch in post():
-// the sink-side endpoint can answer 4xx/5xx (accounts-api outage,
+// the sink-side endpoint can answer 4xx/5xx (receiver outage,
 // auth drift, etc.) and we must absorb it best-effort instead of
 // crashing the gateway. msg_id idempotency on the receiving side
 // makes a future retry harmless so we don't bother with one here.

@@ -140,7 +140,7 @@ func TestMakeStoreSubmitterEmptyChannelNoop(t *testing.T) {
 // command replies (!ping → pong) attribute correctly to the bot.
 // OutboundEnvelope has no Sender field — the bot is implicit — so the
 // submitter must consult the botNick callback to populate the
-// row's nick. accounts-api's IngestMessageEntry validator rejects
+// row's nick. The receiver's validator rejects an
 // empty nick with 422, which silently dropped every command reply
 // until this seam was added.
 func TestMakeStoreSubmitterOutboundUsesBotNick(t *testing.T) {

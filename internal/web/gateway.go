@@ -29,7 +29,7 @@ const (
 )
 
 // activityHeartbeatInterval is how often an engaged web session
-// re-asserts owner presence. Well under any free-tier idle window (4h),
+// re-asserts owner presence. Well under any reasonable idle window,
 // so an engaged, open dashboard never lets the bot idle-pause. A var,
 // not a const, so tests can shorten it.
 var activityHeartbeatInterval = 10 * time.Minute
@@ -77,11 +77,10 @@ type Options struct {
 	RateLimiter *irc.RateLimiter
 	Log         *slog.Logger
 
-	// IdleShutdownSeconds + OnIdleShutdown wire the free-tier auto-pause
-	// path: when both are set and the client count drops to zero, the
-	// gateway starts a timer; if no client reconnects within the window,
-	// OnIdleShutdown fires (the SaaS sidecar maps that to a docker
-	// stop).
+	// IdleShutdownSeconds + OnIdleShutdown wire an auto-pause path: when
+	// both are set and the client count drops to zero, the gateway starts
+	// a timer; if no client reconnects within the window, OnIdleShutdown
+	// fires (an embedder can map that to a process/container stop).
 	IdleShutdownSeconds int
 	OnIdleShutdown      func()
 
@@ -230,7 +229,7 @@ func (g *Gateway) Subscribe(bus *agent.EventBus) {
 
 // Handler returns the gateway's HTTP routes — /ws (WebSocket), /health,
 // /metrics, and the static UI. Serve mounts it on the gateway's own listener
-// (dedicated / single-tenant); the pooled runtime mounts the SAME handler
+// (single-instance / single-tenant); the pooled runtime mounts the SAME handler
 // behind its per-tenant router. One route set + one handler chain for both
 // modes — a change here affects both, no reimplementation.
 func (g *Gateway) Handler() http.Handler {
@@ -366,7 +365,7 @@ func (g *Gateway) handleWS(w http.ResponseWriter, r *http.Request) {
 	g.metMu.Unlock()
 	g.log.Info("web auth success", "ip", ip)
 	// A bare handshake is NOT activity — opening the dashboard (or a tab
-	// left sitting for hours) must not keep a free-tier bot alive. The
+	// left sitting for hours) must not keep an idle-pausing bot alive. The
 	// session only starts counting once the owner actually sends a
 	// message or /tb (see readLoop), after which this heartbeat keeps it
 	// active for the session's duration.
@@ -607,7 +606,7 @@ func (g *Gateway) allowByPolicy(ircCmd string) (allow bool, reason string, kind 
 
 // denyAction sends a policy_denied event to the originating client and
 // emits a cap_hit structured log line for telemetry pipelines. The log
-// line is the canonical signal a sidecar log-watcher (or any future
+// line is the canonical signal a log-watcher (or any future
 // metrics scraper) consumes — never log the user-facing reason from any
 // other path, so cap_hit stays the single source of truth.
 //
@@ -823,9 +822,8 @@ func (g *Gateway) dispatchInbound(ctx context.Context, c *client, p map[string]a
 }
 
 // handleHistoryOp answers a `{op: "history", channel, before, limit}`
-// scrollback request from a WS client. The infinite-scroll UI in the
-// reference + appui front-ends fires this when the user nears the top
-// of the channel pane. Wire shape:
+// scrollback request from a WS client. An infinite-scroll UI fires
+// this when the user nears the top of the channel pane. Wire shape:
 //
 //	inbound:  {op:"history", channel:"#x", before:"2026-05-21T12:00:00.000Z", limit:200}
 //	outbound: {op:"history_result", channel, messages:[{nick,text,ts,id}], has_more:bool}
@@ -983,7 +981,7 @@ func (g *Gateway) handleTBSummarize(ctx context.Context, c *client, channel stri
 		return
 	}
 	if cap <= 0 {
-		g.sendTo(ctx, c, map[string]any{"op": "tb_error", "message": "/tb summarize is not available on your plan."})
+		g.sendTo(ctx, c, map[string]any{"op": "tb_error", "message": "/tb summarize is not enabled."})
 		return
 	}
 

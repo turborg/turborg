@@ -1,9 +1,7 @@
 // Package messagesink holds the HTTP plumbing turborg uses to forward
-// recorded channel messages to a configured sink endpoint. In the
-// xshellz SaaS deployment that endpoint is the sidecar's per-container
-// /messages handler, which in turn batches upstream to accounts-api;
-// in self-host the sink is unconfigured (TURBORG_MESSAGE_SINK_URL
-// empty) and recording stops at the gateway's in-memory ring.
+// recorded channel messages to a configured sink endpoint for durable
+// storage. When the sink is unconfigured (TURBORG_MESSAGE_SINK_URL
+// empty) recording stops at the gateway's in-memory ring.
 //
 // The contract is documented at the env-var level — operators point
 // TURBORG_MESSAGE_SINK_URL at any HTTP receiver that accepts the
@@ -20,9 +18,7 @@ import (
 	"time"
 )
 
-// Entry is the wire shape we POST to the sink. Mirrors the
-// MessageEntry the sidecar handler expects and the
-// IngestMessageEntry accounts-api ingests.
+// Entry is the wire shape we POST to the sink.
 type Entry struct {
 	MsgID   string         `json:"msg_id"`
 	Channel string         `json:"channel"`
@@ -33,9 +29,8 @@ type Entry struct {
 	Meta    map[string]any `json:"meta,omitempty"`
 }
 
-// flush triggers + batch-size + interval. Tuned for the "1s/10 msgs"
-// behaviour described in accounts-api's dev/PLAN-message-store.md.
-// At low msg-rate channels the 1s ticker is the rate-limiting flush;
+// flush triggers + batch-size + interval. Tuned for "1s/10 msgs"
+// behaviour. At low msg-rate channels the 1s ticker is the rate-limiting flush;
 // at high msg-rate channels the size threshold kicks first and keeps
 // per-batch latency bounded.
 const (

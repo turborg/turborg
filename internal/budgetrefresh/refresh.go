@@ -4,8 +4,8 @@
 // The in-process TokenBudget counts exactly what THIS process consumes, but
 // the cap is meant to hold across the whole account/window — including sibling
 // agents and this agent's own pre-restart usage. Those live in the control
-// plane, not in memory. This package polls the control plane (via the local
-// sidecar, the same transport the message store uses) and pushes the latest
+// plane, not in memory. This package polls the control plane (the configured
+// HTTP endpoint, same transport the message store uses) and pushes the latest
 // "everyone else" total into the budget as its baseline.
 //
 // Wire contract the operator must serve at the configured URL:

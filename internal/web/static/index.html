@@ -1430,11 +1430,19 @@
         pendingRequestContext.delete(sourceOp);
         break;
       }
-      case "nick":
-        for (const ch of channels.values()) {
+      case "nick": {
+        // IRC NICK carries no channel — it applies to every channel the
+        // user shares with us. Collect the channels where `ev.old` was a
+        // member as we rename them, then surface the "is now known as"
+        // notice to ONLY those tabs. Fanning it to every open tab (the
+        // old behavior) leaked unrelated nick changes into whatever tab
+        // happened to be active.
+        const affected = [];
+        for (const [name, ch] of channels.entries()) {
           if (ch.members?.has(ev.old)) {
             ch.members.set(ev.new, ch.members.get(ev.old));
             ch.members.delete(ev.old);
+            affected.push(name);
           }
         }
         if (ev.old === myNick) {
@@ -1447,12 +1455,13 @@
           appendSystem(SERVER_TAB, "→ /nick", `accepted: now ${ev.new}`);
           pendingRequestContext.delete("nick");
         }
-        for (const name of channels.keys()) {
+        for (const name of affected) {
           if (name === SERVER_TAB) continue;
           appendSystem(name, ev.old, `is now known as ${ev.new}`);
         }
         renderMembers();
         break;
+      }
       case "topic": {
         const ch = ensureChannel(ev.channel);
         ch.topic = ev.topic;

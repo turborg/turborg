@@ -19,6 +19,13 @@ type Settings struct {
 	Port     int    `env:"PORT"     envDefault:"6697"`
 	UseTLS   bool   `env:"USE_TLS"  envDefault:"true"`
 
+	// SourceIP, when set, is bound as the local address of the outbound IRC
+	// connection so the host SNAT (matched by source subnet) egresses on the
+	// tenant's assigned public IP. Empty = default route (single-IP hosts,
+	// unconfigured). Set by the pooled runtime per-tenant; also overridable via
+	// env for a dedicated/self-host bind.
+	SourceIP string `env:"SOURCE_IP"`
+
 	Nick     string `env:"NICK,required"`
 	Username string `env:"USERNAME"`
 	RealName string `env:"REAL_NAME" envDefault:"turborg agent"`
@@ -153,7 +160,7 @@ func parseChannelList(raw string) []string {
 // ApplyDefaults fills the operational fields a HAND-BUILT Settings leaves at
 // their zero value with the same defaults the env loader applies — so a Settings
 // built from a spec (the pooled runtime's settingsFromConnectorSpec) behaves
-// identically to the env-loaded dedicated path (CTCP auto-reply on, liveness
+// identically to the env-loaded single-instance path (CTCP auto-reply on, liveness
 // probing, reconnect escalation, …). The values mirror the `envDefault` tags
 // above; this is the single place the hand-built path picks them up.
 //

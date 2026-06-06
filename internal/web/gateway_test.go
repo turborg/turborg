@@ -1250,7 +1250,7 @@ func TestTBOpSummarizeZeroCap(t *testing.T) {
 
 	got := readJSON(t, conn)
 	assert.Equal(t, "tb_error", got["op"])
-	assert.Contains(t, got["message"], "not available on your plan")
+	assert.Contains(t, got["message"], "not enabled")
 }
 
 func TestTBOpTLDRSuccess(t *testing.T) {
