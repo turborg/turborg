@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.15.2](https://github.com/turborg/turborg/compare/v0.15.1...v0.15.2) (2026-06-06)
+
+
+### Bug Fixes
+
+* **server:** apply ignore-list edits in place without a reconnect ([#86](https://github.com/turborg/turborg/issues/86)) ([35f2c86](https://github.com/turborg/turborg/commit/35f2c86ef782753c1b56a560244179d0abffe500))
+
 ## [0.15.1](https://github.com/turborg/turborg/compare/v0.15.0...v0.15.1) (2026-06-02)
 
 
