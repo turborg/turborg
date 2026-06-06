@@ -422,8 +422,8 @@ func DescribeUpstreamState(state UpstreamState, networkName, serverReason string
 
 // SeverityForUpstreamState maps a state to the severity label used by
 // the WS gateway's connector.state_changed event payload. Mirrors the
-// three-level scheme the test UI + appui will use to colour-code
-// banners and decide whether to disable the send input.
+// three-level scheme a front-end uses to colour-code banners and
+// decide whether to disable the send input.
 //
 //   - "info" for registered (the recovery "back live" event)
 //   - "warning" for connecting/registering and recoverable disconnects

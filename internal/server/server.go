@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/turborg/turborg/internal/ident"
 	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/safe"
 )
@@ -31,8 +32,8 @@ type Server struct {
 	workFactory func(*Tenant) func(context.Context) error
 
 	// controlPlaneURL/Token point each pooled tenant's connector-state emitter
-	// at accounts-api's /v1/internal/turborgs/<id>/state receiver. Empty URL
-	// (the OSS/file-source path) leaves state-sync off — the emitter is inert.
+	// at the control plane's per-tenant state receiver. Empty URL (the
+	// file-source path) leaves state-sync off — the emitter is inert.
 	controlPlaneURL   string
 	controlPlaneToken string
 
@@ -46,6 +47,12 @@ type Server struct {
 	// actively-used pooled tenants. Nil when no control plane is configured.
 	activity *activityAggregator
 
+	// idents maps each tenant's upstream source port to its IRC ident, shared
+	// across all tenants and served to an external RFC-1413 responder by the
+	// ident router. Always non-nil so connectors report into it unconditionally;
+	// the router is only bound when TURBORG_IDENT_ROUTER_ADDR is set.
+	idents *ident.Registry
+
 	mu      sync.Mutex
 	tenants map[string]*Tenant
 }
@@ -58,13 +65,18 @@ func New(source TenantSource, log *slog.Logger) *Server {
 		quarantineBase: defaultQuarantineBase,
 		workFactory:    func(t *Tenant) func(context.Context) error { return t.defaultWork() },
 		tenants:        make(map[string]*Tenant),
+		idents:         ident.NewRegistry(),
 	}
 }
 
+// Idents returns the shared source-port → ident registry so the process entry
+// point can serve the ident router against it.
+func (s *Server) Idents() *ident.Registry { return s.idents }
+
 // SetControlPlane configures where pooled tenants POST their connector-state
-// snapshots — accounts-api's internal receiver (TURBORG_CONTROL_PLANE_URL).
+// snapshots — the control plane's internal receiver (TURBORG_CONTROL_PLANE_URL).
 // Call before Run. An empty url leaves state-sync off (each tenant's emitter is
-// inert), matching the OSS/file-source deployment that has no control plane.
+// inert), matching the file-source deployment that has no control plane.
 func (s *Server) SetControlPlane(url, token string) {
 	s.controlPlaneURL = url
 	s.controlPlaneToken = token
@@ -145,7 +157,7 @@ func (s *Server) upsert(ctx context.Context, spec TenantSpec) {
 		existing.update(spec)
 		return
 	}
-	s.tenants[spec.TurborgID] = startTenant(ctx, spec, s.log, s.quarantineBase, s.workFactory, s.controlPlaneURL, s.controlPlaneToken, s.llmProvider, s.activity)
+	s.tenants[spec.TurborgID] = startTenant(ctx, spec, s.log, s.quarantineBase, s.workFactory, s.controlPlaneURL, s.controlPlaneToken, s.llmProvider, s.activity, s.idents)
 }
 
 // remove detaches a tenant, draining its goroutine. No-op when absent.

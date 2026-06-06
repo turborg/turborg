@@ -16,6 +16,7 @@ import (
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/commands"
 	"github.com/turborg/turborg/internal/connector/irc"
+	"github.com/turborg/turborg/internal/ident"
 	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/messages"
 	"github.com/turborg/turborg/internal/messagesink"
@@ -98,9 +99,10 @@ type Tenant struct {
 	// inbound WS request is closed with 404.
 	gateway *web.Gateway
 	// stateEmitter mirrors this tenant's connector state (upstream status,
-	// channels, nick) to the control plane on every transition, so accounts-api
-	// drives appui's connector pill for pooled tenants the same way it does for
-	// dedicated. Inert when no control plane is configured; Stop()ped at run end.
+	// channels, nick) to the control plane on every transition, so a downstream
+	// UI can reflect connection status for pooled tenants the same way it does
+	// for single-instance ones. Inert when no control plane is configured;
+	// Stop()ped at run end.
 	stateEmitter *statepush.Emitter
 
 	// controlPlaneURL/Token are where the state emitter POSTs (per tenant:
@@ -116,6 +118,11 @@ type Tenant struct {
 	// (bouncer attach, message traffic). Nil when no control plane is set.
 	activity *activityAggregator
 
+	// idents is the shared (pool-wide) source-port → ident registry the
+	// connector reports into so an external RFC-1413 responder can name this
+	// tenant. Never nil (the Server always builds one).
+	idents *ident.Registry
+
 	// messageSink is the durable-message writer for the current run, owning a
 	// background flush goroutine. Captured so defaultWork can Close it on run
 	// end (goleak-clean across restarts). nil between runs / no control plane.
@@ -126,7 +133,7 @@ type Tenant struct {
 // workFactory builds the body to run (and re-run after a panic) from the
 // constructed Tenant; quarantineBase is the first backoff step (doubled per
 // consecutive failure, capped).
-func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger, quarantineBase time.Duration, workFactory func(*Tenant) func(context.Context) error, controlPlaneURL, controlPlaneToken string, llmProvider llm.Provider, activity *activityAggregator) *Tenant {
+func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger, quarantineBase time.Duration, workFactory func(*Tenant) func(context.Context) error, controlPlaneURL, controlPlaneToken string, llmProvider llm.Provider, activity *activityAggregator, idents *ident.Registry) *Tenant {
 	ctx, cancel := context.WithCancel(parent)
 	t := &Tenant{
 		ID:                spec.TurborgID,
@@ -141,6 +148,7 @@ func startTenant(parent context.Context, spec TenantSpec, log *slog.Logger, quar
 		controlPlaneToken: controlPlaneToken,
 		llmProvider:       llmProvider,
 		activity:          activity,
+		idents:            idents,
 	}
 	t.work = workFactory(t)
 	safe.Go("supervise/"+spec.TurborgID, func() { t.supervise(ctx) })
@@ -268,7 +276,7 @@ func (t *Tenant) defaultWork() func(context.Context) error {
 		t.mu.Lock()
 		prefix := t.spec.CommandPrefix
 		t.mu.Unlock()
-		// NewWithPrefix defaults an empty prefix to "!", matching the dedicated
+		// NewWithPrefix defaults an empty prefix to "!", matching the single-instance
 		// path (where the env default fills it) so free tenants behave the same.
 		a := agent.NewWithPrefix(t.log, prefix)
 		t.buildConnectors(a)
@@ -317,6 +325,7 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 	gatewayToken := t.spec.GatewayToken
 	ignoredNicks := t.spec.IgnoredNicks
 	cmds := t.spec.Commands
+	egressIP := t.spec.EgressIP
 	t.mu.Unlock()
 
 	for _, cs := range connectors {
@@ -327,10 +336,18 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 				t.log.Error("skipping invalid irc connector", "err", err)
 				continue
 			}
-			// Override the connector's ApplyDefaults with the per-tier values
-			// dedicated gets from the sidecar env (QUIT brand + CTCP / bouncer
+			// Override the connector's ApplyDefaults with the per-instance values
+			// the single-instance binary gets from env (QUIT brand + CTCP / bouncer
 			// auth-failure tightening) — all sourced from the tenant feed's caps.
 			t.applyTierSettings(settings, caps)
+			// Bind the tenant's assigned egress IP so its outbound IRC leaves on
+			// the right public IP (per-tenant egress round-robin). Empty/unresolved
+			// → default route; see egress.go.
+			if egressIP != "" {
+				if src := defaultEgressResolver.resolveSourceIP(egressIP); src != "" {
+					settings.SourceIP = src
+				}
+			}
 			// Wire the connector to the tenant-owned agent bus: the bouncer's
 			// outbound observer and the connector's join/part/topic/state events
 			// publish here, and the web gateway subscribes to the same bus so the
@@ -341,6 +358,10 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			// router feeds it connections via ServeBouncerConn after PROXY-v2
 			// tenant resolution. Set before WireCommon adds the connector.
 			conn.SetBouncerListenerless(true)
+			// Report this tenant's upstream source port → ident so an external
+			// RFC-1413 responder can name it (kills the ~ prefix + satisfies
+			// "identd required" networks). Shared registry across all tenants.
+			conn.SetIdentReporter(t.idents)
 
 			// Durable message store (write-through to the control plane), so the
 			// bouncer welcome replay, web-shell scrollback, and the user's
@@ -352,13 +373,13 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			t.messageSink = sink
 			t.mu.Unlock()
 
-			// The shared, connector-agnostic wiring — identical to the dedicated
+			// The shared, connector-agnostic wiring — identical to the single-instance
 			// runtime, which calls the same runtime.WireCommon. Gives pooled
 			// tenants builtins (!ping/!version/!ask), the owner command guard,
 			// plan limits + outbound throttle, owner nudge, activity reporting,
 			// and message-store submitters, so the two modes can't drift. Owner-
 			// trust config travels in the connector config (the feed reuses the
-			// same connectorList() shape the dedicated spawn payload does).
+			// same connectorList() shape the single-instance spawn payload does).
 			// Build the budgeted provider once so the same budget instance is
 			// shared by the connector/commands (WireCommon) and the web gateway
 			// below. WireCommon's own wrap is idempotent on this.
@@ -376,9 +397,9 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			t.mu.Unlock()
 
 			// Connector-state sync: mirror upstream status / channels / nick to
-			// the control plane on every transition, so appui's connector pill
-			// works for pooled tenants the same way dedicated does (via the
-			// single-tenant runtime emitter). Inert + nil when no control plane.
+			// the control plane on every transition, so a downstream UI reflects
+			// connection status for pooled tenants the same way it does for
+			// single-instance ones. Inert + nil when no control plane.
 			if em := buildTenantStateEmitter(conn, t.ID, t.controlPlaneURL, t.controlPlaneToken, t.log); em != nil {
 				t.mu.Lock()
 				t.stateEmitter = em
@@ -386,8 +407,8 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			}
 
 			// Web shell: built only when the tenant carries a gateway token (the
-			// plan's `gatewayEnabled` capability is expressed by accounts-api
-			// emitting the token at all). Listenerless like the bouncer — the web
+			// feed expresses the "web shell enabled" capability by emitting the
+			// token at all). Listenerless like the bouncer — the web
 			// router dispatches `/c/<id>` to the shared Handler via ServeWS, so the
 			// gateway never binds its own port.
 			if gatewayToken != "" {
@@ -417,9 +438,9 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 }
 
 // applyTierSettings overrides the connector defaults ApplyDefaults filled with
-// the per-tier values dedicated receives from the sidecar env — all sourced
-// from the tenant feed's plan caps: the IRC QUIT brand, the CTCP throttle, and
-// the bouncer auth-failure ceiling. Each guard keeps an unset value on the
+// the per-instance values the single-instance binary receives from env — all
+// sourced from the tenant feed's caps: the IRC QUIT brand, the CTCP throttle,
+// and the bouncer auth-failure ceiling. Each guard keeps an unset value on the
 // ApplyDefaults default rather than zeroing it.
 func (t *Tenant) applyTierSettings(s *irc.Settings, caps *PlanCapabilities) {
 	if caps == nil {
@@ -441,15 +462,15 @@ func (t *Tenant) applyTierSettings(s *irc.Settings, caps *PlanCapabilities) {
 
 // commonParams maps a tenant's IRC connector spec + plan caps onto the
 // runtime.CommonParams the shared agent wiring consumes — the single place
-// pooled inputs become the same struct the dedicated runtime builds from env.
+// pooled inputs become the same struct the single-instance runtime builds from env.
 // Owner-trust fields live in the connector config (the feed reuses the
-// dedicated connectorList() shape); identity limits, throttles, and the nudge
+// single-instance connectorList() shape); identity limits, throttles, and the nudge
 // interval come from the plan caps; ignored nicks + the LLM provider + the
 // store + the activity hook are threaded from the tenant.
 //
 // CustomCommandsMax + Commands carry the tenant's data-driven command set
 // and its cap, so pooled tenants get user-defined commands the same way the
-// dedicated runtime does (from TURBORG_COMMANDS).
+// single-instance runtime does (from TURBORG_COMMANDS).
 func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick string, store messages.Store, ignoredNicks []string, cmds []commands.Definition) runtime.CommonParams {
 	var limits irc.ClientLimits
 	var outMax, outWin, nudge, cmdMax, cmdWin, customCmdMax, llmInCap, llmOutCap, llmInUsed, llmOutUsed int
@@ -556,15 +577,22 @@ func (t *Tenant) update(spec TenantSpec) {
 	// change to it alone is a no-op here. A command-set change still reloads in
 	// place. Anything else falls through to a restart.
 	if liveUpdatableOnlyChange(prev, spec) {
-		if commandSetsEqual(prev.Commands, spec.Commands) {
+		commandsChanged := !commandSetsEqual(prev.Commands, spec.Commands)
+		ignoresChanged := !reflect.DeepEqual(prev.IgnoredNicks, spec.IgnoredNicks)
+		if !commandsChanged && !ignoresChanged {
 			return // only the usage baseline moved — nothing to reconnect for
 		}
-		if t.reloadCommands(spec.Commands) {
-			t.log.Info("tenant commands reloaded in place", "commands", len(spec.Commands))
+		// Apply each changed facet in place. The command set swaps via
+		// ReplaceDynamic; the ignore list swaps the registry-wide guard. Either
+		// returning false means the tenant isn't running, so fall through to a
+		// restart that re-seeds everything from the new spec at build time.
+		okCommands := !commandsChanged || t.reloadCommands(spec.Commands)
+		okIgnores := !ignoresChanged || t.reloadGuard()
+		if okCommands && okIgnores {
+			t.log.Info("tenant settings reloaded in place",
+				"commands", len(spec.Commands), "ignored", len(spec.IgnoredNicks))
 			return
 		}
-		// Not currently running — fall through to a restart, which re-seeds the
-		// budget from the new spec at build time.
 	}
 
 	t.log.Info("tenant spec changed; restarting", "connectors", t.connectorTypes())
@@ -590,11 +618,14 @@ func commandsOnlyChange(a, b TenantSpec) bool {
 
 // liveUpdatableOnlyChange reports whether two differing specs differ in nothing
 // but fields that can be applied to a running tenant WITHOUT a reconnect: the
-// command set and the LLM-usage baseline (llm_*_tokens_used, which the feed
-// refreshes continuously). Both the command set and the baseline are zeroed
-// before comparison so a change confined to them returns true.
+// command set, the ignore list, and the LLM-usage baseline (llm_*_tokens_used,
+// which the feed refreshes continuously). The command set, the ignore list, and
+// the baseline are zeroed before comparison so a change confined to them returns
+// true. The ignore list only feeds the registry-wide command guard, which can be
+// hot-swapped in place, so an ignore edit must not drop the connection.
 func liveUpdatableOnlyChange(a, b TenantSpec) bool {
 	a.Commands, b.Commands = nil, nil
+	a.IgnoredNicks, b.IgnoredNicks = nil, nil
 	a.PlanCapabilities = capsWithoutTokenUsage(a.PlanCapabilities)
 	b.PlanCapabilities = capsWithoutTokenUsage(b.PlanCapabilities)
 	return reflect.DeepEqual(a, b)
@@ -646,8 +677,35 @@ func (t *Tenant) reloadCommands(defs []commands.Definition) bool {
 	// {platform} echoes the IRC server hostname; the connector spec carries it
 	// as "host:port", so reuse the same split the spec→settings mapping does.
 	platform, _, _ := splitNetwork(stringField(cs.Config, "network"))
-	// Same in-place swap the dedicated runtime's command refresher uses.
+	// Same in-place swap the single-instance runtime's command refresher uses.
 	runtime.ApplyCommands(a, defs, t.llmProvider, owner, platform, t.log)
+	return true
+}
+
+// reloadGuard rebuilds the registry-wide guard (ignore list + per-sender
+// command throttle) and swaps it onto the live agent without a reconnect, so an
+// ignore-list edit takes effect in place. The throttle window is sourced from
+// the current caps so it is preserved across the swap. Returns false when the
+// tenant isn't running (no live agent), so the caller falls back to a restart.
+func (t *Tenant) reloadGuard() bool {
+	t.mu.Lock()
+	a := t.agentRef
+	caps := t.spec.PlanCapabilities
+	ignoredNicks := t.spec.IgnoredNicks
+	t.mu.Unlock()
+	if a == nil {
+		return false
+	}
+
+	var cmdMax, cmdWin int
+	if caps != nil {
+		cmdMax, cmdWin = caps.CommandMaxPerWindow, caps.CommandWindowSeconds
+	}
+	runtime.ApplyRegistryGuard(a, runtime.GuardParams{
+		IgnoredNicks:         ignoredNicks,
+		CommandMaxPerWindow:  cmdMax,
+		CommandWindowSeconds: cmdWin,
+	})
 	return true
 }
 
@@ -684,8 +742,8 @@ func (t *Tenant) ServeBouncerConn(conn net.Conn) {
 	c.ServeBouncerConn(conn)
 }
 
-// ServeWS hands one HTTP request (the appui web shell's `/ws` upgrade, addressed
-// as `/c/<turborg_id>`) to this tenant's live web gateway. The web router calls
+// ServeWS hands one HTTP request (the web shell's `/ws` upgrade, addressed
+// as `/c/<id>`) to this tenant's live web gateway. The web router calls
 // it after resolving the tenant from the request path. Returns 404 when the
 // tenant has no running gateway (between runs / quarantined / no web shell
 // configured); the browser reconnects and the router retries. The request's

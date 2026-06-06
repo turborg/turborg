@@ -117,7 +117,7 @@ func (r *CommandRegistry) RegisterDynamic(name string, handler CommandHandler, p
 // ReplaceDynamic atomically swaps the entire set of dynamic (user-defined)
 // commands for the given batch, leaving Register-installed entries
 // untouched. It is the hot-reload primitive: the pooled runtime calls it
-// when a tenant's attached commands change, and the dedicated control
+// when a tenant's attached commands change, and the single-instance control
 // endpoint calls it on a push — neither drops the IRC connection.
 //
 // The swap happens under the write lock; Dispatch only ever RLocks, so a

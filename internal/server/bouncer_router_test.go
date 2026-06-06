@@ -27,7 +27,7 @@ func authorityHeader(authority string) *proxyproto.Header {
 }
 
 func TestTurborgIDFromAuthority(t *testing.T) {
-	id, err := turborgIDFromAuthority(authorityHeader("alice-7f3b.bouncer.irc.staging.xshellz.com"))
+	id, err := turborgIDFromAuthority(authorityHeader("alice-7f3b.bouncer.irc.example.test"))
 	require.NoError(t, err)
 	assert.Equal(t, "alice-7f3b", id, "turborg_id is the first DNS label of the SNI authority")
 
@@ -38,7 +38,7 @@ func TestTurborgIDFromAuthority(t *testing.T) {
 	_, err = turborgIDFromAuthority(authorityHeader(""))
 	require.Error(t, err, "a header with no AUTHORITY TLV is an error, not a silent empty id")
 
-	_, err = turborgIDFromAuthority(authorityHeader(".bouncer.irc.staging.xshellz.com"))
+	_, err = turborgIDFromAuthority(authorityHeader(".bouncer.irc.example.test"))
 	require.Error(t, err, "an authority with an empty leading label has no turborg_id")
 }
 
@@ -137,7 +137,7 @@ func TestBouncerRouterUnknownTenantClosesConn(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
-	_, err = authorityHeader("ghost-tenant.bouncer.irc.staging.xshellz.com").WriteTo(conn)
+	_, err = authorityHeader("ghost-tenant.bouncer.irc.example.test").WriteTo(conn)
 	require.NoError(t, err)
 
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))

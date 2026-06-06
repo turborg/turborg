@@ -16,7 +16,8 @@ import (
 // TestPooledTenantPostsConnectorState: with a control plane configured, a
 // pooled tenant POSTs its connector-state snapshot (to
 // /turborgs/<id>/state, bearer-authed) on upstream transitions — the path that
-// drives appui's connector pill for pooled the way dedicated already does.
+// drives a downstream UI's connector status for pooled tenants the way the
+// single-instance path already does.
 func TestPooledTenantPostsConnectorState(t *testing.T) {
 	fs := fakeirc.New(t)
 	defer fs.Close()

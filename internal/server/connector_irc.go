@@ -8,10 +8,10 @@ import (
 	"github.com/turborg/turborg/internal/connector/irc"
 )
 
-// settingsFromConnectorSpec maps a tenant's IRC ConnectorSpec (the
-// accounts-api/sidecar wire shape: config map + secrets map) onto irc.Settings.
-// Pure — no IO. The single-tenant binary derives the same struct from env via
-// irc.LoadSettings; this is the pooled-mode equivalent sourced from a spec.
+// settingsFromConnectorSpec maps a tenant's IRC ConnectorSpec (the feed wire
+// shape: config map + secrets map) onto irc.Settings. Pure — no IO. The
+// single-tenant binary derives the same struct from env via irc.LoadSettings;
+// this is the pooled-mode equivalent sourced from a spec.
 //
 // The bouncer is wired listenerless: it never binds a host port (N tenants in
 // one process can't), and the pool's PROXY-v2 SNI router (M6) feeds it accepted
@@ -50,7 +50,7 @@ func settingsFromConnectorSpec(cs ConnectorSpec) (*irc.Settings, error) {
 		BouncerPassword: stringField(cs.Secrets, "bouncer_password"),
 	}
 
-	// Apply the same operational defaults the env loader gives the dedicated
+	// Apply the same operational defaults the env loader gives the single-instance
 	// path, so pooled tenants get CTCP auto-reply, liveness probing, reconnect
 	// escalation, etc. — not the Go zero values a spec-built struct starts with.
 	s.ApplyDefaults()
@@ -61,7 +61,7 @@ func settingsFromConnectorSpec(cs ConnectorSpec) (*irc.Settings, error) {
 	return s, nil
 }
 
-// splitNetwork parses "host:port" (the wire shape accounts-api emits). A bare
+// splitNetwork parses "host:port" (the wire shape the feed emits). A bare
 // host defaults to 6697 (TLS IRC). Returns an error for an empty host.
 func splitNetwork(network string) (string, int, error) {
 	network = strings.TrimSpace(network)

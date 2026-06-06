@@ -70,7 +70,7 @@ type Settings struct {
 	CommandMaxPerWindow  int `env:"COMMAND_MAX_PER_WINDOW"  envDefault:"5"`
 	CommandWindowSeconds int `env:"COMMAND_WINDOW_SECONDS"  envDefault:"30"`
 
-	// Gateway is the bot's control-plane surface: WS protocol + bundled
+	// Gateway is the bot's web management surface: WS protocol + bundled
 	// reference UI. Today it streams IRC events; the env vars don't
 	// promise a specific protocol or connector, so the same names
 	// survive any future transport/connector additions.
@@ -138,27 +138,25 @@ type Settings struct {
 
 	// LLMBudgetURL is an optional endpoint the agent polls to keep the token
 	// budget's account baseline current while it runs (the boot seed above is
-	// only a point-in-time value). SaaS deployments point it at the sidecar's
-	// per-container budget handler, which forwards to the control plane; the
-	// agent sends its start time as `?since=` so the response can exclude what
-	// it counts locally. Empty = no live refresh (the boot seed is all there
-	// is, which is correct for self-host single-agent installs).
+	// only a point-in-time value). Point it at a service that tracks usage
+	// across restarts; the agent sends its start time as `?since=` so the
+	// response can exclude what it counts locally. Empty = no live refresh (the
+	// boot seed is all there is, which is correct for single-agent installs).
 	LLMBudgetURL string `env:"LLM_BUDGET_URL"`
 	// LLMBudgetToken is the bearer sent on every budget poll. Defaults to
-	// MessageSinkToken via normalize() when unset — both terminate at the same
-	// per-container endpoint with the same bearer.
+	// MessageSinkToken via normalize() when unset — both typically terminate at
+	// the same endpoint with the same bearer.
 	LLMBudgetToken string `env:"LLM_BUDGET_TOKEN"`
 	// LLMBudgetRefreshSeconds is the poll interval. 0 uses the package default
 	// (15s); values below the floor are clamped up by the refresher.
 	LLMBudgetRefreshSeconds int `env:"LLM_BUDGET_REFRESH_SECONDS"`
 
 	// CommandsURL is an optional endpoint the agent polls to hot-reload its
-	// data-driven command set while it runs — no reconnect. SaaS deployments
-	// point it at the sidecar's per-container commands handler, which forwards
-	// the tenant's resolved command set from the control plane. Empty = no live
-	// reload (the boot TURBORG_COMMANDS set is fixed, correct for self-host).
-	// This gives a dedicated agent the same in-place ReplaceDynamic the pooled
-	// runtime already does from its tenant feed.
+	// data-driven command set while it runs — no reconnect. Point it at a
+	// service that serves the latest command set as JSON. Empty = no live
+	// reload (the boot TURBORG_COMMANDS set is fixed). This gives a
+	// single-instance agent the same in-place ReplaceDynamic the pooled runtime
+	// already does from its tenant feed.
 	CommandsURL string `env:"COMMANDS_URL"`
 	// CommandsToken is the bearer sent on every commands poll. Defaults to
 	// MessageSinkToken via normalize() when unset — same per-container endpoint.
@@ -199,13 +197,11 @@ type Settings struct {
 	// summary delivered through IRC itself.
 	OwnerDMNudgeEvery int `env:"OWNER_DM_NUDGE_EVERY"`
 
-	// IgnoredNicks is the operator's (or, in SaaS, the end user's) chat-
-	// ignore list. Senders matching one of these nicks (case-insensitive)
-	// are denied early in the command guard — !commands never dispatch,
-	// future LLM triggers will skip them too. Distinct from the per-tier
-	// PlanCapabilities knobs above: this is per-USER policy, surfaced via
-	// the sidecar's IgnoredNicks SpawnRequest field. Hot-update path:
-	// /update-env recreates the container with the new CSV.
+	// IgnoredNicks is the operator's chat-ignore list. Senders matching one of
+	// these nicks (case-insensitive) are denied early in the command guard —
+	// !commands never dispatch, future LLM triggers will skip them too. This is
+	// per-bot policy, set by the operator. Changing it takes effect on the next
+	// restart.
 	//
 	// Empty = no ignores. CSV in env (TURBORG_IGNORED_NICKS=alice,bob);
 	// whitespace + case are normalized at guard-build time.
@@ -248,17 +244,16 @@ type Settings struct {
 	StateWebhookDebounceMs int `env:"STATE_WEBHOOK_DEBOUNCE_MS" envDefault:"250"`
 
 	// MessageSinkURL is the endpoint the gateway POSTs durable
-	// message batches to. SaaS deployments point this at the
-	// sidecar's per-container /messages handler (the sidecar then
-	// forwards upstream to accounts-api). Empty = self-host: no
-	// durable mirror, the gateway's in-memory ring is still the
-	// only history (already replayed on (re)connect).
+	// message batches to. Point it at a service that persists them
+	// for long-term history. Empty = no durable mirror, the gateway's
+	// in-memory ring is still the only history (already replayed on
+	// (re)connect).
 	MessageSinkURL string `env:"MESSAGE_SINK_URL"`
 
 	// MessageSinkToken is sent as a bearer Authorization header on
-	// every message-sink POST. Mirrors StateWebhookToken — same
-	// per-container token reused, since both endpoints terminate at
-	// the same sidecar gating on the same ActivityTracker.
+	// every message-sink POST. Mirrors StateWebhookToken — the same
+	// token can be reused when both endpoints terminate at the same
+	// receiver.
 	MessageSinkToken string `env:"MESSAGE_SINK_TOKEN"`
 
 	// MessageStoreURL is the endpoint the bouncer (CHATHISTORY) +
@@ -305,8 +300,8 @@ func (s *Settings) normalize() error {
 	s.AllowedLLMModels = trimDropEmpties(s.AllowedLLMModels)
 
 	// MessageStoreToken defaults to the sink token — both halves
-	// usually terminate at the same accounts-api endpoint with the
-	// same per-container bearer. Operators who want different tokens
+	// usually terminate at the same endpoint with the same bearer.
+	// Operators who want different tokens
 	// for read vs. write set MESSAGE_STORE_TOKEN explicitly.
 	if s.MessageStoreToken == "" {
 		s.MessageStoreToken = s.MessageSinkToken
@@ -409,8 +404,8 @@ func (s *Settings) HostnameAllowed(hostname string) bool {
 // registered.
 func (s *Settings) AnthropicEnabled() bool { return s.AnthropicAPIKey != "" }
 
-// GatewayEnabled reports whether the control-plane gateway should be
-// started. False = no listener, no UI, no /ws endpoint.
+// GatewayEnabled reports whether the web gateway should be started.
+// False = no listener, no UI, no /ws endpoint.
 func (s *Settings) GatewayEnabled() bool { return s.GatewayPassword != "" }
 
 // IdleShutdownEnabled reports whether the gateway's idle-shutdown timer

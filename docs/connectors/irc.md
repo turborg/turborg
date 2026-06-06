@@ -193,7 +193,7 @@ scrollback; see below.)
 
 ## Gateway (cross-reference)
 
-The bot also exposes a control-plane gateway (WS protocol + reference
+The bot also exposes a web gateway (WS protocol + reference
 UI) that today streams IRC events and accepts `say`/`join`/`kick` ops
 flowing back through the agent. The gateway is **not** an IRC
 sub-feature — it's a top-level surface that just happens to surface
@@ -226,7 +226,4 @@ hive).
 - **Sample env file:** [`/.env.example`](../../.env.example)
 - **Source of truth:** `internal/connector/irc/settings.go` — every
   field here has an `env:"…"` tag matching the variable name above.
-- **Gateway internals (SaaS-only):** `docs/backend/PLAN.md` (gitignored;
-  shared with the xshellz orchestrator team out-of-band).
-- **WS protocol + reference UI gap list (SaaS-only):** `docs/ui/PLAN.md`
-  (gitignored; shared with the xshellz Angular team out-of-band).
+- **Gateway reference:** [`docs/gateway.md`](../gateway.md).

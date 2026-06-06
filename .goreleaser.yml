@@ -18,9 +18,9 @@ builds:
       - amd64
       - arm64
 
-  # The pooled multi-tenant runtime, shipped in the SAME image as /turborg
-  # (the sidecar PoolManager runs it via an entrypoint override). Without this
-  # build the published image only has /turborg and pooled hosts can't boot.
+  # The pooled multi-instance runtime, shipped in the SAME image as /turborg
+  # (run it via an entrypoint override). Without this build the published image
+  # only has /turborg and pooled hosts can't boot.
   - id: turborg-server
     main: ./cmd/turborg-server
     binary: turborg-server

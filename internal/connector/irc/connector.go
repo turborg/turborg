@@ -57,6 +57,14 @@ type Connector struct {
 	// setClient().
 	clientMu sync.RWMutex
 	client   *Client
+	// identPort is the source port currently reported to identReporter for the
+	// live client, guarded by clientMu. Tracked separately from client so we can
+	// Clear the exact port we registered even after the conn is closed (a closed
+	// conn's LocalAddr is unreliable). 0 = nothing registered.
+	identPort int
+	// identReporter receives localPort→ident updates for the pooled RFC-1413
+	// responder. Nil in single-instance runtime / tests (reporting disabled).
+	identReporter IdentReporter
 
 	// machine is the per-connector upstream state machine. External
 	// surfaces (bouncer, web gateway) subscribe via UpstreamState() to
@@ -68,7 +76,7 @@ type Connector struct {
 	bouncer *Bouncer
 	// bouncerListenerless brings the bouncer up without its own TCP listener
 	// (pooled runtime): the pool's SNI/PROXY-v2 router feeds connections in via
-	// ServeBouncerConn. Default false = dedicated mode (bouncer binds a port).
+	// ServeBouncerConn. Default false = single-instance mode (bouncer binds a port).
 	bouncerListenerless bool
 	ctcp                *Throttle
 
@@ -276,12 +284,38 @@ func (c *Connector) getClient() *Client {
 	return c.client
 }
 
+// SetIdentReporter installs the pooled ident reporter. Must be called before
+// Start so the first connect is reported. Nil (the default) disables ident
+// reporting — single-instance runtime + tests.
+func (c *Connector) SetIdentReporter(r IdentReporter) { c.identReporter = r }
+
 // setClient swaps the upstream client. Used by Start (initial dial) and
-// the reconnect supervisor (subsequent dials).
+// the reconnect supervisor (subsequent dials). It is the single chokepoint
+// for ident reporting: every successful connect installs a client (report its
+// source port → ident) and every teardown/failure installs nil (clear it).
 func (c *Connector) setClient(cli *Client) {
 	c.clientMu.Lock()
-	defer c.clientMu.Unlock()
 	c.client = cli
+	oldPort := c.identPort
+	newPort := 0
+	if cli != nil {
+		newPort = cli.LocalPort()
+	}
+	c.identPort = newPort
+	c.clientMu.Unlock()
+
+	// Report outside the lock — the registry has its own mutex, and connector
+	// lock ordering must never depend on it. SNAT preserves the source port, so
+	// newPort is exactly what the IRC server queries on :113.
+	if c.identReporter == nil {
+		return
+	}
+	if oldPort != 0 && oldPort != newPort {
+		c.identReporter.Clear(oldPort)
+	}
+	if newPort != 0 {
+		c.identReporter.Set(newPort, c.settings.EffectiveUsername())
+	}
 }
 
 // UpstreamState returns the per-connector upstream state machine.
@@ -360,7 +394,7 @@ func (c *Connector) TBTLDR(ctx context.Context, url string) (string, error) {
 // SetBouncerListenerless selects the pooled-runtime bouncer path: the bouncer
 // comes up without binding a TCP port and is fed connections by the pool's
 // SNI/PROXY-v2 router via ServeBouncerConn, instead of its own accept loop.
-// Must be called before Start. Default (false) keeps dedicated mode, where the
+// Must be called before Start. Default (false) keeps single-instance mode, where the
 // bouncer binds its own host port.
 func (c *Connector) SetBouncerListenerless(v bool) { c.bouncerListenerless = v }
 
@@ -627,7 +661,7 @@ func (c *Connector) bringUp(ctx context.Context) error {
 		dialTimeout = 20 * time.Second
 	}
 	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
-	cli, err := Dial(dctx, c.settings.Hostname, c.settings.Port, c.settings.UseTLS)
+	cli, err := Dial(dctx, c.settings.Hostname, c.settings.Port, c.settings.UseTLS, c.settings.SourceIP)
 	cancel()
 	if err != nil {
 		c.classifyFallback(ctx, err)
