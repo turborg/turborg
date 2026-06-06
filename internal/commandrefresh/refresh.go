@@ -1,12 +1,12 @@
-// Package commandrefresh keeps a single dedicated agent's data-driven command
+// Package commandrefresh keeps a single single-instance agent's data-driven command
 // set current while it runs, without a reconnect.
 //
-// A dedicated agent boots with the command set baked into TURBORG_COMMANDS.
+// A single-instance agent boots with the command set baked into TURBORG_COMMANDS.
 // That set is fixed for the life of the process unless something tells the
 // running agent to reload it. This package polls an endpoint for the tenant's
 // current command set and, when it changes, applies it in place via a
 // caller-supplied callback (which rebuilds the handlers + ReplaceDynamic). It
-// is the dedicated-runtime mirror of what the pooled runtime already does from
+// is the single-instance-runtime mirror of what the pooled runtime already does from
 // its tenant feed, so the two share identical hot-reload semantics (an atomic
 // in-place swap — no IRC reconnect).
 //

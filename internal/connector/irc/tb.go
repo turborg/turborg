@@ -96,7 +96,7 @@ func (h *tbHandler) tbSummarize(ctx context.Context, channel string, n int, cap 
 		return "", fmt.Errorf("no message history available")
 	}
 	if cap <= 0 {
-		return "", fmt.Errorf("/tb summarize is not available on your plan")
+		return "", fmt.Errorf("/tb summarize is not enabled")
 	}
 	if n <= 0 {
 		n = tbSummarizeDefaultLimit

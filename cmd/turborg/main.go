@@ -13,6 +13,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 	"github.com/turborg/turborg/internal/config"
+	"github.com/turborg/turborg/internal/ident"
 	"github.com/turborg/turborg/internal/logging"
 	"github.com/turborg/turborg/internal/runtime"
 	"github.com/turborg/turborg/internal/version"
@@ -106,6 +107,25 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Ident reporting for an external RFC-1413 (ident) responder — same
+	// mechanism as the pooled runtime, so the bot names itself on
+	// "identd required" networks and drops the ~ prefix. The connector reports
+	// its source port → ident; the router (this host's IP) serves it to the
+	// responder, which resolved the inbound query to us. Set before runtime.Run
+	// starts the connector. Disabled when the addr is unset; a bind failure is
+	// non-fatal — the bot still connects, just unverified.
+	if built.IRC != nil {
+		idents := ident.NewRegistry()
+		built.IRC.SetIdentReporter(idents)
+		if identAddr := os.Getenv("TURBORG_IDENT_ROUTER_ADDR"); identAddr != "" {
+			go func() {
+				if err := ident.ServeRouter(ctx, identAddr, idents); err != nil && !errors.Is(err, context.Canceled) {
+					log.Error("ident router stopped", "err", err)
+				}
+			}()
+		}
+	}
 
 	if err := runtime.Run(ctx, built); err != nil && !errors.Is(err, context.Canceled) {
 		return err

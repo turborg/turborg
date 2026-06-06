@@ -142,23 +142,23 @@ func TestCommonParamsMapsCapsAndOwner(t *testing.T) {
 	require.Nil(t, p.ActivityHook, "no aggregator on a directly-built tenant → no activity hook")
 }
 
-// TestApplyTierSettings: the per-tier QUIT brand + CTCP / bouncer-failed caps
+// TestApplyTierSettings: the per-instance QUIT brand + CTCP / bouncer-failed caps
 // (all from the tenant feed) override the connector's ApplyDefaults — closing
-// the last drifts where pooled fell back to defaults dedicated overrode from
-// the sidecar env.
+// the last drifts where pooled fell back to defaults the single-instance path
+// overrode from env.
 func TestApplyTierSettings(t *testing.T) {
 	tn := &Tenant{}
 	s := &irc.Settings{Hostname: "irc.example", Nick: "bot"}
 	s.ApplyDefaults() // quit "bye from turborg", CTCP 3/30, bouncer-failed 5
 
 	tn.applyTierSettings(s, &PlanCapabilities{
-		QuitMessage:              "turborg.com — free, xshellz.com",
+		QuitMessage:              "turborg @ www.xshellz.com",
 		CTCPMaxPerWindow:         2,
 		CTCPWindowSeconds:        30,
 		BouncerMaxFailedAttempts: 3,
 	})
 
-	require.Equal(t, "turborg.com — free, xshellz.com", s.QuitMessage)
+	require.Equal(t, "turborg @ www.xshellz.com", s.QuitMessage)
 	require.Equal(t, 2, s.CTCPMaxPerWindow)
 	require.Equal(t, 30, s.CTCPWindowSeconds)
 	require.Equal(t, 3, s.BouncerMaxFailedAttempts)
