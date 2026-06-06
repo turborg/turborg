@@ -55,6 +55,7 @@ func buildIRCSnapshot(conn *irc.Connector) statepush.SnapshotBuilder {
 					Since:    machine.EnteredAt().UTC(),
 					Channels: channels,
 					Nick:     nick,
+					Reason:   machine.ServerReason(),
 				},
 			},
 		}
