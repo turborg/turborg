@@ -487,7 +487,51 @@ func TestDialTLSPathRoundtrips(t *testing.T) {
 	client, err := dial(context.Background(), host, port, true, "", insecure)
 	require.NoError(t, err)
 	require.NotNil(t, client)
+	// dial now returns after the bare TCP connect with the handshake deferred,
+	// so the local source port is known before TLS; the port is already valid here.
+	require.NotZero(t, client.LocalPort())
+	require.NoError(t, client.Handshake(context.Background()))
 	require.NoError(t, client.Close())
+}
+
+func TestHandshakeFailsOnVerificationAndClearsIdent(t *testing.T) {
+	// A real TLS server presenting a self-signed cert. dial() with no custom
+	// config (production path) verifies the chain, so the handshake fails — and
+	// bringUp's failure path must clear the ident it registered before the
+	// handshake, leaving no stale source-port mapping behind.
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srv.StartTLS()
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+	host, portStr, err := net.SplitHostPort(u.Host)
+	require.NoError(t, err)
+
+	client, err := dial(context.Background(), host, mustAtoi(t, portStr), true, "", nil)
+	require.NoError(t, err, "TCP connect + deferred-handshake setup must succeed")
+	port := client.LocalPort()
+	require.NotZero(t, port)
+
+	// Simulate bringUp's ordering: report the ident, then fail the handshake.
+	rep := newRecordingReporter()
+	c := New(&Settings{Nick: "x", Username: "tf1dcv74w"}, nil, nil)
+	c.SetIdentReporter(rep)
+	c.reportIdentPort(port)
+	require.Equal(t, "tf1dcv74w", rep.set[port])
+
+	require.Error(t, client.Handshake(context.Background()), "self-signed cert must fail verification")
+	_ = client.Close()
+	c.setClient(nil) // bringUp's handshake-failure cleanup
+
+	require.Contains(t, rep.clear, port, "ident registered before a failed handshake must be cleared")
+}
+
+func mustAtoi(t *testing.T, s string) int {
+	t.Helper()
+	n, err := strconv.Atoi(s)
+	require.NoError(t, err)
+	return n
 }
 
 // --- Live-nick sync ---------------------------------------------------
