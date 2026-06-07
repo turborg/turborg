@@ -290,12 +290,18 @@ func (s *reconnectTestServer) handleLine(conn net.Conn, line string) {
 				_, _ = conn.Write([]byte(":fake 376 " + nick + " :End of MOTD\r\n"))
 			}
 		}
+		// Exhaustion mode: 433 every fallback NICK forever, so the connector
+		// runs out of "_" suffixes and gives up.
+		if s.rejectAfter == "ERR_NICKNAMEINUSE_ALWAYS" {
+			nick := strings.TrimSpace(strings.TrimPrefix(line, "NICK "))
+			_, _ = conn.Write([]byte(":fake 433 * " + nick + " :Nickname is already in use\r\n"))
+		}
 	case strings.HasPrefix(line, "USER "):
 		nick := s.firstNickLocked()
 		switch s.rejectAfter {
 		case "ERR_NICKNAMEINUSE_THEN_OK":
 			// Handled on the NICK line(s), not here.
-		case "ERR_NICKNAMEINUSE":
+		case "ERR_NICKNAMEINUSE", "ERR_NICKNAMEINUSE_ALWAYS":
 			_, _ = conn.Write([]byte(":fake 433 * " + nick + " :Nickname is already in use\r\n"))
 		case "ERR_ERRONEOUSNICKNAME":
 			_, _ = conn.Write([]byte(":fake 432 * " + nick + " :Erroneous Nickname\r\n"))
@@ -413,8 +419,9 @@ func TestRegisterFallsBackOnNickInUse(t *testing.T) {
 
 // TestRegisterDoesNotFallBackOnErroneousNick: a 432 (erroneous/reserved
 // nick — e.g. a services-restricted name) must NOT trigger the "_" fallback,
-// because appending "_" can't make an invalid nick valid. It surfaces as
-// nick-unavailable and reconnects (under the throttle) with the same nick.
+// because appending "_" can't make an invalid nick valid. It surfaces as the
+// terminal invalid-nick state so the supervisor stops and the SPA prompts the
+// user for a different nick.
 func TestRegisterDoesNotFallBackOnErroneousNick(t *testing.T) {
 	fs := newReconnectTestServerWithReject(t, "ERR_ERRONEOUSNICKNAME")
 
@@ -432,13 +439,56 @@ func TestRegisterDoesNotFallBackOnErroneousNick(t *testing.T) {
 	go func() { done <- a.Run(ctx) }()
 
 	require.Eventually(t, func() bool {
-		return conn.UpstreamState().State() == irc.UpstreamStateDisconnectedNickUnavailable
-	}, 3*time.Second, 10*time.Millisecond, "432 must surface as nick-unavailable")
+		return conn.UpstreamState().State() == irc.UpstreamStateDisconnectedNickInvalid
+	}, 3*time.Second, 10*time.Millisecond, "432 must surface as the terminal invalid-nick state")
 
 	for _, l := range fs.Received() {
 		require.NotContains(t, l, "NICK admin_",
 			"a 432 erroneous nick must NOT fall back to a _-suffixed nick")
 	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent did not shut down")
+	}
+}
+
+// TestRegisterGivesUpAfterFallbackCap: a server that 433s every fallback nick
+// forever must not make the connector suffix "_" without bound. After the
+// fixed cap it gives up, lands in the terminal invalid-nick state (so the SPA
+// can prompt for a new nick), and never tries more than the cap of fallbacks.
+func TestRegisterGivesUpAfterFallbackCap(t *testing.T) {
+	fs := newReconnectTestServerWithReject(t, "ERR_NICKNAMEINUSE_ALWAYS")
+
+	conn := irc.New(&irc.Settings{
+		Hostname: "127.0.0.1",
+		Port:     fs.Port(),
+		Nick:     "guest",
+	}, nil, nil)
+
+	a := agent.New(nil)
+	a.AddConnector(conn)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+
+	require.Eventually(t, func() bool {
+		return conn.UpstreamState().State() == irc.UpstreamStateDisconnectedNickInvalid
+	}, 5*time.Second, 10*time.Millisecond, "exhausted 433 fallbacks must end in the terminal invalid-nick state")
+
+	// Count distinct fallback NICKs sent (guest_, guest__, …). Must be
+	// bounded — no unbounded "_" growth, no reconnect-and-retry storm.
+	fallbacks := 0
+	for _, l := range fs.Received() {
+		if strings.HasPrefix(l, "NICK guest_") {
+			fallbacks++
+		}
+	}
+	require.LessOrEqual(t, fallbacks, 8, "fallback attempts must be capped")
+	require.Positive(t, fallbacks, "must have tried at least one fallback before giving up")
 
 	cancel()
 	select {

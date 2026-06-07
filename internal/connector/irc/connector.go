@@ -537,6 +537,12 @@ const (
 	// 432, which we also treat as "exhausted". These attempts are all within
 	// one registration (one connection) — no reconnect, so no flood risk.
 	fallbackMaxNickLen = 15
+	// maxNickFallbacks caps the number of "_" suffixes we'll try in one
+	// registration before giving up — a predictable ceiling independent of
+	// nick length (a short nick wouldn't otherwise hit fallbackMaxNickLen for
+	// many tries). After this many taken alternates, treat the nick as
+	// unusable and surface the invalid-nick state so the user picks another.
+	maxNickFallbacks = 8
 	// nickReclaimInterval is how often, while the live nick differs from
 	// the desired one, we re-attempt the desired nick. Slow on purpose —
 	// it's a courtesy, not a hot path, and must never look like flooding.
@@ -565,6 +571,9 @@ func (c *Connector) DesiredNick() string {
 // (erroneous/reserved nick) is handled separately and never falls back,
 // since appending "_" can't make an invalid nick valid.
 func (c *Connector) nextFallbackNick() (string, bool) {
+	if c.nickFallbacks >= maxNickFallbacks {
+		return "", false
+	}
 	next := c.attemptedNick + "_"
 	if len(next) > fallbackMaxNickLen {
 		return "", false
@@ -1237,15 +1246,22 @@ func (c *Connector) awaitHandshake(ctx context.Context) error {
 				c.log.Info("irc nick in use; using fallback", "desired", c.DesiredNick(), "fallback", next)
 				continue
 			}
-			return fmt.Errorf("irc handshake: nickname %q already in use (433); no shorter fallback fits %d chars", c.attemptedNick, fallbackMaxNickLen)
+			// Fallbacks exhausted (hit maxNickFallbacks or fallbackMaxNickLen):
+			// more "_" won't help. Flip to the terminal invalid-nick state so
+			// the supervisor stops retrying and the SPA prompts for a new nick.
+			c.machine.Transition(UpstreamStateDisconnectedNickInvalid,
+				WithServerReason(fmt.Sprintf("nickname %q and its alternates are all taken", c.DesiredNick())))
+			return fmt.Errorf("irc handshake: nickname %q already in use (433); fallbacks exhausted after %d tries", c.attemptedNick, c.nickFallbacks)
 		case ErrErroneusNickname:
 			// 432: the nick is invalid or network-reserved. Appending "_"
-			// can't make it valid, so don't fall back — surface the error and
-			// let the supervisor reconnect under the floor/throttle. (Also the
-			// give-up path when a "_" fallback grew past the server's NICKLEN.)
+			// can't make it valid, so don't fall back. ClassifyNumeric above
+			// already moved us to the terminal invalid-nick state; surface the
+			// error so the supervisor stops and the SPA prompts for a new nick.
 			return fmt.Errorf("irc handshake: nickname %q erroneous/reserved (432): %s", c.attemptedNick, msg.Trailing)
 		case ErrUnavailResource:
-			return fmt.Errorf("irc handshake: nickname %q unavailable (437)", c.settings.Nick)
+			// 437: reserved/juped nick. Like 432 — terminal invalid-nick
+			// (ClassifyNumeric set the state); the user picks another.
+			return fmt.Errorf("irc handshake: nickname %q unavailable/reserved (437): %s", c.settings.Nick, msg.Trailing)
 		case ErrPasswdMismatch:
 			return fmt.Errorf("irc handshake: server password rejected (464)")
 		case ErrYoureBannedCreep:
@@ -1801,14 +1817,15 @@ func (c *Connector) dispatchLine(ctx context.Context, line string) {
 	if state, reason, ok := ClassifyDisconnectMessage(line); ok {
 		c.machine.Transition(state, WithServerReason(reason))
 	} else if state, ok := ClassifyNumeric(msg.Command, msg.Params, msg.Trailing); ok {
-		// A nick-unavailable numeric (433/432/437) during a LIVE session is a
-		// failed nick-change — the reclaim loop or a client /nick hitting a
-		// taken/invalid nick — NOT a disconnect. The connection is fine, so it
-		// must not flip out of `registered` (which would make the bouncer think
-		// the bot is offline and reject sends to channels it's actually in).
-		// Registration-time nick-unavailable is handled in awaitHandshake; the
-		// attached client still sees the raw numeric via the fan-out below.
-		if state != UpstreamStateDisconnectedNickUnavailable {
+		// A nick-unavailable/invalid numeric (433/432/437) during a LIVE
+		// session is a failed nick-change — the reclaim loop or a client /nick
+		// hitting a taken/invalid nick — NOT a disconnect. The connection is
+		// fine, so it must not flip out of `registered` (which would make the
+		// bouncer think the bot is offline and reject sends to channels it's
+		// actually in). Registration-time nick handling lives in awaitHandshake;
+		// the attached client still sees the raw numeric via the fan-out below.
+		if state != UpstreamStateDisconnectedNickUnavailable &&
+			state != UpstreamStateDisconnectedNickInvalid {
 			c.machine.Transition(state, WithServerReason(msg.Trailing))
 		}
 	}

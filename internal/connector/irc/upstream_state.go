@@ -40,9 +40,20 @@ const (
 	UpstreamStateDisconnectedTransient UpstreamState = "disconnected_transient"
 
 	// UpstreamStateDisconnectedNickUnavailable is 433 ERR_NICKNAMEINUSE
-	// or 437 ERR_UNAVAILRESOURCE during registration. Recoverable —
-	// supervisor retries with backoff in case the nick frees up.
+	// during registration — the nick is merely taken. Recoverable: the
+	// handshake auto-suffixes "_" and keeps registering, and the reclaim
+	// loop takes the desired nick back once it frees.
 	UpstreamStateDisconnectedNickUnavailable UpstreamState = "disconnected_nick_unavailable"
+
+	// UpstreamStateDisconnectedNickInvalid is reached when the chosen nick
+	// cannot be used at all: 432 ERR_ERRONEUSNICKNAME (syntactically invalid
+	// or network-reserved), 437 ERR_UNAVAILRESOURCE (reserved/juped), or a
+	// 433 whose "_"-suffix fallback was exhausted. Terminal — appending more
+	// underscores or reconnecting can't help, so the user must pick a
+	// different nick (the SPA prompts for one). Distinct from
+	// NickUnavailable so the front-end knows to open the picker rather than
+	// show a transient "retrying" banner.
+	UpstreamStateDisconnectedNickInvalid UpstreamState = "disconnected_nick_invalid"
 
 	// UpstreamStateDisconnectedAuthFailed is 464 ERR_PASSWDMISMATCH,
 	// 904 ERR_SASLFAIL, 905 ERR_SASLTOOLONG, or content-matched
@@ -82,6 +93,7 @@ func (s UpstreamState) IsTerminal() bool {
 	switch s {
 	case UpstreamStateDisconnectedAuthFailed,
 		UpstreamStateDisconnectedBanned,
+		UpstreamStateDisconnectedNickInvalid,
 		UpstreamStatePausedIdle,
 		UpstreamStateStopped:
 		return true
@@ -306,8 +318,13 @@ func ClassifyError(err error) (UpstreamState, bool) {
 // only inspects the numeric code itself.
 func ClassifyNumeric(numeric string, _ []string, _ string) (UpstreamState, bool) {
 	switch numeric {
-	case ErrNickNameInUse, ErrUnavailResource, ErrErroneusNickname:
+	case ErrNickNameInUse:
+		// 433: nick merely taken — recoverable via "_" fallback + reclaim.
 		return UpstreamStateDisconnectedNickUnavailable, true
+	case ErrErroneusNickname, ErrUnavailResource:
+		// 432/437: nick invalid or reserved — suffixing can't fix it; the
+		// user must choose another. Terminal.
+		return UpstreamStateDisconnectedNickInvalid, true
 	case ErrPasswdMismatch, ErrSaslFail, ErrSaslTooLong:
 		return UpstreamStateDisconnectedAuthFailed, true
 	case ErrYoureBannedCreep:
@@ -404,8 +421,11 @@ func DescribeUpstreamState(state UpstreamState, networkName, serverReason string
 		return "Currently disconnected from " + network + reasonSuffix +
 			". Reconnecting; messages sent now will NOT be delivered."
 	case UpstreamStateDisconnectedNickUnavailable:
-		return "Nickname unavailable on " + network +
-			" — retrying with an alternate. Channels will appear when registration completes."
+		return "Nickname taken on " + network +
+			" — connecting under a temporary alternate and reclaiming it when it frees. Channels will appear when registration completes."
+	case UpstreamStateDisconnectedNickInvalid:
+		return "Nickname can't be used on " + network + reasonSuffix +
+			". Pick a different nickname to connect — it's invalid or reserved on this network."
 	case UpstreamStateDisconnectedAuthFailed:
 		return "Authentication failed for " + network + reasonSuffix +
 			". Automatic reconnect stopped — update credentials and restart the connector."
@@ -440,6 +460,7 @@ func SeverityForUpstreamState(state UpstreamState) string {
 		return "warning"
 	case UpstreamStateDisconnectedAuthFailed,
 		UpstreamStateDisconnectedBanned,
+		UpstreamStateDisconnectedNickInvalid,
 		UpstreamStatePausedIdle,
 		UpstreamStateStopped:
 		return "error"
