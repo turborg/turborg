@@ -137,8 +137,14 @@ type reconnectTestServer struct {
 
 	// rejectAfter, when non-empty, names a pre-MOTD numeric the server
 	// replies with instead of 001/376 — exercises the classifier's
-	// nick-unavailable / auth-failed / banned branches.
+	// nick-unavailable / auth-failed / banned branches. The special value
+	// "ERR_NICKNAMEINUSE_THEN_OK" rejects the first NICK with 433 then
+	// welcomes the suffixed fallback — exercises the 433 fallback path.
 	rejectAfter string
+
+	// reg433Sent tracks whether the one-shot 433 has been emitted (for the
+	// ERR_NICKNAMEINUSE_THEN_OK fallback mode).
+	reg433Sent bool
 
 	// joinHook lets edge tests intercept the JOIN reply. Returning
 	// true means "I handled this JOIN" and suppresses the default
@@ -269,9 +275,26 @@ func (s *reconnectTestServer) handleLine(conn net.Conn, line string) {
 		}
 		caps := strings.Fields(line[idx+2:])
 		_, _ = conn.Write([]byte(":fake CAP * ACK :" + strings.Join(caps, " ") + "\r\n"))
+	case strings.HasPrefix(line, "NICK "):
+		// Fallback mode: 433 the first NICK, welcome the suffixed retry.
+		if s.rejectAfter == "ERR_NICKNAMEINUSE_THEN_OK" {
+			nick := strings.TrimSpace(strings.TrimPrefix(line, "NICK "))
+			s.mu.Lock()
+			first := !s.reg433Sent
+			s.reg433Sent = true
+			s.mu.Unlock()
+			if first {
+				_, _ = conn.Write([]byte(":fake 433 * " + nick + " :Nickname is already in use\r\n"))
+			} else {
+				_, _ = conn.Write([]byte(":fake 001 " + nick + " :Welcome\r\n"))
+				_, _ = conn.Write([]byte(":fake 376 " + nick + " :End of MOTD\r\n"))
+			}
+		}
 	case strings.HasPrefix(line, "USER "):
 		nick := s.firstNickLocked()
 		switch s.rejectAfter {
+		case "ERR_NICKNAMEINUSE_THEN_OK":
+			// Handled on the NICK line(s), not here.
 		case "ERR_NICKNAMEINUSE":
 			_, _ = conn.Write([]byte(":fake 433 * " + nick + " :Nickname is already in use\r\n"))
 		case "ERR_PASSWDMISMATCH":
@@ -341,6 +364,42 @@ func TestSupervisorReconnectsAfterUpstreamKill(t *testing.T) {
 			fs.Sessions() == 2
 	}, 5*time.Second, 50*time.Millisecond,
 		"supervisor must reconnect; sessions=%d state=%s", fs.Sessions(), conn.UpstreamState().State())
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent did not shut down")
+	}
+}
+
+// TestRegisterFallsBackOnNickInUse covers the 433 fallback: the server
+// rejects the first NICK as in-use, and instead of aborting (which would
+// drop into the reconnect loop and race our own ghost), the connector
+// suffixes "_" and completes registration under the fallback nick. The
+// desired nick is preserved as the reclaim target.
+func TestRegisterFallsBackOnNickInUse(t *testing.T) {
+	fs := newReconnectTestServerWithReject(t, "ERR_NICKNAMEINUSE_THEN_OK")
+
+	conn := irc.New(&irc.Settings{
+		Hostname: "127.0.0.1",
+		Port:     fs.Port(),
+		Nick:     "turborg",
+	}, nil, nil)
+
+	a := agent.New(nil)
+	a.AddConnector(conn)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+
+	require.Eventually(t, func() bool {
+		return conn.UpstreamState().State() == irc.UpstreamStateRegistered
+	}, 3*time.Second, 10*time.Millisecond, "must register on the suffixed fallback nick")
+
+	require.Equal(t, "turborg_", conn.CurrentNick(), "live nick is the fallback")
+	require.Equal(t, "turborg", conn.DesiredNick(), "desired (reclaim target) stays the original")
 
 	cancel()
 	select {
