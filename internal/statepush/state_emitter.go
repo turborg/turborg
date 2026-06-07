@@ -29,7 +29,8 @@ type SnapshotBuilder func() Snapshot
 //	      "state": "registered",
 //	      "since": "2026-05-17T15:30:00Z",
 //	      "channels": [{"name": "#x", "key": null}, ...],
-//	      "nick": "stefan"
+//	      "nick": "stefan",
+//	      "reason": ""
 //	    }
 //	  }
 //	}
@@ -47,6 +48,10 @@ type ConnectorSnapshot struct {
 	Since    time.Time         `json:"since"`
 	Channels []ChannelSnapshot `json:"channels"`
 	Nick     string            `json:"nick"`
+	// Reason is the last server-supplied human-readable explanation for
+	// the current state — e.g. the disconnect/ban text an upstream sent.
+	// Empty for healthy states or when the server gave no reason.
+	Reason string `json:"reason"`
 }
 
 // ChannelSnapshot is one wanted-channel entry. Key is nullable on the
