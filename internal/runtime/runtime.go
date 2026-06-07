@@ -81,6 +81,10 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 
 	notifier := activity.New(s.ActivityURL, s.ActivityToken, log)
 	ircConn := irc.New(ircCfg, log, a.Events)
+	// Never reconnect faster than the upstream reaps our ghost nick (avoids
+	// 433 self-collision storms / connection-flood bans). Same floor as the
+	// pooled runtime — the connector layer is shared.
+	ircConn.SetReconnectFloor(irc.DefaultReconnectFloor)
 
 	// State-webhook emitter (transport: PUT to STATE_WEBHOOK_URL). Mirrors
 	// authoritative per-connector state whenever it changes; inert no-op when
@@ -667,6 +671,14 @@ func LoadIRCSettings() (*irc.Settings, error) {
 func Run(ctx context.Context, b *Built) error {
 	if b.StatePush != nil {
 		defer b.StatePush.Stop()
+		// Runs before Stop (LIFO): flush the final snapshot so a terminal
+		// state reached just before shutdown (e.g. disconnected_banned) is
+		// delivered instead of dropped with the cancelled debounce timer.
+		defer func() {
+			flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			b.StatePush.Flush(flushCtx)
+			cancel()
+		}()
 	}
 
 	rootCtx, cancel := context.WithCancel(ctx)

@@ -92,6 +92,15 @@ type Connector struct {
 	// hammering the upstream network / shared egress IP. See reconnect_storm.go.
 	storm *reconnectStorm
 
+	// reconnectFloor is the minimum delay before any reconnect dial. Its
+	// purpose is to never reconnect faster than the server reaps our old
+	// connection's nick: a stable session that drops (e.g. PING timeout)
+	// resets the backoff to ~1s, and reconnecting that fast collides with
+	// our own lingering ghost → repeated 433 → throttle → ban. A floor
+	// above the typical server ghost-reap window avoids that entirely. 0
+	// disables it (the default; production wiring sets it).
+	reconnectFloor time.Duration
+
 	// clientLimits is the operator-policy struct the bouncer consults
 	// before forwarding client-originated commands upstream. Held here
 	// so runtime.Build can hand it to the connector before Start; it
@@ -268,6 +277,13 @@ func New(s *Settings, log *slog.Logger, events *agent.EventBus) *Connector {
 // Must be called before Run; tests use it to trip the breaker on tight timings.
 func (c *Connector) SetReconnectStorm(window time.Duration, maxAttempts int, cooldown time.Duration) {
 	c.storm = newReconnectStorm(window, maxAttempts, cooldown)
+}
+
+// SetReconnectFloor sets the minimum delay before any reconnect dial (see
+// the reconnectFloor field). A non-positive value disables the floor.
+// Must be called before Run; production wiring sets it, tests leave it 0.
+func (c *Connector) SetReconnectFloor(d time.Duration) {
+	c.reconnectFloor = d
 }
 
 // WantedChannels returns the connector's wanted-channels set. Used by
@@ -1231,6 +1247,13 @@ func (c *Connector) Run(ctx context.Context) error {
 		// in a long cooldown once reconnects pile up in its window, so a
 		// persistent flapper stops hammering the network / egress IP.
 		delay := c.storm.nextDelay(time.Now(), backoff.Next(), c.log)
+		// Never reconnect faster than the server reaps our old nick — a
+		// sub-floor delay risks colliding with our own ghost (433) and
+		// escalating into a throttle/ban. The storm cooldown already
+		// exceeds the floor, so max() leaves it untouched.
+		if c.reconnectFloor > 0 && delay < c.reconnectFloor {
+			delay = c.reconnectFloor
+		}
 		c.log.Info("irc reconnecting", "state", c.machine.State(), "after", delay, "err", err)
 		select {
 		case <-runCtx.Done():

@@ -1,6 +1,7 @@
 package statepush_test
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -140,6 +141,41 @@ func TestStateEmitter_NotifyChangeFiresPutWithZeroDebounce(t *testing.T) {
 	assert.Equal(t, "Unsolicited advertisements/mass abuse.", got.Connectors["irc"].Reason)
 	require.Len(t, got.Connectors["irc"].Channels, 1)
 	assert.Equal(t, "#a", got.Connectors["irc"].Channels[0].Name)
+}
+
+func TestStateEmitter_FlushPutsSynchronouslyWithoutNotify(t *testing.T) {
+	rec := &recorder{}
+	server := httptest.NewServer(rec.handler())
+	t.Cleanup(server.Close)
+
+	// Long debounce so a normal NotifyChange would NOT have fired by the
+	// time we assert — proving Flush bypasses the debounce. This models the
+	// teardown race: a terminal state lands ~1ms before Stop.
+	c := statepush.NewClient(server.URL+"/state", "", nil)
+	e := statepush.NewEmitter(c, func() statepush.Snapshot {
+		return statepush.Snapshot{
+			Connectors: map[string]statepush.ConnectorSnapshot{
+				"irc": {State: "disconnected_banned", Reason: "Unsolicited advertisements/mass abuse."},
+			},
+		}
+	}, 10*time.Second, nil)
+	t.Cleanup(e.Stop)
+
+	e.Flush(context.Background())
+
+	require.Equal(t, 1, rec.count(), "Flush must PUT synchronously")
+	var got statepush.Snapshot
+	require.NoError(t, json.Unmarshal(rec.bodyAt(0), &got))
+	assert.Equal(t, "disconnected_banned", got.Connectors["irc"].State)
+	assert.Equal(t, "Unsolicited advertisements/mass abuse.", got.Connectors["irc"].Reason)
+}
+
+func TestStateEmitter_FlushSafeOnDisabled(t *testing.T) {
+	// nil/disabled emitter (empty URL) must be a no-op, not panic.
+	var nilEmitter *statepush.Emitter
+	nilEmitter.Flush(context.Background())
+	e := statepush.NewEmitter(statepush.NewClient("", "", nil), func() statepush.Snapshot { return statepush.Snapshot{} }, 0, nil)
+	e.Flush(context.Background())
 }
 
 func TestStateEmitter_BurstCoalescesIntoOnePut(t *testing.T) {
