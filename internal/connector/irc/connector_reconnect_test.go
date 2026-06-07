@@ -297,6 +297,8 @@ func (s *reconnectTestServer) handleLine(conn net.Conn, line string) {
 			// Handled on the NICK line(s), not here.
 		case "ERR_NICKNAMEINUSE":
 			_, _ = conn.Write([]byte(":fake 433 * " + nick + " :Nickname is already in use\r\n"))
+		case "ERR_ERRONEOUSNICKNAME":
+			_, _ = conn.Write([]byte(":fake 432 * " + nick + " :Erroneous Nickname\r\n"))
 		case "ERR_PASSWDMISMATCH":
 			_, _ = conn.Write([]byte(":fake 464 " + nick + " :Password incorrect\r\n"))
 		case "ERR_YOUREBANNEDCREEP":
@@ -400,6 +402,43 @@ func TestRegisterFallsBackOnNickInUse(t *testing.T) {
 
 	require.Equal(t, "turborg_", conn.CurrentNick(), "live nick is the fallback")
 	require.Equal(t, "turborg", conn.DesiredNick(), "desired (reclaim target) stays the original")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent did not shut down")
+	}
+}
+
+// TestRegisterDoesNotFallBackOnErroneousNick: a 432 (erroneous/reserved
+// nick — e.g. a services-restricted name) must NOT trigger the "_" fallback,
+// because appending "_" can't make an invalid nick valid. It surfaces as
+// nick-unavailable and reconnects (under the throttle) with the same nick.
+func TestRegisterDoesNotFallBackOnErroneousNick(t *testing.T) {
+	fs := newReconnectTestServerWithReject(t, "ERR_ERRONEOUSNICKNAME")
+
+	conn := irc.New(&irc.Settings{
+		Hostname: "127.0.0.1",
+		Port:     fs.Port(),
+		Nick:     "admin",
+	}, nil, nil)
+
+	a := agent.New(nil)
+	a.AddConnector(conn)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+
+	require.Eventually(t, func() bool {
+		return conn.UpstreamState().State() == irc.UpstreamStateDisconnectedNickUnavailable
+	}, 3*time.Second, 10*time.Millisecond, "432 must surface as nick-unavailable")
+
+	for _, l := range fs.Received() {
+		require.NotContains(t, l, "NICK admin_",
+			"a 432 erroneous nick must NOT fall back to a _-suffixed nick")
+	}
 
 	cancel()
 	select {

@@ -306,7 +306,7 @@ func ClassifyError(err error) (UpstreamState, bool) {
 // only inspects the numeric code itself.
 func ClassifyNumeric(numeric string, _ []string, _ string) (UpstreamState, bool) {
 	switch numeric {
-	case ErrNickNameInUse, ErrUnavailResource:
+	case ErrNickNameInUse, ErrUnavailResource, ErrErroneusNickname:
 		return UpstreamStateDisconnectedNickUnavailable, true
 	case ErrPasswdMismatch, ErrSaslFail, ErrSaslTooLong:
 		return UpstreamStateDisconnectedAuthFailed, true

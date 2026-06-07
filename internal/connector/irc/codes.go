@@ -45,6 +45,7 @@ const (
 
 	ErrNoSuchNick       = "401"
 	ErrNoMOTD           = "422"
+	ErrErroneusNickname = "432"
 	ErrNickNameInUse    = "433"
 	ErrUnavailResource  = "437"
 	ErrNotRegistered    = "451"
