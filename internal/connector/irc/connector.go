@@ -1332,14 +1332,7 @@ func (c *Connector) Run(ctx context.Context) error {
 		// paused_idle — that surfaces as runCtx.Done. The storm breaker swaps
 		// in a long cooldown once reconnects pile up in its window, so a
 		// persistent flapper stops hammering the network / egress IP.
-		delay := c.storm.nextDelay(time.Now(), backoff.Next(), c.log)
-		// Never reconnect faster than the server reaps our old nick — a
-		// sub-floor delay risks colliding with our own ghost (433) and
-		// escalating into a throttle/ban. The storm cooldown already
-		// exceeds the floor, so max() leaves it untouched.
-		if c.reconnectFloor > 0 && delay < c.reconnectFloor {
-			delay = c.reconnectFloor
-		}
+		delay := c.reconnectDelay(backoff)
 		c.log.Info("irc reconnecting", "state", c.machine.State(), "after", delay, "err", err)
 		select {
 		case <-runCtx.Done():
@@ -1366,6 +1359,20 @@ func (c *Connector) Run(ctx context.Context) error {
 		}
 		sessionStart = time.Now()
 	}
+}
+
+// reconnectDelay returns how long to wait before the next reconnect: the
+// storm breaker's value (plain backoff, or its long cooldown once the
+// reconnect rate trips the breaker), raised to the reconnect floor so we
+// never reconnect inside the server's ghost-nick reap window (the 433
+// self-collision trigger). The storm cooldown already exceeds the floor,
+// so the max() leaves it untouched.
+func (c *Connector) reconnectDelay(backoff *BackoffSchedule) time.Duration {
+	d := c.storm.nextDelay(time.Now(), backoff.Next(), c.log)
+	if c.reconnectFloor > 0 && d < c.reconnectFloor {
+		d = c.reconnectFloor
+	}
+	return d
 }
 
 // runSession runs one upstream session: the reader / ping / dispatch
