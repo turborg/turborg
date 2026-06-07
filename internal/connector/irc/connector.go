@@ -1785,7 +1785,16 @@ func (c *Connector) dispatchLine(ctx context.Context, line string) {
 	if state, reason, ok := ClassifyDisconnectMessage(line); ok {
 		c.machine.Transition(state, WithServerReason(reason))
 	} else if state, ok := ClassifyNumeric(msg.Command, msg.Params, msg.Trailing); ok {
-		c.machine.Transition(state, WithServerReason(msg.Trailing))
+		// A nick-unavailable numeric (433/432/437) during a LIVE session is a
+		// failed nick-change — the reclaim loop or a client /nick hitting a
+		// taken/invalid nick — NOT a disconnect. The connection is fine, so it
+		// must not flip out of `registered` (which would make the bouncer think
+		// the bot is offline and reject sends to channels it's actually in).
+		// Registration-time nick-unavailable is handled in awaitHandshake; the
+		// attached client still sees the raw numeric via the fan-out below.
+		if state != UpstreamStateDisconnectedNickUnavailable {
+			c.machine.Transition(state, WithServerReason(msg.Trailing))
+		}
 	}
 
 	// Forward every observed upstream line to attached bouncer clients

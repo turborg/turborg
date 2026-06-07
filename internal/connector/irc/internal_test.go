@@ -1821,3 +1821,19 @@ func TestReconcileChannelsUpdatesWantedSet(t *testing.T) {
 		t.Fatalf("wanted set should be {#b,#c}, got %v", got)
 	}
 }
+
+func TestLiveNickInUseDoesNotDisconnect(t *testing.T) {
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+	// Drive to a live, registered session.
+	c.machine.Transition(UpstreamStateConnecting)
+	c.machine.Transition(UpstreamStateRegistering)
+	c.machine.Transition(UpstreamStateRegistered)
+	require.Equal(t, UpstreamStateRegistered, c.machine.State())
+
+	// The reclaim loop (or a client /nick) attempts a taken nick → 433. This
+	// is a failed nick-change, not a disconnect; the session must stay up.
+	c.dispatchLine(context.Background(), ":server 433 bot desirednick :Nickname is already in use")
+
+	require.Equal(t, UpstreamStateRegistered, c.machine.State(),
+		"a 433 during a live session must not flip the connector out of registered")
+}
