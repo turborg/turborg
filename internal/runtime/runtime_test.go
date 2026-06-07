@@ -2,6 +2,8 @@ package runtime_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -866,4 +868,32 @@ func TestBuildIgnoresRealnameTemplateWithoutLock(t *testing.T) {
 	_, err := runtime.Build(s, ircCfg, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "user-supplied", ircCfg.RealName)
+}
+
+func TestBuildWiresConfigRefresh(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"nick":"newnick","channels":["#x"]}`))
+	}))
+	defer srv.Close()
+
+	s := &config.Settings{CommandPrefix: "!", ConfigURL: srv.URL, ConfigToken: "tok"}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	require.NotNil(t, b.ConfigRefresh, "CONFIG_URL set → refresher wired")
+
+	// Run the refresher once: the apply closure calls ApplyNick + ReconcileChannels.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_ = b.ConfigRefresh.Run(ctx)
+
+	assert.Equal(t, "newnick", b.IRC.DesiredNick(), "live config refresh applied the desired nick")
+}
+
+func TestBuildNoConfigRefreshWhenUnset(t *testing.T) {
+	s := &config.Settings{CommandPrefix: "!"}
+	ircCfg := &irc.Settings{Hostname: "fake", Nick: "turborg"}
+	b, err := runtime.Build(s, ircCfg, nil)
+	require.NoError(t, err)
+	assert.Nil(t, b.ConfigRefresh, "no CONFIG_URL → no refresher (boot config fixed)")
 }

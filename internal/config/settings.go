@@ -165,6 +165,19 @@ type Settings struct {
 	// values below the floor are clamped up by the refresher.
 	CommandsRefreshSeconds int `env:"COMMANDS_REFRESH_SECONDS"`
 
+	// ConfigURL is an optional endpoint the agent polls to hot-reload its live
+	// IRC nick + channel set while it runs — no reconnect. Empty = no live
+	// reload (the boot TURBORG_IRC_NICK / CHANNELS are fixed). This gives a
+	// single-instance agent the same live nick/channel reconcile the pooled
+	// runtime does from its tenant feed.
+	ConfigURL string `env:"CONFIG_URL"`
+	// ConfigToken is the bearer sent on every config poll. Defaults to
+	// MessageSinkToken via normalize() when unset — same per-container endpoint.
+	ConfigToken string `env:"CONFIG_TOKEN"`
+	// ConfigRefreshSeconds is the poll interval. 0 uses the package default;
+	// values below the floor are clamped up by the refresher.
+	ConfigRefreshSeconds int `env:"CONFIG_REFRESH_SECONDS"`
+
 	// CustomCommandsMax caps the dynamic-command registry. 0 = no
 	// commands, -1 = unrestricted. Bounds the command set loaded from
 	// TURBORG_COMMANDS (and any later runtime registrations).
@@ -315,6 +328,11 @@ func (s *Settings) normalize() error {
 	// reuses that bearer unless overridden.
 	if s.CommandsToken == "" {
 		s.CommandsToken = s.MessageSinkToken
+	}
+	// The config (nick/channels) poll terminates at the same per-container
+	// endpoint, so it reuses that bearer unless overridden.
+	if s.ConfigToken == "" {
+		s.ConfigToken = s.MessageSinkToken
 	}
 	return nil
 }

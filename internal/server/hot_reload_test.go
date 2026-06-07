@@ -29,6 +29,21 @@ func specWithChannel(id, channel string) TenantSpec {
 	}
 }
 
+// specWithOwnerMode builds a spec that differs in a NON-live connector field
+// (owner_mode), used by tests that need a change which genuinely forces a
+// restart (nick/channels now apply live and never restart).
+func specWithOwnerMode(id, mode string) TenantSpec {
+	return TenantSpec{
+		TurborgID:   id,
+		RuntimeMode: "pooled",
+		Connectors: []ConnectorSpec{{
+			Type:    "irc",
+			Config:  map[string]any{"owner_mode": mode},
+			Secrets: map[string]any{},
+		}},
+	}
+}
+
 // TestUpdateRestartsTenantWithNewSpec is the M7 deliverable: changing a
 // running tenant's spec restarts its work with the new config, without losing
 // the tenant or disturbing the process.
@@ -37,15 +52,15 @@ func TestUpdateRestartsTenantWithNewSpec(t *testing.T) {
 	seen := make(chan string, 8)
 
 	events := make(chan TenantEvent)
-	src := &StaticSource{Tenants: []TenantSpec{specWithChannel("x", "#one")}, Events: events}
+	src := &StaticSource{Tenants: []TenantSpec{specWithOwnerMode("x", "self")}, Events: events}
 	srv := New(src, testLogger())
 	srv.workFactory = func(tn *Tenant) func(context.Context) error {
 		return func(ctx context.Context) error {
 			runs.Add(1)
 			tn.mu.Lock()
-			ch := fmt.Sprint(tn.spec.Connectors[0].Config["channels"])
+			mode := fmt.Sprint(tn.spec.Connectors[0].Config["owner_mode"])
 			tn.mu.Unlock()
-			seen <- ch
+			seen <- mode
 			<-ctx.Done()
 			return ctx.Err()
 		}
@@ -55,11 +70,12 @@ func TestUpdateRestartsTenantWithNewSpec(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- srv.Run(ctx) }()
 
-	require.Equal(t, "[#one]", waitStr(t, seen), "first run should see the initial channel")
+	require.Equal(t, "self", waitStr(t, seen), "first run should see the initial config")
 
-	// Change the channel — the tenant must restart and observe the new spec.
-	events <- TenantEvent{Kind: TenantUpserted, Spec: specWithChannel("x", "#two")}
-	require.Equal(t, "[#two]", waitStr(t, seen), "restart should see the updated channel")
+	// Change a non-live connector field — the tenant must restart and observe
+	// the new spec. (Nick/channel changes apply live; see the live-apply tests.)
+	events <- TenantEvent{Kind: TenantUpserted, Spec: specWithOwnerMode("x", "account")}
+	require.Equal(t, "account", waitStr(t, seen), "restart should see the updated config")
 	require.GreaterOrEqual(t, int(runs.Load()), 2)
 	require.Equal(t, 1, srv.Count(), "update must not duplicate the tenant")
 
@@ -127,11 +143,13 @@ func TestLiveUpdatableOnlyChangeIgnoresTokenUsageBaseline(t *testing.T) {
 	require.False(t, liveUpdatableOnlyChange(base, capChange),
 		"a capability change is not a live-updatable-only change")
 
-	// A channel change alongside a baseline move must still force a restart.
-	chChange := specWithChannel("x", "#two")
-	chChange.PlanCapabilities = movedBaseline.PlanCapabilities
-	require.False(t, liveUpdatableOnlyChange(base, chChange),
-		"a connector change is not a live-updatable-only change")
+	// A non-live connector change (owner_mode) alongside a baseline move must
+	// still force a restart.
+	ownerChange := specWithChannel("x", "#one")
+	ownerChange.Connectors[0].Config["owner_mode"] = "account"
+	ownerChange.PlanCapabilities = movedBaseline.PlanCapabilities
+	require.False(t, liveUpdatableOnlyChange(base, ownerChange),
+		"a non-live connector change is not a live-updatable-only change")
 }
 
 func TestReloadCommandsSwapsInPlace(t *testing.T) {
@@ -236,12 +254,13 @@ func TestUpdateCommandsOnlyReloadsWithoutRestart(t *testing.T) {
 
 	require.Equal(t, int32(1), runs.Load(), "a command-only change must not restart the work loop")
 
-	// A connection-affecting change (new channel) still restarts.
-	chSpec := cmdSpec
-	chSpec.Connectors = []ConnectorSpec{{Type: "irc", Config: map[string]any{"owner_mode": "self", "channels": []any{"#two"}}, Secrets: map[string]any{}}}
-	events <- TenantEvent{Kind: TenantUpserted, Spec: chSpec}
+	// A non-live connector change (owner_mode) still restarts. (Nick/channel
+	// changes apply live — covered by TestUpdateIgnoreOnlyReloadsWithoutRestart.)
+	ownerSpec := cmdSpec
+	ownerSpec.Connectors = []ConnectorSpec{{Type: "irc", Config: map[string]any{"owner_mode": "account"}, Secrets: map[string]any{}}}
+	events <- TenantEvent{Kind: TenantUpserted, Spec: ownerSpec}
 	require.Eventually(t, func() bool { return runs.Load() == 2 }, 2*time.Second, 10*time.Millisecond,
-		"a connector change must restart the work loop")
+		"a non-live connector change must restart the work loop")
 
 	cancel()
 	require.ErrorIs(t, <-done, context.Canceled)
@@ -312,11 +331,18 @@ func TestLiveUpdatableOnlyChangeAllowsIgnoreEdit(t *testing.T) {
 	require.True(t, liveUpdatableOnlyChange(base, ignoreEdit),
 		"an ignore-list edit must be applied without a reconnect")
 
-	// An ignore edit alongside a connector change must still force a restart.
+	// A channels change is now live (JOIN/PART), so a channels + ignore edit
+	// is still live-updatable-only — no reconnect.
 	ignoreAndChannel := specWithChannel("x", "#two")
 	ignoreAndChannel.IgnoredNicks = ignoreEdit.IgnoredNicks
-	require.False(t, liveUpdatableOnlyChange(base, ignoreAndChannel),
-		"a connector change alongside an ignore edit is not live-updatable-only")
+	require.True(t, liveUpdatableOnlyChange(base, ignoreAndChannel),
+		"a channels change applies live, so with an ignore edit it stays live-updatable-only")
+
+	// A non-live connector field (here owner_mode) still forces a restart.
+	ownerChange := specWithChannel("x", "#one")
+	ownerChange.Connectors[0].Config["owner_mode"] = "account"
+	require.False(t, liveUpdatableOnlyChange(base, ownerChange),
+		"a non-live connector change is not live-updatable-only")
 }
 
 func TestReloadGuardFallsBackWhenNotRunning(t *testing.T) {
@@ -421,12 +447,21 @@ func TestUpdateIgnoreOnlyReloadsWithoutRestart(t *testing.T) {
 	require.Never(t, func() bool { return runs.Load() != 1 }, 200*time.Millisecond, 20*time.Millisecond,
 		"an ignore-only change must never restart the work loop")
 
-	// A connector change still restarts.
-	chSpec := ignoreSpec
-	chSpec.Connectors = []ConnectorSpec{{Type: "irc", Config: map[string]any{"owner_mode": "self", "channels": []any{"#two"}}, Secrets: map[string]any{}}}
-	events <- TenantEvent{Kind: TenantUpserted, Spec: chSpec}
+	// A channels-only connector change applies live (JOIN/PART), so it must
+	// NOT restart — that's what keeps the user's /join in sync without
+	// dropping the session.
+	chLiveSpec := ignoreSpec
+	chLiveSpec.Connectors = []ConnectorSpec{{Type: "irc", Config: map[string]any{"owner_mode": "self", "channels": []any{"#two"}}, Secrets: map[string]any{}}}
+	events <- TenantEvent{Kind: TenantUpserted, Spec: chLiveSpec}
+	require.Never(t, func() bool { return runs.Load() != 1 }, 200*time.Millisecond, 20*time.Millisecond,
+		"a channels-only change must apply live, not restart the work loop")
+
+	// A non-live connector change (owner_mode) still restarts.
+	ownerSpec := chLiveSpec
+	ownerSpec.Connectors = []ConnectorSpec{{Type: "irc", Config: map[string]any{"owner_mode": "account", "channels": []any{"#two"}}, Secrets: map[string]any{}}}
+	events <- TenantEvent{Kind: TenantUpserted, Spec: ownerSpec}
 	require.Eventually(t, func() bool { return runs.Load() == 2 }, 2*time.Second, 10*time.Millisecond,
-		"a connector change must restart the work loop")
+		"a non-live connector change must restart the work loop")
 
 	cancel()
 	require.ErrorIs(t, <-done, context.Canceled)

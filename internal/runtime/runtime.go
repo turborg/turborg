@@ -27,6 +27,7 @@ import (
 	"github.com/turborg/turborg/internal/commandrefresh"
 	"github.com/turborg/turborg/internal/commands"
 	"github.com/turborg/turborg/internal/config"
+	"github.com/turborg/turborg/internal/configrefresh"
 	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/messages"
@@ -49,6 +50,10 @@ type Built struct {
 	// BudgetRefresh keeps the token budget's account baseline current while the
 	// agent runs. Nil when the provider isn't budgeted or no endpoint is set.
 	BudgetRefresh *budgetrefresh.Refresher
+	// ConfigRefresh hot-reloads the live IRC nick + channel set in place while
+	// the agent runs (the single-instance mirror of the pooled feed-driven
+	// reconcile). Nil when CONFIG_URL is unset (self-host: boot config fixed).
+	ConfigRefresh *configrefresh.Refresher
 	// CommandRefresh hot-reloads the data-driven command set in place while the
 	// agent runs (the single-instance mirror of the pooled feed-driven reload). Nil
 	// when COMMANDS_URL is unset (self-host: the boot set is fixed).
@@ -212,6 +217,25 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		s.CommandsToken,
 		s.CommandsRefreshSeconds,
 		func(defs []commands.Definition) { ApplyCommands(a, defs, provider, owner, ircCfg.Hostname, log) },
+		log,
+	)
+
+	// Live nick/channel hot-reload: when CONFIG_URL is set, poll the
+	// per-container config endpoint and apply nick/channel changes in place —
+	// the same ApplyNick / ReconcileChannels the pooled runtime does from its
+	// feed, so a single-instance container picks up a /nick or /join edit
+	// without a respawn/reconnect.
+	built.ConfigRefresh = configrefresh.New(
+		s.ConfigURL,
+		s.ConfigToken,
+		s.ConfigRefreshSeconds,
+		func(cfg configrefresh.Config) {
+			if ircConn == nil {
+				return
+			}
+			ircConn.ApplyNick(cfg.Nick)
+			ircConn.ReconcileChannels(cfg.Channels)
+		},
 		log,
 	)
 
@@ -702,6 +726,9 @@ func Run(ctx context.Context, b *Built) error {
 	}
 	if b.CommandRefresh != nil {
 		startRefresher(b.CommandRefresh.Run)
+	}
+	if b.ConfigRefresh != nil {
+		startRefresher(b.ConfigRefresh.Run)
 	}
 	waitRefresh := func() {
 		for _, done := range refreshDones {
