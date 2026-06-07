@@ -646,15 +646,31 @@ func (c *Connector) CurrentNick() string {
 // observer's "sender" field stay in sync. Idempotent — calling with
 // the same value is a no-op.
 func (c *Connector) setCurrentNick(nick string) {
-	if nick == "" {
+	// "*" is IRC's placeholder for "no nick yet" — servers target
+	// pre-registration numerics at it. Never adopt it as the live nick (a
+	// real 001 welcome always carries the assigned nick).
+	if nick == "" || nick == "*" {
 		return
 	}
 	c.nickMu.Lock()
 	changed := c.currentNick != nick
 	c.currentNick = nick
 	c.nickMu.Unlock()
-	if changed && c.bouncer != nil {
+	if !changed {
+		return
+	}
+	if c.bouncer != nil {
 		c.bouncer.UpdateUpstreamNick(nick)
+	}
+	// The observed nick moved (a /nick, a 433 fallback's 001 welcome, or a
+	// reclaim success) — notify the state emitter so the snapshot re-pushes
+	// and the control plane's observed/desired nick stays in sync. Reuses the
+	// nick-change hook the emitter wires via SetPreferredNickChangeHook.
+	c.preferredNickMu.RLock()
+	cb := c.preferredNickChangeCB
+	c.preferredNickMu.RUnlock()
+	if cb != nil {
+		cb()
 	}
 }
 
@@ -2127,7 +2143,11 @@ func (c *Connector) handleJoin(ctx context.Context, msg Message) {
 		return
 	}
 	nick := Nick(msg.Prefix)
-	if nick == c.settings.Nick {
+	// Match the LIVE nick, not the configured one: after a 433 "_" fallback or
+	// a /nick the bot's nick differs from settings.Nick, and a stale compare
+	// would miss our own JOIN echo → the channel never lands in state/wanted →
+	// no sync and "not joined" guards.
+	if strings.EqualFold(nick, c.CurrentNick()) {
 		c.state.OnSelfJoin(channel)
 		// Server doesn't echo the key on JOIN echo, so Add with an
 		// empty key — WantedChannels.Add preserves any previously-
@@ -2148,7 +2168,7 @@ func (c *Connector) handlePart(ctx context.Context, msg Message) {
 	}
 	channel := msg.Params[0]
 	nick := Nick(msg.Prefix)
-	if nick == c.settings.Nick {
+	if strings.EqualFold(nick, c.CurrentNick()) {
 		c.state.OnSelfPart(channel)
 		c.wanted.Remove(channel)
 	} else {
