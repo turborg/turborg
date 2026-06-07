@@ -574,6 +574,63 @@ func (c *Connector) nextFallbackNick() (string, bool) {
 	return next, true
 }
 
+// ApplyNick changes the desired nick live, without a reconnect. It updates
+// the reclaim target and the queued preferred nick (so a later reconnect
+// registers with it), and — when currently registered — sends a live NICK
+// to the server. A collision (433) is then handled by the reclaim loop,
+// which keeps re-attempting the desired nick until it frees. No-op for an
+// empty or unchanged nick. Safe to call from any goroutine.
+func (c *Connector) ApplyNick(nick string) {
+	nick = strings.TrimSpace(nick)
+	if nick == "" || nick == c.DesiredNick() {
+		return
+	}
+	c.setDesiredNick(nick)
+	c.SetPreferredNick(nick)
+	if c.machine.State() == UpstreamStateRegistered {
+		if cli := c.getClient(); cli != nil {
+			_ = cli.WriteLine(CmdNick + " " + nick)
+		}
+	}
+}
+
+// ReconcileChannels brings the joined channels in line with the desired set:
+// PART channels no longer wanted and JOIN newly-wanted ones, live (when
+// registered) and in the wanted set so a reconnect replays the same set.
+// Idempotent — an unchanged set is a no-op. Channel keys are not part of the
+// desired list (they're learned from client JOINs and preserved by the set).
+// Safe to call from any goroutine.
+func (c *Connector) ReconcileChannels(desired []string) {
+	want := make(map[string]string, len(desired)) // lower(name) -> original casing
+	for _, ch := range desired {
+		ch = strings.TrimSpace(ch)
+		if ch != "" {
+			want[strings.ToLower(ch)] = ch
+		}
+	}
+	registered := c.machine.State() == UpstreamStateRegistered
+	cli := c.getClient()
+
+	for _, cur := range c.wanted.Snapshot() {
+		if _, keep := want[strings.ToLower(cur.Name)]; keep {
+			continue
+		}
+		c.wanted.Remove(cur.Name)
+		if registered && cli != nil {
+			_ = cli.WriteLine(CmdPart + " " + cur.Name)
+		}
+	}
+	for _, name := range want {
+		if _, ok := c.wanted.Get(name); ok {
+			continue
+		}
+		c.wanted.Add(name, "")
+		if registered && cli != nil {
+			_ = cli.WriteLine(CmdJoin + " " + name)
+		}
+	}
+}
+
 // CurrentNick returns the live nick the server confirmed for the bot.
 // Initially the requested TURBORG_IRC_NICK, then overwritten by the
 // 001 welcome's target field (the nick the server actually assigned)

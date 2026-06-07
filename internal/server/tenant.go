@@ -589,18 +589,22 @@ func (t *Tenant) update(spec TenantSpec) {
 	if liveUpdatableOnlyChange(prev, spec) {
 		commandsChanged := !commandSetsEqual(prev.Commands, spec.Commands)
 		ignoresChanged := !reflect.DeepEqual(prev.IgnoredNicks, spec.IgnoredNicks)
-		if !commandsChanged && !ignoresChanged {
+		nickChanged, channelsChanged := ircNickChannelsChanged(prev, spec)
+		if !commandsChanged && !ignoresChanged && !nickChanged && !channelsChanged {
 			return // only the usage baseline moved — nothing to reconnect for
 		}
 		// Apply each changed facet in place. The command set swaps via
-		// ReplaceDynamic; the ignore list swaps the registry-wide guard. Either
-		// returning false means the tenant isn't running, so fall through to a
-		// restart that re-seeds everything from the new spec at build time.
+		// ReplaceDynamic; the ignore list swaps the registry-wide guard; nick
+		// and channels apply live via NICK / JOIN+PART. Any "false" means the
+		// tenant isn't running, so fall through to a restart that re-seeds
+		// everything from the new spec at build time.
 		okCommands := !commandsChanged || t.reloadCommands(spec.Commands)
 		okIgnores := !ignoresChanged || t.reloadGuard()
-		if okCommands && okIgnores {
+		okNickChan := (!nickChanged && !channelsChanged) || t.applyNickChannels(spec)
+		if okCommands && okIgnores && okNickChan {
 			t.log.Info("tenant settings reloaded in place",
-				"commands", len(spec.Commands), "ignored", len(spec.IgnoredNicks))
+				"commands", len(spec.Commands), "ignored", len(spec.IgnoredNicks),
+				"nick_changed", nickChanged, "channels_changed", channelsChanged)
 			return
 		}
 	}
@@ -638,7 +642,62 @@ func liveUpdatableOnlyChange(a, b TenantSpec) bool {
 	a.IgnoredNicks, b.IgnoredNicks = nil, nil
 	a.PlanCapabilities = capsWithoutTokenUsage(a.PlanCapabilities)
 	b.PlanCapabilities = capsWithoutTokenUsage(b.PlanCapabilities)
+	// nick + channels apply live (NICK / JOIN+PART) without a reconnect, so a
+	// change confined to them must not restart — that's also what makes
+	// syncing the user's live /nick and /join back into the desired config
+	// safe (the echoed change reconciles to a no-op instead of looping).
+	a.Connectors = stripLiveConnectorFields(a.Connectors)
+	b.Connectors = stripLiveConnectorFields(b.Connectors)
 	return reflect.DeepEqual(a, b)
+}
+
+// stripLiveConnectorFields returns the connectors with the IRC connector's
+// live-applicable config keys (nick, channels) removed, so spec comparison
+// ignores them. Deep-copies the affected config map so the caller's spec is
+// untouched.
+func stripLiveConnectorFields(conns []ConnectorSpec) []ConnectorSpec {
+	out := make([]ConnectorSpec, len(conns))
+	for i, c := range conns {
+		out[i] = c
+		if c.Type != "irc" || c.Config == nil {
+			continue
+		}
+		cfg := make(map[string]any, len(c.Config))
+		for k, v := range c.Config {
+			if k == "nick" || k == "channels" {
+				continue
+			}
+			cfg[k] = v
+		}
+		out[i].Config = cfg
+	}
+	return out
+}
+
+// ircNickChannelsChanged reports whether the IRC connector's desired nick or
+// channel set moved between two specs.
+func ircNickChannelsChanged(prev, next TenantSpec) (nick, channels bool) {
+	p := firstIRCConnectorSpec(prev.Connectors)
+	n := firstIRCConnectorSpec(next.Connectors)
+	nick = stringField(p.Config, "nick") != stringField(n.Config, "nick")
+	channels = !reflect.DeepEqual(stringSlice(p.Config, "channels"), stringSlice(n.Config, "channels"))
+	return nick, channels
+}
+
+// applyNickChannels applies the spec's desired nick and channels to the live
+// connector without a reconnect. Returns false when the tenant isn't running
+// (no live connector), so the caller falls back to a restart.
+func (t *Tenant) applyNickChannels(spec TenantSpec) bool {
+	t.mu.Lock()
+	conn := t.ircConn
+	t.mu.Unlock()
+	if conn == nil {
+		return false
+	}
+	cs := firstIRCConnectorSpec(spec.Connectors)
+	conn.ApplyNick(stringField(cs.Config, "nick"))
+	conn.ReconcileChannels(stringSlice(cs.Config, "channels"))
+	return true
 }
 
 // capsWithoutTokenUsage returns a copy of caps with the live LLM-usage baseline

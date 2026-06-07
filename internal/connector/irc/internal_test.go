@@ -1782,3 +1782,36 @@ func TestNextFallbackNickTrimsLongBase(t *testing.T) {
 		t.Fatalf("fallback must end with _, got %q", got)
 	}
 }
+
+func TestApplyNickUpdatesDesiredAndPreferred(t *testing.T) {
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+	c.ApplyNick("newnick")
+	if c.DesiredNick() != "newnick" {
+		t.Fatalf("desired nick = %q, want newnick", c.DesiredNick())
+	}
+	if c.PreferredNick() != "newnick" {
+		t.Fatalf("preferred nick = %q, want newnick", c.PreferredNick())
+	}
+	// Empty + unchanged are no-ops (don't clobber the desired nick).
+	c.ApplyNick("")
+	c.ApplyNick("newnick")
+	if c.DesiredNick() != "newnick" {
+		t.Fatalf("no-op ApplyNick changed desired to %q", c.DesiredNick())
+	}
+}
+
+func TestReconcileChannelsUpdatesWantedSet(t *testing.T) {
+	c := New(&Settings{Nick: "bot", Channels: []string{"#a", "#b"}}, nil, nil)
+	// Not registered → reconcile updates the wanted set (replayed on connect).
+	c.ReconcileChannels([]string{"#b", "#c"})
+	got := map[string]bool{}
+	for _, w := range c.WantedChannels().Snapshot() {
+		got[strings.ToLower(w.Name)] = true
+	}
+	if got["#a"] {
+		t.Fatal("#a should have been parted from the wanted set")
+	}
+	if !got["#b"] || !got["#c"] {
+		t.Fatalf("wanted set should be {#b,#c}, got %v", got)
+	}
+}
