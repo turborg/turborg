@@ -2205,9 +2205,15 @@ func (c *Connector) handleNickChange(ctx context.Context, msg Message) {
 	c.state.OnNickChange(old, newNick)
 	// Self-rename: bump the live nick (and the bouncer's upstreamNick
 	// via setCurrentNick) so every surface that reads CurrentNick
-	// reflects the new identity.
+	// reflects the new identity. A self-rename observed here is the user's
+	// intent (a client /nick the bouncer forwarded, or a feed-driven
+	// ApplyNick) — adopt it as the desired nick too so the reclaim loop
+	// doesn't fight it and the change syncs back as the new saved nick.
+	// (A 433 fallback happens during registration, not here, so it never
+	// reaches this path and the original desired nick is preserved.)
 	if old == c.CurrentNick() {
 		c.setCurrentNick(newNick)
+		c.setDesiredNick(newNick)
 	}
 	c.publish(ctx, agent.Event{
 		Type: agent.EventUserNickChange,

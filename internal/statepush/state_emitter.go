@@ -48,6 +48,11 @@ type ConnectorSnapshot struct {
 	Since    time.Time         `json:"since"`
 	Channels []ChannelSnapshot `json:"channels"`
 	Nick     string            `json:"nick"`
+	// DesiredNick is the nick the user wants (the reclaim target), which
+	// differs from Nick when the server forced a "_" fallback. Receivers
+	// persist this as the desired/intent nick and Nick as the observed one,
+	// so a fallback never overwrites the user's saved nick.
+	DesiredNick string `json:"desired_nick"`
 	// Reason is the last server-supplied human-readable explanation for
 	// the current state — e.g. the disconnect/ban text an upstream sent.
 	// Empty for healthy states or when the server gave no reason.

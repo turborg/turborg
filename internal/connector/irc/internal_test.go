@@ -557,6 +557,8 @@ func TestSelfNickChangeSyncsCurrentNickAndBouncer(t *testing.T) {
 
 	assert.Equal(t, "renamed", c.CurrentNick(),
 		"self-NICK observed must update CurrentNick")
+	assert.Equal(t, "renamed", c.DesiredNick(),
+		"a self-rename is the user's intent — it must become the desired nick so reclaim doesn't fight it and it syncs back")
 	prefix := b.upstreamPrefix()
 	assert.Contains(t, prefix, "renamed!",
 		"setCurrentNick must propagate to the bouncer's upstream prefix")
