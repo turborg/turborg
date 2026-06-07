@@ -649,11 +649,12 @@ func buildIRCSnapshot(ircConn *irc.Connector) statepush.SnapshotBuilder {
 		return statepush.Snapshot{
 			Connectors: map[string]statepush.ConnectorSnapshot{
 				ircConn.Name(): {
-					State:    string(machine.State()),
-					Since:    machine.EnteredAt().UTC(),
-					Channels: channels,
-					Nick:     nick,
-					Reason:   machine.ServerReason(),
+					State:       string(machine.State()),
+					Since:       machine.EnteredAt().UTC(),
+					Channels:    channels,
+					Nick:        nick,
+					DesiredNick: ircConn.DesiredNick(),
+					Reason:      machine.ServerReason(),
 				},
 			},
 		}

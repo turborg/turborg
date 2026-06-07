@@ -529,13 +529,13 @@ func (c *Connector) effectiveNick() string {
 }
 
 const (
-	// maxNickFallbacks caps the "_"-suffix attempts within one handshake
-	// before giving up (and reconnecting under the floor). A genuinely
-	// busy nick clears within a few suffixes; an unbounded loop would
-	// just hammer the server.
-	maxNickFallbacks = 5
-	// fallbackMaxNickLen is a conservative NICKLEN: appending "_" past it
-	// would earn a 432 instead of registering, so we trim the base first.
+	// fallbackMaxNickLen bounds the "_"-suffix fallback: each 433 appends
+	// one more underscore (Stephen → Stephen_ → Stephen__ …) until the nick
+	// would exceed this length, at which point we give up and let the
+	// supervisor reconnect under the floor/throttle. A conservative cap that
+	// most networks accept; a stricter server's own NICKLEN surfaces as a
+	// 432, which we also treat as "exhausted". These attempts are all within
+	// one registration (one connection) — no reconnect, so no flood risk.
 	fallbackMaxNickLen = 15
 	// nickReclaimInterval is how often, while the live nick differs from
 	// the desired one, we re-attempt the desired nick. Slow on purpose —
@@ -557,19 +557,19 @@ func (c *Connector) DesiredNick() string {
 	return c.desiredNick
 }
 
-// nextFallbackNick derives the next "_"-suffixed nick after a 433, up to
-// maxNickFallbacks. Trims the base when appending would exceed a
-// conservative NICKLEN so the fallback isn't itself rejected.
+// nextFallbackNick appends one more "_" to the last attempted nick after a
+// 433, growing Stephen → Stephen_ → Stephen__ … Returns ok=false once the
+// next suffix would exceed fallbackMaxNickLen — i.e. no shorter alternative
+// is left — so the caller gives up and lets the supervisor reconnect under
+// the floor/throttle. Only ever called on a 433 (nick in use); a 432
+// (erroneous/reserved nick) is handled separately and never falls back,
+// since appending "_" can't make an invalid nick valid.
 func (c *Connector) nextFallbackNick() (string, bool) {
-	if c.nickFallbacks >= maxNickFallbacks {
+	next := c.attemptedNick + "_"
+	if len(next) > fallbackMaxNickLen {
 		return "", false
 	}
 	c.nickFallbacks++
-	base := c.attemptedNick
-	if len(base) >= fallbackMaxNickLen {
-		base = base[:fallbackMaxNickLen-1]
-	}
-	next := base + "_"
 	c.attemptedNick = next
 	return next, true
 }
@@ -1221,7 +1221,13 @@ func (c *Connector) awaitHandshake(ctx context.Context) error {
 				c.log.Info("irc nick in use; using fallback", "desired", c.DesiredNick(), "fallback", next)
 				continue
 			}
-			return fmt.Errorf("irc handshake: nickname %q already in use (433) after %d fallbacks", c.attemptedNick, maxNickFallbacks)
+			return fmt.Errorf("irc handshake: nickname %q already in use (433); no shorter fallback fits %d chars", c.attemptedNick, fallbackMaxNickLen)
+		case ErrErroneusNickname:
+			// 432: the nick is invalid or network-reserved. Appending "_"
+			// can't make it valid, so don't fall back — surface the error and
+			// let the supervisor reconnect under the floor/throttle. (Also the
+			// give-up path when a "_" fallback grew past the server's NICKLEN.)
+			return fmt.Errorf("irc handshake: nickname %q erroneous/reserved (432): %s", c.attemptedNick, msg.Trailing)
 		case ErrUnavailResource:
 			return fmt.Errorf("irc handshake: nickname %q unavailable (437)", c.settings.Nick)
 		case ErrPasswdMismatch:
@@ -2205,9 +2211,15 @@ func (c *Connector) handleNickChange(ctx context.Context, msg Message) {
 	c.state.OnNickChange(old, newNick)
 	// Self-rename: bump the live nick (and the bouncer's upstreamNick
 	// via setCurrentNick) so every surface that reads CurrentNick
-	// reflects the new identity.
+	// reflects the new identity. A self-rename observed here is the user's
+	// intent (a client /nick the bouncer forwarded, or a feed-driven
+	// ApplyNick) — adopt it as the desired nick too so the reclaim loop
+	// doesn't fight it and the change syncs back as the new saved nick.
+	// (A 433 fallback happens during registration, not here, so it never
+	// reaches this path and the original desired nick is preserved.)
 	if old == c.CurrentNick() {
 		c.setCurrentNick(newNick)
+		c.setDesiredNick(newNick)
 	}
 	c.publish(ctx, agent.Event{
 		Type: agent.EventUserNickChange,

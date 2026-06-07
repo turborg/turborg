@@ -557,6 +557,8 @@ func TestSelfNickChangeSyncsCurrentNickAndBouncer(t *testing.T) {
 
 	assert.Equal(t, "renamed", c.CurrentNick(),
 		"self-NICK observed must update CurrentNick")
+	assert.Equal(t, "renamed", c.DesiredNick(),
+		"a self-rename is the user's intent — it must become the desired nick so reclaim doesn't fight it and it syncs back")
 	prefix := b.upstreamPrefix()
 	assert.Contains(t, prefix, "renamed!",
 		"setCurrentNick must propagate to the bouncer's upstream prefix")
@@ -1753,33 +1755,37 @@ func TestBouncerActivityHeartbeat(t *testing.T) {
 
 func TestNextFallbackNick(t *testing.T) {
 	c := New(&Settings{Nick: "turborg"}, nil, nil)
-	c.attemptedNick = "turborg"
-	for i := 1; i <= maxNickFallbacks; i++ {
+	c.attemptedNick = "turborg" // 7 chars
+
+	// Each call appends exactly one more "_" (Stephen → Stephen_ → …),
+	// growing until the next suffix would exceed the cap.
+	prev := "turborg"
+	for {
 		got, ok := c.nextFallbackNick()
 		if !ok {
-			t.Fatalf("fallback %d should be allowed", i)
+			break
 		}
-		if !strings.HasSuffix(got, "_") {
-			t.Fatalf("fallback %d must end with _, got %q", i, got)
+		if got != prev+"_" {
+			t.Fatalf("expected %q, got %q", prev+"_", got)
 		}
+		if len(got) > fallbackMaxNickLen {
+			t.Fatalf("fallback %q exceeds cap %d", got, fallbackMaxNickLen)
+		}
+		prev = got
 	}
-	if _, ok := c.nextFallbackNick(); ok {
-		t.Fatal("must stop after maxNickFallbacks")
+	// The last accepted fallback reaches exactly the cap (no room for more).
+	if len(prev) != fallbackMaxNickLen {
+		t.Fatalf("last fallback %q (len %d) should reach the cap %d", prev, len(prev), fallbackMaxNickLen)
 	}
 }
 
-func TestNextFallbackNickTrimsLongBase(t *testing.T) {
+func TestNextFallbackNickGivesUpWhenNoRoom(t *testing.T) {
+	// Already at the cap: no shorter "_"-suffixed alternative fits, so give
+	// up (the caller then surfaces the 433 and reconnects under the throttle).
 	c := New(&Settings{}, nil, nil)
 	c.attemptedNick = strings.Repeat("a", fallbackMaxNickLen)
-	got, ok := c.nextFallbackNick()
-	if !ok {
-		t.Fatal("a single fallback must be allowed")
-	}
-	if len(got) > fallbackMaxNickLen {
-		t.Fatalf("fallback must trim to fit the cap, got %q (len %d)", got, len(got))
-	}
-	if !strings.HasSuffix(got, "_") {
-		t.Fatalf("fallback must end with _, got %q", got)
+	if _, ok := c.nextFallbackNick(); ok {
+		t.Fatal("must give up when no shorter fallback fits the cap")
 	}
 }
 
