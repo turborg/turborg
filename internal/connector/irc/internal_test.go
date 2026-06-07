@@ -1750,3 +1750,35 @@ func TestBouncerActivityHeartbeat(t *testing.T) {
 	cancel()
 	b.wg.Wait()
 }
+
+func TestNextFallbackNick(t *testing.T) {
+	c := New(&Settings{Nick: "turborg"}, nil, nil)
+	c.attemptedNick = "turborg"
+	for i := 1; i <= maxNickFallbacks; i++ {
+		got, ok := c.nextFallbackNick()
+		if !ok {
+			t.Fatalf("fallback %d should be allowed", i)
+		}
+		if !strings.HasSuffix(got, "_") {
+			t.Fatalf("fallback %d must end with _, got %q", i, got)
+		}
+	}
+	if _, ok := c.nextFallbackNick(); ok {
+		t.Fatal("must stop after maxNickFallbacks")
+	}
+}
+
+func TestNextFallbackNickTrimsLongBase(t *testing.T) {
+	c := New(&Settings{}, nil, nil)
+	c.attemptedNick = strings.Repeat("a", fallbackMaxNickLen)
+	got, ok := c.nextFallbackNick()
+	if !ok {
+		t.Fatal("a single fallback must be allowed")
+	}
+	if len(got) > fallbackMaxNickLen {
+		t.Fatalf("fallback must trim to fit the cap, got %q (len %d)", got, len(got))
+	}
+	if !strings.HasSuffix(got, "_") {
+		t.Fatalf("fallback must end with _, got %q", got)
+	}
+}

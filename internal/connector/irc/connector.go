@@ -92,6 +92,15 @@ type Connector struct {
 	// hammering the upstream network / shared egress IP. See reconnect_storm.go.
 	storm *reconnectStorm
 
+	// reconnectFloor is the minimum delay before any reconnect dial. Its
+	// purpose is to never reconnect faster than the server reaps our old
+	// connection's nick: a stable session that drops (e.g. PING timeout)
+	// resets the backoff to ~1s, and reconnecting that fast collides with
+	// our own lingering ghost → repeated 433 → throttle → ban. A floor
+	// above the typical server ghost-reap window avoids that entirely. 0
+	// disables it (the default; production wiring sets it).
+	reconnectFloor time.Duration
+
 	// clientLimits is the operator-policy struct the bouncer consults
 	// before forwarding client-originated commands upstream. Held here
 	// so runtime.Build can hand it to the connector before Start; it
@@ -151,6 +160,19 @@ type Connector struct {
 	// through CurrentNick so the displays stay in sync.
 	nickMu      sync.RWMutex
 	currentNick string
+	// desiredNick is the nick the user actually wants — the reclaim
+	// target. Set at the start of each registration to effectiveNick();
+	// when the server forces a fallback (433 → appended underscores), the
+	// live nick diverges from desiredNick and the reclaim loop keeps
+	// trying to take it back. nickMu-guarded.
+	desiredNick string
+
+	// nickFallbacks counts 433 fallbacks within the current handshake;
+	// attemptedNick is the nick most recently sent. Both are touched only
+	// on the bringUp goroutine (register + awaitHandshake run in sequence
+	// there), so they need no lock.
+	nickFallbacks int
+	attemptedNick string
 
 	// preferredNickMu guards preferredNick. The bouncer SetPreferredNick
 	// during detached-state NICK handling so the supervisor's next
@@ -268,6 +290,13 @@ func New(s *Settings, log *slog.Logger, events *agent.EventBus) *Connector {
 // Must be called before Run; tests use it to trip the breaker on tight timings.
 func (c *Connector) SetReconnectStorm(window time.Duration, maxAttempts int, cooldown time.Duration) {
 	c.storm = newReconnectStorm(window, maxAttempts, cooldown)
+}
+
+// SetReconnectFloor sets the minimum delay before any reconnect dial (see
+// the reconnectFloor field). A non-positive value disables the floor.
+// Must be called before Run; production wiring sets it, tests leave it 0.
+func (c *Connector) SetReconnectFloor(d time.Duration) {
+	c.reconnectFloor = d
 }
 
 // WantedChannels returns the connector's wanted-channels set. Used by
@@ -497,6 +526,52 @@ func (c *Connector) effectiveNick() string {
 		return queued
 	}
 	return c.settings.Nick
+}
+
+const (
+	// maxNickFallbacks caps the "_"-suffix attempts within one handshake
+	// before giving up (and reconnecting under the floor). A genuinely
+	// busy nick clears within a few suffixes; an unbounded loop would
+	// just hammer the server.
+	maxNickFallbacks = 5
+	// fallbackMaxNickLen is a conservative NICKLEN: appending "_" past it
+	// would earn a 432 instead of registering, so we trim the base first.
+	fallbackMaxNickLen = 15
+	// nickReclaimInterval is how often, while the live nick differs from
+	// the desired one, we re-attempt the desired nick. Slow on purpose —
+	// it's a courtesy, not a hot path, and must never look like flooding.
+	nickReclaimInterval = 90 * time.Second
+)
+
+func (c *Connector) setDesiredNick(n string) {
+	c.nickMu.Lock()
+	c.desiredNick = n
+	c.nickMu.Unlock()
+}
+
+// DesiredNick returns the nick the user wants (the reclaim target),
+// which differs from CurrentNick when a 433 forced a "_" fallback.
+func (c *Connector) DesiredNick() string {
+	c.nickMu.RLock()
+	defer c.nickMu.RUnlock()
+	return c.desiredNick
+}
+
+// nextFallbackNick derives the next "_"-suffixed nick after a 433, up to
+// maxNickFallbacks. Trims the base when appending would exceed a
+// conservative NICKLEN so the fallback isn't itself rejected.
+func (c *Connector) nextFallbackNick() (string, bool) {
+	if c.nickFallbacks >= maxNickFallbacks {
+		return "", false
+	}
+	c.nickFallbacks++
+	base := c.attemptedNick
+	if len(base) >= fallbackMaxNickLen {
+		base = base[:fallbackMaxNickLen-1]
+	}
+	next := base + "_"
+	c.attemptedNick = next
+	return next, true
 }
 
 // CurrentNick returns the live nick the server confirmed for the bot.
@@ -915,7 +990,15 @@ func (c *Connector) register(ctx context.Context) error {
 	if err := c.client.WriteLine(user); err != nil {
 		return fmt.Errorf("irc USER: %w", err)
 	}
-	if err := c.client.WriteLine(CmdNick + " " + c.effectiveNick()); err != nil {
+	// Capture the nick we're registering with as both the reclaim target
+	// (desiredNick) and the fallback base (attemptedNick), and reset the
+	// per-handshake fallback counter, before sending NICK. awaitHandshake
+	// suffixes attemptedNick on each 433 instead of aborting.
+	nick := c.effectiveNick()
+	c.setDesiredNick(nick)
+	c.nickFallbacks = 0
+	c.attemptedNick = nick
+	if err := c.client.WriteLine(CmdNick + " " + nick); err != nil {
 		return fmt.Errorf("irc NICK: %w", err)
 	}
 	if err := c.client.WriteLine(CmdCap + " END"); err != nil {
@@ -1047,6 +1130,14 @@ func (c *Connector) awaitHandshake(ctx context.Context) error {
 			c.respondPong(msg)
 			continue
 		}
+		// Adopt the nick the server actually assigned in the welcome. The
+		// 001 is consumed here (before the main dispatcher runs), so the
+		// dispatcher's own RplWelcome handler never sees it — without this
+		// the live nick would stay the requested one even after a 433 "_"
+		// fallback registered us under a different nick.
+		if msg.Command == RplWelcome && len(msg.Params) > 0 {
+			c.setCurrentNick(msg.Params[0])
+		}
 		// Classifier-driven state transitions: anything that signals
 		// nick-unavailable / auth-failed / banned during the pre-MOTD
 		// window must surface as the correct supervisor state so the
@@ -1062,7 +1153,18 @@ func (c *Connector) awaitHandshake(ctx context.Context) error {
 		// outside.
 		switch msg.Command {
 		case ErrNickNameInUse:
-			return fmt.Errorf("irc handshake: nickname %q already in use (433); set TURBORG_IRC_NICK to a free nick", c.settings.Nick)
+			// Don't abort — that drops us into the reconnect loop where we
+			// race our own ghost and storm the server. Instead suffix "_"
+			// and keep registering; the reclaim loop later takes the
+			// desired nick back when it frees.
+			if next, ok := c.nextFallbackNick(); ok {
+				if err := c.client.WriteLine(CmdNick + " " + next); err != nil {
+					return fmt.Errorf("irc handshake: NICK fallback %q: %w", next, err)
+				}
+				c.log.Info("irc nick in use; using fallback", "desired", c.DesiredNick(), "fallback", next)
+				continue
+			}
+			return fmt.Errorf("irc handshake: nickname %q already in use (433) after %d fallbacks", c.attemptedNick, maxNickFallbacks)
 		case ErrUnavailResource:
 			return fmt.Errorf("irc handshake: nickname %q unavailable (437)", c.settings.Nick)
 		case ErrPasswdMismatch:
@@ -1230,7 +1332,7 @@ func (c *Connector) Run(ctx context.Context) error {
 		// paused_idle — that surfaces as runCtx.Done. The storm breaker swaps
 		// in a long cooldown once reconnects pile up in its window, so a
 		// persistent flapper stops hammering the network / egress IP.
-		delay := c.storm.nextDelay(time.Now(), backoff.Next(), c.log)
+		delay := c.reconnectDelay(backoff)
 		c.log.Info("irc reconnecting", "state", c.machine.State(), "after", delay, "err", err)
 		select {
 		case <-runCtx.Done():
@@ -1257,6 +1359,20 @@ func (c *Connector) Run(ctx context.Context) error {
 		}
 		sessionStart = time.Now()
 	}
+}
+
+// reconnectDelay returns how long to wait before the next reconnect: the
+// storm breaker's value (plain backoff, or its long cooldown once the
+// reconnect rate trips the breaker), raised to the reconnect floor so we
+// never reconnect inside the server's ghost-nick reap window (the 433
+// self-collision trigger). The storm cooldown already exceeds the floor,
+// so the max() leaves it untouched.
+func (c *Connector) reconnectDelay(backoff *BackoffSchedule) time.Duration {
+	d := c.storm.nextDelay(time.Now(), backoff.Next(), c.log)
+	if c.reconnectFloor > 0 && d < c.reconnectFloor {
+		d = c.reconnectFloor
+	}
+	return d
 }
 
 // runSession runs one upstream session: the reader / ping / dispatch
@@ -1297,6 +1413,30 @@ func (c *Connector) runSession(ctx context.Context) error {
 		<-gctx.Done()
 		_ = cli.Unblock()
 		return nil
+	})
+
+	// Nick reclaim: while the live nick differs from the desired one (a
+	// 433 forced a "_" fallback at registration), periodically re-attempt
+	// the desired nick. Slow cadence — a courtesy, never a hot path; the
+	// self-NICK echo updates CurrentNick, so once it succeeds this no-ops.
+	g.Go(func() error {
+		t := time.NewTicker(nickReclaimInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-gctx.Done():
+				return nil
+			case <-t.C:
+				desired := c.DesiredNick()
+				if desired == "" || c.CurrentNick() == desired || c.machine.State() != UpstreamStateRegistered {
+					continue
+				}
+				if err := cli.WriteLine(CmdNick + " " + desired); err != nil {
+					return nil // conn is failing; the reader goroutine surfaces it
+				}
+				c.log.Info("irc reclaiming desired nick", "desired", desired, "current", c.CurrentNick())
+			}
+		}
 	})
 
 	// Reader: enforces the silent-death idle timeout from settings.

@@ -302,6 +302,13 @@ func (t *Tenant) defaultWork() func(context.Context) error {
 		if gw != nil {
 			gw.Stop()
 		}
+		// Flush the final snapshot synchronously before Stop cancels the
+		// debounce timer — otherwise a terminal state that lands ~1ms before
+		// teardown (e.g. disconnected_banned) is dropped and the control
+		// plane stays stuck at the prior state (e.g. registering). Safe on nil.
+		flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		em.Flush(flushCtx)
+		flushCancel()
 		em.Stop() // safe on nil
 		if sink != nil {
 			// Drain + stop the sink's flush goroutine so restarts stay
@@ -354,6 +361,9 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			// web shell sees the full event stream (not just plain messages,
 			// which arrive via the agent's inbound drain regardless).
 			conn := irc.New(settings, t.log, a.Events)
+			// Never reconnect faster than the upstream reaps our ghost nick
+			// (avoids 433 self-collision storms on the shared egress IP).
+			conn.SetReconnectFloor(irc.DefaultReconnectFloor)
 			// Pooled runtime: the bouncer must not bind its own port — the pool
 			// router feeds it connections via ServeBouncerConn after PROXY-v2
 			// tenant resolution. Set before WireCommon adds the connector.

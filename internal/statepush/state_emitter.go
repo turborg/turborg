@@ -216,6 +216,21 @@ func (e *Emitter) collect() bool {
 	}
 }
 
+// Flush synchronously builds and PUTs the current snapshot, bypassing the
+// debounce. Call it on teardown so a terminal state that arrives just before
+// Stop (e.g. disconnected_banned ~1ms before the tenant's work returns) is
+// still delivered — Stop cancels the debounce timer, so the pending PUT would
+// otherwise be dropped and the control plane left at the last state (the
+// classic "stuck at registering" symptom). Safe on a nil/disabled emitter.
+func (e *Emitter) Flush(ctx context.Context) {
+	if !e.enabled() {
+		return
+	}
+	if err := e.client.Put(ctx, e.build()); err != nil {
+		e.log.Debug("state webhook flush PUT failed", "err", err)
+	}
+}
+
 func (e *Emitter) send() {
 	snapshot := e.build()
 	// Bound the whole PUT (including retries) by a generous ceiling so

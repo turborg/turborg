@@ -58,6 +58,13 @@ func (c *Client) LocalPort() int {
 }
 
 func Dial(ctx context.Context, host string, port int, useTLS bool, sourceIP string) (*Client, error) {
+	// Rate-limit new connections per (egress IP, host) across the whole
+	// process so we can never flood a network from a shared egress IP,
+	// regardless of how many tenants are (re)connecting. No-op until a
+	// production main() enables the gate.
+	if err := sharedConnectGate.Wait(ctx, sourceIP+"|"+host); err != nil {
+		return nil, fmt.Errorf("irc dial %s:%d: connect gate: %w", host, port, err)
+	}
 	return dial(ctx, host, port, useTLS, sourceIP, nil)
 }
 

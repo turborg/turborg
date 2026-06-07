@@ -13,6 +13,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 	"github.com/turborg/turborg/internal/config"
+	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/ident"
 	"github.com/turborg/turborg/internal/logging"
 	"github.com/turborg/turborg/internal/runtime"
@@ -84,6 +85,12 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 	if err != nil {
 		return err
 	}
+
+	// Bound this process's connect rate per (egress IP, host). For a
+	// dedicated container this mainly spaces its own reconnects; combined
+	// with the reconnect floor it keeps a single agent from flooding a
+	// network. Shares the same env knob as the pooled runtime.
+	irc.EnableConnectGateFromEnv()
 
 	mode := "standalone"
 	if built.LLM != nil {

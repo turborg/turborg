@@ -21,6 +21,7 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
+	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/ident"
 	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/logging"
@@ -116,6 +117,11 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 	defer stop()
 	ctx, cancel := context.WithCancel(sigCtx)
 	defer cancel()
+
+	// Bound the per-(egress-IP, host) connection rate across all tenants so a
+	// pooled process can never flood a network from a shared egress IP
+	// (the root cause of the Undernet connection-flood G-lines).
+	irc.EnableConnectGateFromEnv()
 
 	srv := server.New(source, log)
 	// Point each tenant's connector-state emitter at the control plane (the same
