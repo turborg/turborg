@@ -157,6 +157,33 @@ func TestConnectGate_EnableHelpers(t *testing.T) {
 	}
 }
 
+func TestConnectGate_BurstClampedToOne(t *testing.T) {
+	// A burst < 1 is clamped to 1 by both the constructor and configure, so
+	// the bucket still admits exactly one connect before throttling — never
+	// zero (which rate.NewLimiter would treat as "always blocked").
+	g := newConnectGateWithBurst(time.Hour, 0)
+	if err := g.Wait(context.Background(), "ip|host"); err != nil {
+		t.Fatalf("clamped burst must still admit the first connect, got %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := g.Wait(ctx, "ip|host"); err == nil {
+		t.Fatal("clamped burst 1 must throttle the second same-key connect")
+	}
+
+	// Same clamp via configure (exercised through EnableConnectGateWithBurst).
+	t.Cleanup(func() { EnableConnectGate(0) })
+	EnableConnectGateWithBurst(time.Hour, -5)
+	if err := sharedConnectGate.Wait(context.Background(), "ip|host"); err != nil {
+		t.Fatalf("configure-clamped burst must admit the first connect, got %v", err)
+	}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel2()
+	if err := sharedConnectGate.Wait(ctx2, "ip|host"); err == nil {
+		t.Fatal("configure-clamped burst 1 must throttle the second same-key connect")
+	}
+}
+
 func TestConnectGate_ConfigureTakesEffect(t *testing.T) {
 	g := newConnectGate(0)
 	// Disabled: never blocks.
