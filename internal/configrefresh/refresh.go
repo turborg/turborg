@@ -14,7 +14,7 @@
 //	GET <url>
 //	  Authorization: Bearer <token>
 //	  Status: 200 on success.
-//	  Body: {"nick": "<nick>", "channels": ["#a", "#b", ...]}
+//	  Body: {"nick": "<nick>", "channels": ["#a", "#b", ...], "suspended": false}
 //
 // Failures are non-fatal: the last applied config stays in force and the loop
 // retries on the next tick.
@@ -40,6 +40,11 @@ const (
 type Config struct {
 	Nick     string   `json:"nick"`
 	Channels []string `json:"channels"`
+	// Suspended is the user's desired connect/disconnect intent. true parks
+	// the upstream link (Suspend); false reconnects (Resume). Absent decodes
+	// to false (connected), so an old control plane that omits the field keeps
+	// the connector connected.
+	Suspended bool `json:"suspended"`
 }
 
 // Apply installs a freshly-fetched config on the live connector. The runtime

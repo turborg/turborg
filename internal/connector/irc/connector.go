@@ -213,6 +213,21 @@ type Connector struct {
 	whoInFlight map[string]*whoBuilder
 
 	stopOnce sync.Once
+
+	// lifecycleMu guards suspended, the user-disconnect intent driven by
+	// Suspend()/Resume() (the chat UI's Connect/Disconnect button, delivered
+	// via the config-refresh poll / tenant feed). Distinct from the observed
+	// upstream state: suspended is what the user WANTS, the state machine is
+	// what IS.
+	lifecycleMu sync.Mutex
+	suspended   bool
+
+	// lifecycleCh is a buffered(1) wakeup the supervisor selects on so a
+	// Suspend/Resume/nick-change unblocks a parked supervisor (or interrupts
+	// a backoff sleep) promptly instead of waiting out the park re-check
+	// ticker. A best-effort fast path: the authoritative park predicate is
+	// re-evaluated on every wake, so a coalesced/dropped signal is harmless.
+	lifecycleCh chan struct{}
 }
 
 // whoisBuilder accumulates a WHOIS response across the 311/312/313/317/
@@ -277,6 +292,7 @@ func New(s *Settings, log *slog.Logger, events *agent.EventBus) *Connector {
 		wanted:      NewWantedChannels(s.NormalizedChannels()),
 		currentNick: s.Nick,
 		tb:          newTBHandler(log),
+		lifecycleCh: make(chan struct{}, 1),
 		storm: newReconnectStorm(
 			defaultReconnectStormWindow,
 			defaultReconnectStormMax,
@@ -537,6 +553,12 @@ const (
 	// 432, which we also treat as "exhausted". These attempts are all within
 	// one registration (one connection) — no reconnect, so no flood risk.
 	fallbackMaxNickLen = 15
+	// maxNickFallbacks caps the number of "_" suffixes we'll try in one
+	// registration before giving up — a predictable ceiling independent of
+	// nick length (a short nick wouldn't otherwise hit fallbackMaxNickLen for
+	// many tries). After this many taken alternates, treat the nick as
+	// unusable and surface the invalid-nick state so the user picks another.
+	maxNickFallbacks = 8
 	// nickReclaimInterval is how often, while the live nick differs from
 	// the desired one, we re-attempt the desired nick. Slow on purpose —
 	// it's a courtesy, not a hot path, and must never look like flooding.
@@ -565,6 +587,9 @@ func (c *Connector) DesiredNick() string {
 // (erroneous/reserved nick) is handled separately and never falls back,
 // since appending "_" can't make an invalid nick valid.
 func (c *Connector) nextFallbackNick() (string, bool) {
+	if c.nickFallbacks >= maxNickFallbacks {
+		return "", false
+	}
 	next := c.attemptedNick + "_"
 	if len(next) > fallbackMaxNickLen {
 		return "", false
@@ -587,9 +612,141 @@ func (c *Connector) ApplyNick(nick string) {
 	}
 	c.setDesiredNick(nick)
 	c.SetPreferredNick(nick)
-	if c.machine.State() == UpstreamStateRegistered {
+	switch c.machine.State() {
+	case UpstreamStateRegistered:
 		if cli := c.getClient(); cli != nil {
 			_ = cli.WriteLine(CmdNick + " " + nick)
+		}
+	case UpstreamStateDisconnectedNickInvalid:
+		// Parked awaiting a usable nick: the fresh choice is the resume
+		// trigger. Wake the supervisor, which re-registers with the queued
+		// preferred nick. The park predicate also re-checks DesiredNick on
+		// its own ticker, so a missed wakeup self-heals.
+		c.signalLifecycle()
+	}
+}
+
+// Suspend drops the upstream link on user request (the chat UI's Disconnect
+// button) WITHOUT tearing the connector down: it records the intent, sends a
+// QUIT, closes the upstream client, and parks the supervisor in
+// disconnected_by_user awaiting Resume. The bouncer and web gateway stay up —
+// critical pooled, where one container is shared by N tenants. Idempotent and
+// safe to call from any goroutine; a no-op when already suspended.
+func (c *Connector) Suspend() {
+	c.lifecycleMu.Lock()
+	if c.suspended {
+		c.lifecycleMu.Unlock()
+		return
+	}
+	c.suspended = true
+	c.lifecycleMu.Unlock()
+
+	// Publish the parkable state BEFORE closing the client so the supervisor's
+	// post-session classification sees disconnected_by_user (parkable) and
+	// parks, instead of treating the close as a transient failure to back off
+	// from. classifyFallback / transitionFromError both bail on parkable
+	// states, so a concurrent bringUp can't clobber it.
+	c.machine.Transition(UpstreamStateDisconnectedByUser)
+	if cli := c.getClient(); cli != nil {
+		_ = cli.WriteLine(CmdQuit + " :" + c.settings.EffectiveQuitMessage())
+		_ = cli.Close()
+		c.setClient(nil)
+	}
+	c.signalLifecycle()
+}
+
+// Resume clears a user-requested disconnect and wakes the parked supervisor,
+// which reconnects immediately (no backoff — a deliberate action, rate-limited
+// upstream by the control plane's lifecycle cooldown). Idempotent and safe
+// from any goroutine; a no-op when not suspended.
+func (c *Connector) Resume() {
+	c.lifecycleMu.Lock()
+	if !c.suspended {
+		c.lifecycleMu.Unlock()
+		return
+	}
+	c.suspended = false
+	c.lifecycleMu.Unlock()
+	c.signalLifecycle()
+}
+
+// SetInitialSuspended records a boot-time user-disconnect intent before Start.
+// When true, Start skips the initial connect and Run parks immediately, so a
+// connector that boots while the user has it disconnected (a pooled tenant
+// built from a suspended spec, a restarted container) comes up parked rather
+// than flapping connect→quit. Must be called before Start; not for live use
+// (use Suspend/Resume for that).
+func (c *Connector) SetInitialSuspended(v bool) {
+	c.lifecycleMu.Lock()
+	c.suspended = v
+	c.lifecycleMu.Unlock()
+}
+
+// isSuspended reports the current user-disconnect intent.
+func (c *Connector) isSuspended() bool {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	return c.suspended
+}
+
+// shouldPark reports whether the supervisor should park rather than maintain
+// an upstream session: the user has suspended the link, or the chosen nick is
+// unusable (awaiting a new one). The authoritative source of truth the park
+// loop re-evaluates on every wakeup.
+func (c *Connector) shouldPark() bool {
+	return c.isSuspended() || c.machine.State() == UpstreamStateDisconnectedNickInvalid
+}
+
+// signalLifecycle pokes the supervisor's lifecycle wakeup channel without
+// blocking. Coalesces — a pending signal absorbs the new one — because the
+// receiver always re-reads the authoritative state, so one wakeup is enough.
+func (c *Connector) signalLifecycle() {
+	select {
+	case c.lifecycleCh <- struct{}{}:
+	default:
+	}
+}
+
+// parkRecheckInterval is the safety-net cadence at which a parked supervisor
+// re-evaluates its park predicate even if the fast-path lifecycle signal was
+// missed (coalesced/dropped). Slow on purpose: the signal handles the common
+// case immediately; this only bounds the worst-case resume latency.
+const parkRecheckInterval = 2 * time.Second
+
+// park blocks the supervisor while the connector is intentionally off-upstream
+// (user-suspended or awaiting a usable nick), doing no dialing, backoff, or
+// escalation. It returns true when the park condition clears (Resume / a new
+// nick) and the supervisor should reconnect, or false when ctx is cancelled
+// (operator shutdown) and the supervisor should stop.
+//
+// stillParked is the caller-captured predicate evaluated on every wakeup; it
+// is the source of truth (the lifecycleCh signal and the ticker are only
+// prompts to re-check), so a missed signal self-heals within parkRecheckInterval.
+func (c *Connector) park(ctx context.Context, stillParked func() bool) bool {
+	// Drop any signal buffered before this park began — it predates us and the
+	// predicate, not the channel, decides.
+	select {
+	case <-c.lifecycleCh:
+	default:
+	}
+	if !stillParked() {
+		return true
+	}
+	c.log.Info("irc upstream parked", "state", c.machine.State())
+	t := time.NewTicker(parkRecheckInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-c.lifecycleCh:
+			if !stillParked() {
+				return true
+			}
+		case <-t.C:
+			if !stillParked() {
+				return true
+			}
 		}
 	}
 }
@@ -646,15 +803,31 @@ func (c *Connector) CurrentNick() string {
 // observer's "sender" field stay in sync. Idempotent — calling with
 // the same value is a no-op.
 func (c *Connector) setCurrentNick(nick string) {
-	if nick == "" {
+	// "*" is IRC's placeholder for "no nick yet" — servers target
+	// pre-registration numerics at it. Never adopt it as the live nick (a
+	// real 001 welcome always carries the assigned nick).
+	if nick == "" || nick == "*" {
 		return
 	}
 	c.nickMu.Lock()
 	changed := c.currentNick != nick
 	c.currentNick = nick
 	c.nickMu.Unlock()
-	if changed && c.bouncer != nil {
+	if !changed {
+		return
+	}
+	if c.bouncer != nil {
 		c.bouncer.UpdateUpstreamNick(nick)
+	}
+	// The observed nick moved (a /nick, a 433 fallback's 001 welcome, or a
+	// reclaim success) — notify the state emitter so the snapshot re-pushes
+	// and the control plane's observed/desired nick stays in sync. Reuses the
+	// nick-change hook the emitter wires via SetPreferredNickChangeHook.
+	c.preferredNickMu.RLock()
+	cb := c.preferredNickChangeCB
+	c.preferredNickMu.RUnlock()
+	if cb != nil {
+		cb()
 	}
 }
 
@@ -733,17 +906,27 @@ func (c *Connector) Start(ctx context.Context) error {
 		}
 	}
 
-	// A RECOVERABLE initial-connect failure (unreachable network, wrong port,
-	// TLS/cert mismatch, plaintext-on-TLS-port) must NOT abort Start: the
-	// bouncer + web shell are already up, and Run's supervisor retries with
-	// backoff. bringUp has set the state machine to the disconnected_* reason,
-	// which surfaces on the connector pill as "disconnected: <reason>,
-	// reconnecting". Only a terminal failure (operator cancel, auth/ban) aborts.
-	if err := c.bringUp(ctx); err != nil {
-		if !c.machine.State().IsRecoverable() {
+	// Boot already suspended (a pooled tenant built from a suspended spec, or a
+	// restarted container the user had disconnected): skip the initial connect
+	// and let Run park immediately, rather than flapping connect→quit. The
+	// bouncer + web shell are already up.
+	if c.isSuspended() {
+		c.machine.Transition(UpstreamStateDisconnectedByUser)
+		c.log.Info("irc connector starting suspended; awaiting resume")
+	} else if err := c.bringUp(ctx); err != nil {
+		// A RECOVERABLE initial-connect failure (unreachable network, wrong
+		// port, TLS/cert mismatch, plaintext-on-TLS-port) must NOT abort Start:
+		// the bouncer + web shell are already up, and Run's supervisor retries
+		// with backoff. A PARKABLE failure (unusable nick) likewise enters
+		// supervision so the SPA can prompt for a new nick and resume in place.
+		// bringUp has set the state machine to the disconnected_* reason, which
+		// surfaces on the connector pill. Only a terminal failure (operator
+		// cancel, auth/ban) aborts.
+		st := c.machine.State()
+		if !st.IsRecoverable() && !st.IsParkable() {
 			return err
 		}
-		c.log.Warn("irc initial connect failed; entering reconnect supervision", "err", err)
+		c.log.Warn("irc initial connect failed; entering reconnect supervision", "err", err, "state", st)
 	}
 
 	if c.settings.CTCPMaxPerWindow > 0 && c.settings.CTCPWindowSeconds > 0 {
@@ -921,7 +1104,7 @@ func (c *Connector) transitionFromError(err error) {
 // path (that misclassified an unreachable network as a permanent stop, killing
 // the tenant instead of reconnecting).
 func (c *Connector) classifyFallback(ctx context.Context, err error) {
-	if cur := c.machine.State(); cur.IsRecoverable() || cur.IsTerminal() {
+	if cur := c.machine.State(); cur.IsRecoverable() || cur.IsTerminal() || cur.IsParkable() {
 		return
 	}
 	if ctx.Err() != nil {
@@ -1221,15 +1404,22 @@ func (c *Connector) awaitHandshake(ctx context.Context) error {
 				c.log.Info("irc nick in use; using fallback", "desired", c.DesiredNick(), "fallback", next)
 				continue
 			}
-			return fmt.Errorf("irc handshake: nickname %q already in use (433); no shorter fallback fits %d chars", c.attemptedNick, fallbackMaxNickLen)
+			// Fallbacks exhausted (hit maxNickFallbacks or fallbackMaxNickLen):
+			// more "_" won't help. Flip to the terminal invalid-nick state so
+			// the supervisor stops retrying and the SPA prompts for a new nick.
+			c.machine.Transition(UpstreamStateDisconnectedNickInvalid,
+				WithServerReason(fmt.Sprintf("nickname %q and its alternates are all taken", c.DesiredNick())))
+			return fmt.Errorf("irc handshake: nickname %q already in use (433); fallbacks exhausted after %d tries", c.attemptedNick, c.nickFallbacks)
 		case ErrErroneusNickname:
 			// 432: the nick is invalid or network-reserved. Appending "_"
-			// can't make it valid, so don't fall back — surface the error and
-			// let the supervisor reconnect under the floor/throttle. (Also the
-			// give-up path when a "_" fallback grew past the server's NICKLEN.)
+			// can't make it valid, so don't fall back. ClassifyNumeric above
+			// already moved us to the terminal invalid-nick state; surface the
+			// error so the supervisor stops and the SPA prompts for a new nick.
 			return fmt.Errorf("irc handshake: nickname %q erroneous/reserved (432): %s", c.attemptedNick, msg.Trailing)
 		case ErrUnavailResource:
-			return fmt.Errorf("irc handshake: nickname %q unavailable (437)", c.settings.Nick)
+			// 437: reserved/juped nick. Like 432 — terminal invalid-nick
+			// (ClassifyNumeric set the state); the user picks another.
+			return fmt.Errorf("irc handshake: nickname %q unavailable/reserved (437): %s", c.settings.Nick, msg.Trailing)
 		case ErrPasswdMismatch:
 			return fmt.Errorf("irc handshake: server password rejected (464)")
 		case ErrYoureBannedCreep:
@@ -1306,6 +1496,14 @@ func (c *Connector) readLineRespectingCtx(ctx context.Context) (string, error) {
 //   - non-nil error when the connector reaches a terminal state
 //     (auth_failed / banned / paused_idle) — agent.Run treats that as
 //     fatal and unwinds the rest of the connectors via Stop.
+//
+// This is the connector's central supervisor state machine — park / session /
+// classify / terminal / backoff-reconnect, each guarded for operator cancel +
+// terminal escalation. The cohesive sub-steps (runPark, runSession) are already
+// extracted; the remaining branchiness is the irreducible loop itself, like the
+// sibling runSession / dispatchLine loops in this file.
+//
+//nolint:gocyclo // central supervisor state machine; see the doc comment above.
 func (c *Connector) Run(ctx context.Context) error {
 	// A nil client with the machine still in its initial Idle state means Run
 	// was called before Start ever attempted a connect — a programming error.
@@ -1359,6 +1557,19 @@ func (c *Connector) Run(ctx context.Context) error {
 	}
 
 	for {
+		// Park whenever the user has suspended the link or the chosen nick is
+		// unusable: block with no dialing, backoff, or escalation until Resume
+		// / a new nick / operator shutdown, then reconnect immediately. Parking
+		// keeps the bouncer + web gateway up — only the upstream link is down.
+		if c.shouldPark() {
+			newStart, stop := c.runPark(runCtx, backoff, watchdogDone)
+			if stop {
+				return nil
+			}
+			sessionStart = newStart
+			continue
+		}
+
 		err := c.runSession(runCtx)
 
 		// Operator-initiated cancellation takes precedence over any
@@ -1371,13 +1582,21 @@ func (c *Connector) Run(ctx context.Context) error {
 
 		// If the read/dispatch path observed a classified ERROR or
 		// numeric, the state machine is already in the right place.
-		// Otherwise, fall back to classifying the Go error.
-		if cur := c.machine.State(); !cur.IsRecoverable() && !cur.IsTerminal() {
+		// Otherwise, fall back to classifying the Go error. Parkable states
+		// (a mid-session Suspend, an unusable nick) are intentional and must
+		// not be reclassified as a transport failure.
+		if cur := c.machine.State(); !cur.IsRecoverable() && !cur.IsTerminal() && !cur.IsParkable() {
 			c.transitionFromError(err)
 		}
 
 		if c.machine.State().IsTerminal() {
 			return exitTerminal(err)
+		}
+
+		// A mid-session Suspend or a now-unusable nick: loop so the park
+		// branch at the top handles it (no backoff reset / sleep churn).
+		if c.shouldPark() {
+			continue
 		}
 
 		// Only credit a backoff reset if the session that just ended ran
@@ -1405,7 +1624,16 @@ func (c *Connector) Run(ctx context.Context) error {
 				return nil
 			}
 			return exitTerminal(nil)
+		case <-c.lifecycleCh:
+			// A Suspend/Resume landed during the backoff sleep — re-evaluate
+			// at the top (park if now suspended, otherwise dial immediately).
+			continue
 		case <-time.After(delay):
+		}
+
+		// A Suspend during the sleep flips us parkable; don't dial.
+		if c.shouldPark() {
+			continue
 		}
 
 		if err := c.bringUp(runCtx); err != nil {
@@ -1422,6 +1650,44 @@ func (c *Connector) Run(ctx context.Context) error {
 		}
 		sessionStart = time.Now()
 	}
+}
+
+// runPark blocks the supervisor on a parkable state (user-suspended or awaiting
+// a usable nick) and, once it clears, performs one immediate reconnect. Returns
+// the session-start stamp for a successful reconnect (zero when the reconnect
+// failed — the caller's loop re-evaluates) and stop=true when the connector
+// should shut down (operator cancel during the park). Factored out of Run's
+// loop to keep that supervisor readable.
+func (c *Connector) runPark(runCtx context.Context, backoff *BackoffSchedule, watchdogDone <-chan struct{}) (sessionStart time.Time, stop bool) {
+	if c.isSuspended() {
+		// Re-assert the parkable state in case a racing bringUp moved it.
+		c.machine.Transition(UpstreamStateDisconnectedByUser)
+	}
+	// Capture the desired nick so a nick-invalid park ends precisely when the
+	// user picks a different one (a suspend parks until the intent flips). park
+	// re-evaluates this on every wakeup, so a missed lifecycle signal self-heals.
+	parkNick := c.DesiredNick()
+	stillParked := func() bool {
+		if c.isSuspended() {
+			return true
+		}
+		return c.machine.State() == UpstreamStateDisconnectedNickInvalid &&
+			c.DesiredNick() == parkNick
+	}
+	if !c.park(runCtx, stillParked) {
+		c.machine.Transition(UpstreamStateStopped)
+		<-watchdogDone
+		return time.Time{}, true
+	}
+	// Resumed by a deliberate action: connect now with a fresh backoff (the
+	// control plane's lifecycle cooldown rate-limits user toggles, and the
+	// process-level connect gate guards the egress IP).
+	backoff.Reset()
+	if err := c.bringUp(runCtx); err != nil {
+		c.log.Warn("irc connect after resume failed", "err", err)
+		return time.Time{}, false
+	}
+	return time.Now(), false
 }
 
 // reconnectDelay returns how long to wait before the next reconnect: the
@@ -1630,6 +1896,16 @@ func (c *Connector) runSession(ctx context.Context) error {
 	return g.Wait()
 }
 
+// isOutageState reports whether a state should count as an outage for the
+// escalation watchdog: anything that isn't registered AND isn't an intentional
+// park. A parked link (user-suspended or awaiting a usable nick) is deliberate,
+// not a failure — escalating it to paused_idle would tear down a connector the
+// user simply disconnected; Resume restarts the outage clock from the next
+// reconnect.
+func isOutageState(s UpstreamState) bool {
+	return s != UpstreamStateRegistered && !s.IsParkable()
+}
+
 // runEscalationWatchdog runs the long-outage escalation timers in
 // parallel with the reconnect loop. It measures outage duration as
 // "time since the connector was last in registered" — NOT dwell in a
@@ -1681,11 +1957,11 @@ func (c *Connector) runEscalationWatchdog(ctx context.Context) <-chan struct{} {
 		}
 
 		sub := c.machine.Subscribe(func(change UpstreamStateChange) {
-			if change.To == UpstreamStateRegistered {
+			if isOutageState(change.To) {
+				startOutage()
+			} else {
 				endOutage()
-				return
 			}
-			startOutage()
 		})
 		defer sub.Unsubscribe()
 
@@ -1695,7 +1971,7 @@ func (c *Connector) runEscalationWatchdog(ctx context.Context) <-chan struct{} {
 		// and recovered, state is registered — no outage. If bringUp
 		// is still mid-flight on first reconnect, state is connecting
 		// — count that as outage start).
-		if c.machine.State() != UpstreamStateRegistered {
+		if isOutageState(c.machine.State()) {
 			startOutage()
 		}
 
@@ -1785,7 +2061,17 @@ func (c *Connector) dispatchLine(ctx context.Context, line string) {
 	if state, reason, ok := ClassifyDisconnectMessage(line); ok {
 		c.machine.Transition(state, WithServerReason(reason))
 	} else if state, ok := ClassifyNumeric(msg.Command, msg.Params, msg.Trailing); ok {
-		c.machine.Transition(state, WithServerReason(msg.Trailing))
+		// A nick-unavailable/invalid numeric (433/432/437) during a LIVE
+		// session is a failed nick-change — the reclaim loop or a client /nick
+		// hitting a taken/invalid nick — NOT a disconnect. The connection is
+		// fine, so it must not flip out of `registered` (which would make the
+		// bouncer think the bot is offline and reject sends to channels it's
+		// actually in). Registration-time nick handling lives in awaitHandshake;
+		// the attached client still sees the raw numeric via the fan-out below.
+		if state != UpstreamStateDisconnectedNickUnavailable &&
+			state != UpstreamStateDisconnectedNickInvalid {
+			c.machine.Transition(state, WithServerReason(msg.Trailing))
+		}
 	}
 
 	// Forward every observed upstream line to attached bouncer clients
@@ -2118,7 +2404,11 @@ func (c *Connector) handleJoin(ctx context.Context, msg Message) {
 		return
 	}
 	nick := Nick(msg.Prefix)
-	if nick == c.settings.Nick {
+	// Match the LIVE nick, not the configured one: after a 433 "_" fallback or
+	// a /nick the bot's nick differs from settings.Nick, and a stale compare
+	// would miss our own JOIN echo → the channel never lands in state/wanted →
+	// no sync and "not joined" guards.
+	if strings.EqualFold(nick, c.CurrentNick()) {
 		c.state.OnSelfJoin(channel)
 		// Server doesn't echo the key on JOIN echo, so Add with an
 		// empty key — WantedChannels.Add preserves any previously-
@@ -2139,7 +2429,7 @@ func (c *Connector) handlePart(ctx context.Context, msg Message) {
 	}
 	channel := msg.Params[0]
 	nick := Nick(msg.Prefix)
-	if nick == c.settings.Nick {
+	if strings.EqualFold(nick, c.CurrentNick()) {
 		c.state.OnSelfPart(channel)
 		c.wanted.Remove(channel)
 	} else {

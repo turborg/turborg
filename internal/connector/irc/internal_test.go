@@ -1821,3 +1821,43 @@ func TestReconcileChannelsUpdatesWantedSet(t *testing.T) {
 		t.Fatalf("wanted set should be {#b,#c}, got %v", got)
 	}
 }
+
+func TestLiveNickInUseDoesNotDisconnect(t *testing.T) {
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+	// Drive to a live, registered session.
+	c.machine.Transition(UpstreamStateConnecting)
+	c.machine.Transition(UpstreamStateRegistering)
+	c.machine.Transition(UpstreamStateRegistered)
+	require.Equal(t, UpstreamStateRegistered, c.machine.State())
+
+	// The reclaim loop (or a client /nick) attempts a taken nick → 433. This
+	// is a failed nick-change, not a disconnect; the session must stay up.
+	c.dispatchLine(context.Background(), ":server 433 bot desirednick :Nickname is already in use")
+
+	require.Equal(t, UpstreamStateRegistered, c.machine.State(),
+		"a 433 during a live session must not flip the connector out of registered")
+}
+
+func TestSelfJoinRecognizedUnderChangedNick(t *testing.T) {
+	c := New(&Settings{Nick: "StephenS"}, nil, nil)
+	// 433 fallback / live /nick: the live nick differs from the configured one.
+	c.setCurrentNick("StephenS_")
+
+	// The bot's own JOIN echo arrives under the LIVE nick.
+	c.handleJoin(context.Background(), Parse(":StephenS_!~u@h JOIN #xshellz-test"))
+
+	found := false
+	for _, w := range c.wanted.Snapshot() {
+		if strings.EqualFold(w.Name, "#xshellz-test") {
+			found = true
+		}
+	}
+	require.True(t, found,
+		"a self-JOIN echo under the live (changed) nick must be recognized → wanted set updated")
+}
+
+func TestSetCurrentNickIgnoresPlaceholder(t *testing.T) {
+	c := New(&Settings{Nick: "bot"}, nil, nil)
+	c.setCurrentNick("*") // IRC "no nick yet" placeholder (pre-registration target)
+	require.Equal(t, "bot", c.CurrentNick(), `"*" must not be adopted as the live nick`)
+}
