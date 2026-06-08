@@ -48,12 +48,21 @@ const (
 	// UpstreamStateDisconnectedNickInvalid is reached when the chosen nick
 	// cannot be used at all: 432 ERR_ERRONEUSNICKNAME (syntactically invalid
 	// or network-reserved), 437 ERR_UNAVAILRESOURCE (reserved/juped), or a
-	// 433 whose "_"-suffix fallback was exhausted. Terminal — appending more
-	// underscores or reconnecting can't help, so the user must pick a
-	// different nick (the SPA prompts for one). Distinct from
+	// 433 whose "_"-suffix fallback was exhausted. Parkable — appending more
+	// underscores or reconnecting can't help, so the supervisor parks (no
+	// dialing, no escalation) until the user picks a different nick, at which
+	// point ApplyNick resumes the supervisor with the new value. Distinct from
 	// NickUnavailable so the front-end knows to open the picker rather than
 	// show a transient "retrying" banner.
 	UpstreamStateDisconnectedNickInvalid UpstreamState = "disconnected_nick_invalid"
+
+	// UpstreamStateDisconnectedByUser is a deliberate, user-requested
+	// disconnect via Suspend() (the chat UI's Disconnect button). Parkable:
+	// the supervisor sends QUIT, parks the upstream link, and keeps the
+	// bouncer + web gateway up — especially important pooled, where the
+	// container is shared by N tenants and can never be stopped for one user.
+	// Resume() reconnects. Not a failure; it carries no server reason.
+	UpstreamStateDisconnectedByUser UpstreamState = "disconnected_by_user"
 
 	// UpstreamStateDisconnectedAuthFailed is 464 ERR_PASSWDMISMATCH,
 	// 904 ERR_SASLFAIL, 905 ERR_SASLTOOLONG, or content-matched
@@ -88,14 +97,32 @@ func (s UpstreamState) IsRecoverable() bool {
 
 // IsTerminal reports whether the supervisor should stop retrying after
 // observing this state. Mirrors the operator-policy fork between
-// "automatic reconnect continues" and "needs operator action".
+// "automatic reconnect continues" and "needs operator action". Parkable
+// states (see IsParkable) are deliberately NOT terminal — the supervisor
+// blocks on them rather than unwinding the connector.
 func (s UpstreamState) IsTerminal() bool {
 	switch s {
 	case UpstreamStateDisconnectedAuthFailed,
 		UpstreamStateDisconnectedBanned,
-		UpstreamStateDisconnectedNickInvalid,
 		UpstreamStatePausedIdle,
 		UpstreamStateStopped:
+		return true
+	}
+	return false
+}
+
+// IsParkable reports whether the supervisor should PARK on this state —
+// block without dialing, backing off, or escalating — until an external
+// trigger (Resume, or a new nick via ApplyNick) unblocks it. Distinct from
+// terminal (which unwinds the connector goroutine) and recoverable (which
+// keeps reconnecting): a parked connector keeps the bouncer + web gateway
+// up and simply has no upstream link.
+//
+//   - DisconnectedByUser: parked until Resume().
+//   - DisconnectedNickInvalid: parked until a usable nick is applied.
+func (s UpstreamState) IsParkable() bool {
+	switch s {
+	case UpstreamStateDisconnectedByUser, UpstreamStateDisconnectedNickInvalid:
 		return true
 	}
 	return false
@@ -426,6 +453,9 @@ func DescribeUpstreamState(state UpstreamState, networkName, serverReason string
 	case UpstreamStateDisconnectedNickInvalid:
 		return "Nickname can't be used on " + network + reasonSuffix +
 			". Pick a different nickname to connect — it's invalid or reserved on this network."
+	case UpstreamStateDisconnectedByUser:
+		return "Disconnected from " + network +
+			" at your request. Reconnect to rejoin — messages sent now will NOT be delivered."
 	case UpstreamStateDisconnectedAuthFailed:
 		return "Authentication failed for " + network + reasonSuffix +
 			". Automatic reconnect stopped — update credentials and restart the connector."
@@ -453,6 +483,9 @@ func DescribeUpstreamState(state UpstreamState, networkName, serverReason string
 func SeverityForUpstreamState(state UpstreamState) string {
 	switch state {
 	case UpstreamStateRegistered:
+		return "info"
+	case UpstreamStateDisconnectedByUser:
+		// A deliberate user disconnect is not a fault — no alarming banner.
 		return "info"
 	case UpstreamStateConnecting, UpstreamStateRegistering,
 		UpstreamStateDisconnectedTransient,

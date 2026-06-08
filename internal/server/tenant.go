@@ -372,6 +372,10 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			// RFC-1413 responder can name it (kills the ~ prefix + satisfies
 			// "identd required" networks). Shared registry across all tenants.
 			conn.SetIdentReporter(t.idents)
+			// Boot already parked when the user has the link disconnected, so a
+			// pool restart of a suspended tenant comes up parked rather than
+			// flapping connect→quit. Live toggles arrive via applySuspend.
+			conn.SetInitialSuspended(boolField(cs.Config, "suspended", false))
 
 			// Durable message store (write-through to the control plane), so the
 			// bouncer welcome replay, web-shell scrollback, and the user's
@@ -586,27 +590,8 @@ func (t *Tenant) update(spec TenantSpec) {
 	// only matters as the restart-recovery seed applied at build time; a live
 	// change to it alone is a no-op here. A command-set change still reloads in
 	// place. Anything else falls through to a restart.
-	if liveUpdatableOnlyChange(prev, spec) {
-		commandsChanged := !commandSetsEqual(prev.Commands, spec.Commands)
-		ignoresChanged := !reflect.DeepEqual(prev.IgnoredNicks, spec.IgnoredNicks)
-		nickChanged, channelsChanged := ircNickChannelsChanged(prev, spec)
-		if !commandsChanged && !ignoresChanged && !nickChanged && !channelsChanged {
-			return // only the usage baseline moved — nothing to reconnect for
-		}
-		// Apply each changed facet in place. The command set swaps via
-		// ReplaceDynamic; the ignore list swaps the registry-wide guard; nick
-		// and channels apply live via NICK / JOIN+PART. Any "false" means the
-		// tenant isn't running, so fall through to a restart that re-seeds
-		// everything from the new spec at build time.
-		okCommands := !commandsChanged || t.reloadCommands(spec.Commands)
-		okIgnores := !ignoresChanged || t.reloadGuard()
-		okNickChan := (!nickChanged && !channelsChanged) || t.applyNickChannels(spec)
-		if okCommands && okIgnores && okNickChan {
-			t.log.Info("tenant settings reloaded in place",
-				"commands", len(spec.Commands), "ignored", len(spec.IgnoredNicks),
-				"nick_changed", nickChanged, "channels_changed", channelsChanged)
-			return
-		}
+	if liveUpdatableOnlyChange(prev, spec) && t.applyLiveUpdate(prev, spec) {
+		return
 	}
 
 	t.log.Info("tenant spec changed; restarting", "connectors", t.connectorTypes())
@@ -620,6 +605,40 @@ func (t *Tenant) update(spec TenantSpec) {
 	case t.restartCh <- struct{}{}:
 	default:
 	}
+}
+
+// applyLiveUpdate reconciles the live-updatable facets (command set, ignore
+// list, nick/channels, connect/disconnect intent) of a spec change in place,
+// with no reconnect. The caller has already established that ONLY such facets
+// changed (liveUpdatableOnlyChange). Returns true when every changed facet
+// applied; false means the tenant isn't running (a facet apply reported no live
+// connector), so the caller falls back to a restart that re-seeds everything
+// from the new spec at build time. A change confined to the usage baseline
+// applies nothing and returns true (nothing to reconnect for).
+func (t *Tenant) applyLiveUpdate(prev, spec TenantSpec) bool {
+	commandsChanged := !commandSetsEqual(prev.Commands, spec.Commands)
+	ignoresChanged := !reflect.DeepEqual(prev.IgnoredNicks, spec.IgnoredNicks)
+	nickChanged, channelsChanged := ircNickChannelsChanged(prev, spec)
+	suspendChanged := ircSuspendChanged(prev, spec)
+	if !commandsChanged && !ignoresChanged && !nickChanged && !channelsChanged && !suspendChanged {
+		return true // only the usage baseline moved — nothing to reconnect for
+	}
+	// Apply each changed facet in place. The command set swaps via
+	// ReplaceDynamic; the ignore list swaps the registry-wide guard; nick and
+	// channels apply live via NICK / JOIN+PART; the connect/disconnect intent
+	// parks/resumes the upstream link.
+	okCommands := !commandsChanged || t.reloadCommands(spec.Commands)
+	okIgnores := !ignoresChanged || t.reloadGuard()
+	okNickChan := (!nickChanged && !channelsChanged) || t.applyNickChannels(spec)
+	okSuspend := !suspendChanged || t.applySuspend(spec)
+	if okCommands && okIgnores && okNickChan && okSuspend {
+		t.log.Info("tenant settings reloaded in place",
+			"commands", len(spec.Commands), "ignored", len(spec.IgnoredNicks),
+			"nick_changed", nickChanged, "channels_changed", channelsChanged,
+			"suspend_changed", suspendChanged)
+		return true
+	}
+	return false
 }
 
 // commandsOnlyChange reports whether two differing specs differ in nothing
@@ -652,9 +671,9 @@ func liveUpdatableOnlyChange(a, b TenantSpec) bool {
 }
 
 // stripLiveConnectorFields returns the connectors with the IRC connector's
-// live-applicable config keys (nick, channels) removed, so spec comparison
-// ignores them. Deep-copies the affected config map so the caller's spec is
-// untouched.
+// live-applicable config keys (nick, channels, suspended) removed, so spec
+// comparison ignores them. Deep-copies the affected config map so the caller's
+// spec is untouched.
 func stripLiveConnectorFields(conns []ConnectorSpec) []ConnectorSpec {
 	out := make([]ConnectorSpec, len(conns))
 	for i, c := range conns {
@@ -664,7 +683,7 @@ func stripLiveConnectorFields(conns []ConnectorSpec) []ConnectorSpec {
 		}
 		cfg := make(map[string]any, len(c.Config))
 		for k, v := range c.Config {
-			if k == "nick" || k == "channels" {
+			if k == "nick" || k == "channels" || k == "suspended" {
 				continue
 			}
 			cfg[k] = v
@@ -682,6 +701,35 @@ func ircNickChannelsChanged(prev, next TenantSpec) (nick, channels bool) {
 	nick = stringField(p.Config, "nick") != stringField(n.Config, "nick")
 	channels = !reflect.DeepEqual(stringSlice(p.Config, "channels"), stringSlice(n.Config, "channels"))
 	return nick, channels
+}
+
+// ircSuspendChanged reports whether the IRC connector's user connect/disconnect
+// intent moved between two specs.
+func ircSuspendChanged(prev, next TenantSpec) bool {
+	p := firstIRCConnectorSpec(prev.Connectors)
+	n := firstIRCConnectorSpec(next.Connectors)
+	return boolField(p.Config, "suspended", false) != boolField(n.Config, "suspended", false)
+}
+
+// applySuspend applies the spec's desired connect/disconnect intent to the live
+// connector without a respawn: Suspend parks the upstream link, Resume
+// reconnects, neither touches the bouncer / web gateway. Returns false when the
+// tenant isn't running (no live connector), so the caller falls back to a
+// restart that re-seeds the intent at build time via SetInitialSuspended.
+func (t *Tenant) applySuspend(spec TenantSpec) bool {
+	t.mu.Lock()
+	conn := t.ircConn
+	t.mu.Unlock()
+	if conn == nil {
+		return false
+	}
+	cs := firstIRCConnectorSpec(spec.Connectors)
+	if boolField(cs.Config, "suspended", false) {
+		conn.Suspend()
+	} else {
+		conn.Resume()
+	}
+	return true
 }
 
 // applyNickChannels applies the spec's desired nick and channels to the live

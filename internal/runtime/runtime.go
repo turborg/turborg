@@ -235,6 +235,14 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 			}
 			ircConn.ApplyNick(cfg.Nick)
 			ircConn.ReconcileChannels(cfg.Channels)
+			// Reconcile the user's connect/disconnect intent live (idempotent):
+			// Suspend parks the upstream link, Resume reconnects, neither
+			// touches the bouncer / web gateway.
+			if cfg.Suspended {
+				ircConn.Suspend()
+			} else {
+				ircConn.Resume()
+			}
 		},
 		log,
 	)
