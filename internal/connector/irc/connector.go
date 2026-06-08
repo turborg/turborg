@@ -979,6 +979,20 @@ func (c *Connector) bringUp(ctx context.Context) error {
 	)
 	c.machine.Transition(UpstreamStateConnecting)
 
+	// Wait for the per-egress-IP connect gate to admit this connection before
+	// arming the dial timeout. The gate protects a shared egress IP from
+	// connection-flood K-lines, so on a mass reconnect (a pool redeploy) the
+	// tenants sharing an IP queue here at the safe aggregate rate. This wait
+	// rides the supervisor ctx — cancellable on shutdown / terminal
+	// escalation — NOT the dial deadline, so a long-but-legitimate queue
+	// position stays in `connecting` until admitted instead of failing as a
+	// dial timeout, retrying, and amplifying the herd. Distinct egress IPs use
+	// distinct buckets, so a fanned-out pool drains in parallel.
+	if err := awaitConnectSlot(ctx, c.settings.SourceIP, c.settings.Hostname); err != nil {
+		c.classifyFallback(ctx, err)
+		return err
+	}
+
 	// Bound the dial so a node that accepts the TCP connection then stalls
 	// the TLS handshake can't hang the connect forever; on timeout it errors
 	// into the supervisor's backoff + DNS-re-resolve reconnect loop, which

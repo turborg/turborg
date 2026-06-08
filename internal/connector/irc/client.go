@@ -58,14 +58,21 @@ func (c *Client) LocalPort() int {
 }
 
 func Dial(ctx context.Context, host string, port int, useTLS bool, sourceIP string) (*Client, error) {
-	// Rate-limit new connections per (egress IP, host) across the whole
-	// process so we can never flood a network from a shared egress IP,
-	// regardless of how many tenants are (re)connecting. No-op until a
-	// production main() enables the gate.
-	if err := sharedConnectGate.Wait(ctx, sourceIP+"|"+host); err != nil {
-		return nil, fmt.Errorf("irc dial %s:%d: connect gate: %w", host, port, err)
-	}
 	return dial(ctx, host, port, useTLS, sourceIP, nil)
+}
+
+// awaitConnectSlot blocks until the process-wide connect gate admits a new
+// connection on the (sourceIP, host) bucket, or ctx is done. It rate-limits
+// new connections per egress IP so a shared egress can never flood a network
+// regardless of how many tenants are (re)connecting; it is a no-op until a
+// production main() enables the gate.
+//
+// Callers MUST await a slot BEFORE arming the dial timeout — the admission
+// wait is a queue, not a transport operation, so bounding it by DialTimeout
+// would mistake a long-but-legitimate queue position for an unreachable
+// network and retry it, amplifying a shared-IP herd into a reconnect storm.
+func awaitConnectSlot(ctx context.Context, sourceIP, host string) error {
+	return sharedConnectGate.Wait(ctx, sourceIP+"|"+host)
 }
 
 // dial is the internal Dial that accepts a custom *tls.Config. Tests
