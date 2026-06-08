@@ -47,7 +47,8 @@ func TestClassifyNumericTable(t *testing.T) {
 		ok      bool
 	}{
 		{"433 ERR_NICKNAMEINUSE", irc.ErrNickNameInUse, irc.UpstreamStateDisconnectedNickUnavailable, true},
-		{"437 ERR_UNAVAILRESOURCE", irc.ErrUnavailResource, irc.UpstreamStateDisconnectedNickUnavailable, true},
+		{"432 ERR_ERRONEUSNICKNAME", irc.ErrErroneusNickname, irc.UpstreamStateDisconnectedNickInvalid, true},
+		{"437 ERR_UNAVAILRESOURCE", irc.ErrUnavailResource, irc.UpstreamStateDisconnectedNickInvalid, true},
 		{"464 ERR_PASSWDMISMATCH", irc.ErrPasswdMismatch, irc.UpstreamStateDisconnectedAuthFailed, true},
 		{"904 ERR_SASLFAIL", irc.ErrSaslFail, irc.UpstreamStateDisconnectedAuthFailed, true},
 		{"905 ERR_SASLTOOLONG", irc.ErrSaslTooLong, irc.UpstreamStateDisconnectedAuthFailed, true},
@@ -321,7 +322,9 @@ func TestDescribeUpstreamStateCoversEveryArm(t *testing.T) {
 		{irc.UpstreamStateDisconnectedTransient, "Libera", "EOF",
 			[]string{"Currently disconnected", "EOF", "NOT be delivered"}},
 		{irc.UpstreamStateDisconnectedNickUnavailable, "Libera", "",
-			[]string{"Nickname unavailable", "Libera"}},
+			[]string{"Nickname taken", "Libera", "reclaiming"}},
+		{irc.UpstreamStateDisconnectedNickInvalid, "Libera", "Erroneous Nickname",
+			[]string{"can't be used", "Libera", "Erroneous Nickname", "Pick a different"}},
 		{irc.UpstreamStateDisconnectedAuthFailed, "Libera", "bad password",
 			[]string{"Authentication failed", "bad password", "update credentials"}},
 		{irc.UpstreamStateDisconnectedBanned, "Libera", "K-Lined: spam",
