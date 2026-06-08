@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.16.1](https://github.com/turborg/turborg/compare/v0.16.0...v0.16.1) (2026-06-08)
+
+
+### Documentation
+
+* **readme:** drop stale binary/image size figures ([#119](https://github.com/turborg/turborg/issues/119)) ([9ffcbc3](https://github.com/turborg/turborg/commit/9ffcbc31cad546e5ad1bc1546ce7ce8ec7219301))
+
 ## [0.16.0](https://github.com/turborg/turborg/compare/v0.15.2...v0.16.0) (2026-06-08)
 
 
