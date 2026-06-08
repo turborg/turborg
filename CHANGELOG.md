@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.16.2](https://github.com/turborg/turborg/compare/v0.16.1...v0.16.2) (2026-06-08)
+
+
+### Bug Fixes
+
+* **connector/irc:** make the connect gate leak-free; wait outside the dial timeout ([e5b49fd](https://github.com/turborg/turborg/commit/e5b49fd5291ac4de3b2876089515d9a2cf8535ac))
+
 ## [0.16.1](https://github.com/turborg/turborg/compare/v0.16.0...v0.16.1) (2026-06-08)
 
 
