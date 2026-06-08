@@ -10,7 +10,7 @@
 
 ## What it does
 
-turborg connects an IRC nick to a network, joins channels, runs commands you register, and (optionally) lets a real human attach a HexChat / irssi / mIRC client through a built-in bouncer or use a browser-based reference UI through a built-in WebSocket gateway. All in one ~5 MB static binary.
+turborg connects an IRC nick to a network, joins channels, runs commands you register, and (optionally) lets a real human attach a HexChat / irssi / mIRC client through a built-in bouncer or use a browser-based reference UI through a built-in WebSocket gateway. All in one static binary, no runtime dependencies.
 
 - **A real IRC connector** — TLS, SASL PLAIN, NickServ identify, IRCv3 `server-time` + `account-tag`, full PRIVMSG / JOIN / PART / KICK / NICK / TOPIC tracking, per-channel state cached from the wire.
 - **A built-in IRC bouncer** — local clients connect to the bot's loopback port, authenticate with a password, and tunnel through the bot's upstream session. The bot stays in control while a human can lurk and chat from their own client.
@@ -32,7 +32,7 @@ go install github.com/turborg/turborg/cmd/turborg@latest
 Or grab a release from the [releases page](https://github.com/turborg/turborg/releases), or pull the container:
 
 ```bash
-docker pull ghcr.io/turborg/turborg:latest   # ~10 MB, multi-arch
+docker pull ghcr.io/turborg/turborg:latest   # multi-arch (amd64+arm64), distroless
 ```
 
 Minimum config — three env vars and you're online:
@@ -109,7 +109,7 @@ The agent ships with no commands; `!echo hello world` is the one this example re
 
 ## Run with Docker
 
-The published image is `ghcr.io/turborg/turborg:latest` (multi-arch `linux/amd64` + `linux/arm64`, ~10 MB, distroless/static).
+The published image is `ghcr.io/turborg/turborg:latest` (multi-arch `linux/amd64` + `linux/arm64`, distroless/static).
 
 **Inline env vars — fastest path:**
 
