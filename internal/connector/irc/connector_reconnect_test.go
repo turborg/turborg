@@ -146,6 +146,12 @@ type reconnectTestServer struct {
 	// ERR_NICKNAMEINUSE_THEN_OK fallback mode).
 	reg433Sent bool
 
+	// goodNick, with the "ERR_ERRONEOUSNICKNAME_UNTIL_GOOD" reject mode, is
+	// the one nick the server accepts: it 432s every other NICK (driving the
+	// invalid-nick park) and welcomes only this one — so a test can confirm
+	// the supervisor resumes and re-registers once a usable nick is applied.
+	goodNick string
+
 	// joinHook lets edge tests intercept the JOIN reply. Returning
 	// true means "I handled this JOIN" and suppresses the default
 	// self-JOIN echo; returning false falls through to the standard
@@ -296,10 +302,22 @@ func (s *reconnectTestServer) handleLine(conn net.Conn, line string) {
 			nick := strings.TrimSpace(strings.TrimPrefix(line, "NICK "))
 			_, _ = conn.Write([]byte(":fake 433 * " + nick + " :Nickname is already in use\r\n"))
 		}
+		// Nick-recovery mode: 432 every NICK that isn't goodNick (parking the
+		// connector in invalid-nick), and welcome the moment the good one
+		// arrives — so a resume-on-new-nick can complete registration.
+		if s.rejectAfter == "ERR_ERRONEOUSNICKNAME_UNTIL_GOOD" {
+			nick := strings.TrimSpace(strings.TrimPrefix(line, "NICK "))
+			if nick == s.goodNick {
+				_, _ = conn.Write([]byte(":fake 001 " + nick + " :Welcome\r\n"))
+				_, _ = conn.Write([]byte(":fake 376 " + nick + " :End of MOTD\r\n"))
+			} else {
+				_, _ = conn.Write([]byte(":fake 432 * " + nick + " :Erroneous Nickname\r\n"))
+			}
+		}
 	case strings.HasPrefix(line, "USER "):
 		nick := s.firstNickLocked()
 		switch s.rejectAfter {
-		case "ERR_NICKNAMEINUSE_THEN_OK":
+		case "ERR_NICKNAMEINUSE_THEN_OK", "ERR_ERRONEOUSNICKNAME_UNTIL_GOOD":
 			// Handled on the NICK line(s), not here.
 		case "ERR_NICKNAMEINUSE", "ERR_NICKNAMEINUSE_ALWAYS":
 			_, _ = conn.Write([]byte(":fake 433 * " + nick + " :Nickname is already in use\r\n"))

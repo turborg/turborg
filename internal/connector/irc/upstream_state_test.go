@@ -32,6 +32,20 @@ func TestUpstreamStateClassifications(t *testing.T) {
 		assert.True(t, irc.UpstreamStateStopped.IsTerminal())
 		assert.False(t, irc.UpstreamStateDisconnectedTransient.IsTerminal())
 		assert.False(t, irc.UpstreamStateRegistered.IsTerminal())
+		// Parkable states are NOT terminal — the supervisor blocks on them
+		// rather than unwinding the connector.
+		assert.False(t, irc.UpstreamStateDisconnectedByUser.IsTerminal())
+		assert.False(t, irc.UpstreamStateDisconnectedNickInvalid.IsTerminal())
+	})
+	t.Run("parkable bucket", func(t *testing.T) {
+		assert.True(t, irc.UpstreamStateDisconnectedByUser.IsParkable())
+		assert.True(t, irc.UpstreamStateDisconnectedNickInvalid.IsParkable())
+		// Parkable is disjoint from recoverable and terminal.
+		assert.False(t, irc.UpstreamStateDisconnectedByUser.IsRecoverable())
+		assert.False(t, irc.UpstreamStateDisconnectedTransient.IsParkable())
+		assert.False(t, irc.UpstreamStateDisconnectedNickUnavailable.IsParkable())
+		assert.False(t, irc.UpstreamStateRegistered.IsParkable())
+		assert.False(t, irc.UpstreamStateStopped.IsParkable())
 	})
 }
 
