@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.16.0](https://github.com/turborg/turborg/compare/v0.15.2...v0.16.0) (2026-06-08)
+
+
+### Features
+
+* **connector/irc:** apply nick + channel changes live, without a reconnect ([#113](https://github.com/turborg/turborg/issues/113)) ([1153c38](https://github.com/turborg/turborg/commit/1153c3828acfad9b97532d7b0cdb27ed6e076955))
+* **connector/irc:** park & resume the upstream link (Suspend/Resume + nick recovery) ([#118](https://github.com/turborg/turborg/issues/118)) ([47750c5](https://github.com/turborg/turborg/commit/47750c535a6d394a81de5af0cb08a85d3221998f))
+* **connector/irc:** reconnect hardening + nick fallback/reclaim (anti-flood) ([#112](https://github.com/turborg/turborg/issues/112)) ([7e30f62](https://github.com/turborg/turborg/commit/7e30f622f702b14362593671e83fe598c080435d))
+* **connector/irc:** report desired nick distinctly; adopt a self-rename as intent ([#114](https://github.com/turborg/turborg/issues/114)) ([a8983af](https://github.com/turborg/turborg/commit/a8983afdf9a87e384dc3bf58c9d7101e0772ed41))
+* **statepush:** include server-supplied reason in connector snapshot ([#111](https://github.com/turborg/turborg/issues/111)) ([137e497](https://github.com/turborg/turborg/commit/137e4975de517da6c47a1745ad864cc33c379bfe))
+
+
+### Bug Fixes
+
+* **connector/irc:** live nick correctness — no false disconnect, self-detect by live nick, push on change ([#115](https://github.com/turborg/turborg/issues/115)) ([2fd9650](https://github.com/turborg/turborg/commit/2fd965016798972b3cf6917f8f1c7b08d27c4226))
+* **connector/irc:** register ident before the TLS handshake ([#110](https://github.com/turborg/turborg/issues/110)) ([9bbae6a](https://github.com/turborg/turborg/commit/9bbae6a69cc296887045c3662178eff1a8272fd1))
+* **web:** set Prometheus exposition Content-Type on /metrics ([#108](https://github.com/turborg/turborg/issues/108)) ([abb5db8](https://github.com/turborg/turborg/commit/abb5db8fa74f1b4235b6db87032443e036baae8c))
+
 ## [0.15.2](https://github.com/turborg/turborg/compare/v0.15.1...v0.15.2) (2026-06-06)
 
 
