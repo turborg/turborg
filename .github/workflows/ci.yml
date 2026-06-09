@@ -75,6 +75,19 @@ jobs:
           go install github.com/vladopajic/go-test-coverage/v2@latest
           go-test-coverage --config .testcoverage.yml
 
+  govulncheck:
+    name: Govulncheck (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
   build:
     name: Build (linux/amd64)
     runs-on: ubuntu-latest
