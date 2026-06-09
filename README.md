@@ -219,3 +219,31 @@ Found a vulnerability? Please **do not** open a public issue. See [SECURITY.md](
 ---
 
 *Part of the [**xshellz**](https://www.xshellz.com) ecosystem. The future hosted hive lives at [hive.xshellz.com](https://hive.xshellz.com).*
+
+
+
+## Common Optional Environment Variables
+
+The following variables are optional but commonly used in self-hosted deployments.
+
+### Authentication
+
+- `TURBORG_BOUNCER_PASSWORD`
+  Password used when connecting through an IRC bouncer.
+
+- `TURBORG_GATEWAY_PASSWORD`
+  Password used when connecting through IRC gateways that require authentication.
+
+### LLM Integration
+
+- `TURBORG_LLM_API_KEY`
+  API key used to enable LLM-powered features.
+
+### Logging
+
+- `TURBORG_LOG_LEVEL`
+  Controls log verbosity (for example: debug, info, warn, error).
+
+- `TURBORG_LOG_FORMAT`
+  Controls how logs are formatted (for example: text or JSON).
+
