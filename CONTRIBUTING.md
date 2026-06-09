@@ -2,6 +2,13 @@
 
 Thanks for your interest in turborg. The maintainers are happy to review high-quality patches, especially new connectors, bug fixes with tests, and documentation improvements.
 
+## Where to start
+
+New to the project? Start with issues labeled [`good first issue`](https://github.com/turborg/turborg/labels/good%20first%20issue) or [`help wanted`](https://github.com/turborg/turborg/labels/help%20wanted), and keep your first change small and focused.
+
+- Before opening a PR, run `make lint test cover-gate` locally.
+- Use a Conventional Commit-style PR title, such as `docs(contributing): add contributor on-ramp`.
+
 ## Code of Conduct
 
 This project follows the [Contributor Covenant 2.1](CODE_OF_CONDUCT.md). By participating, you agree to abide by it.
