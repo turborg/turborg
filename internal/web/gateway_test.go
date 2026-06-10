@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"errors"
+
 	"github.com/coder/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -240,6 +241,38 @@ func TestMetricsEndpoint(t *testing.T) {
 	} {
 		assert.Contains(t, out, need, "metrics must expose %s", need)
 	}
+}
+
+func TestHealthRejectsNonGETMethods(t *testing.T) {
+	g, _, td := startGateway(t, newOptions(t, "p"), newFakeBridge("turborg"), &fakeSender{})
+	defer td()
+
+	req, err := http.NewRequest(http.MethodPost,
+		"http://"+g.Addr()+"/health", nil)
+	require.NoError(t, err)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+	assert.Equal(t, "GET", resp.Header.Get("Allow"))
+}
+
+func TestMetricsRejectsNonGETMethods(t *testing.T) {
+	g, _, td := startGateway(t, newOptions(t, "p"), newFakeBridge("turborg"), &fakeSender{})
+	defer td()
+
+	req, err := http.NewRequest(http.MethodPost,
+		"http://"+g.Addr()+"/metrics", nil)
+	require.NoError(t, err)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+	assert.Equal(t, "GET", resp.Header.Get("Allow"))
 }
 
 // --- static UI -----------------------------------------------------------

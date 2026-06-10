@@ -463,7 +463,13 @@ func (g *Gateway) sendInitialConnectorState(ctx context.Context, c *client) {
 	})
 }
 
-func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
+func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	body := map[string]any{
 		"status":         "ok",
@@ -473,8 +479,15 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-func (g *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+
 	g.metMu.Lock()
 	conns := g.metrics.connections
 	fails := g.metrics.authFailures
@@ -498,6 +511,7 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		"# TYPE turborg_uptime_seconds gauge",
 		fmt.Sprintf("turborg_uptime_seconds %d", int(time.Since(g.started).Seconds())),
 	}
+
 	_, _ = fmt.Fprintln(w, strings.Join(lines, "\n"))
 }
 
