@@ -465,6 +465,7 @@ func (g *Gateway) sendInitialConnectorState(ctx context.Context, c *client) {
 
 func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	body := map[string]any{
 		"status":         "ok",
 		"uptime_seconds": int(time.Since(g.started).Seconds()),
@@ -475,6 +476,7 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 func (g *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	g.metMu.Lock()
 	conns := g.metrics.connections
 	fails := g.metrics.authFailures
