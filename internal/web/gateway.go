@@ -475,7 +475,12 @@ func (g *Gateway) sendInitialConnectorState(ctx context.Context, c *client) {
 	})
 }
 
-func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
+func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	body := map[string]any{
@@ -486,7 +491,12 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-func (g *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	g.metMu.Lock()
@@ -494,7 +504,6 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	fails := g.metrics.authFailures
 	fwd := g.metrics.messagesForwarded
 	g.metMu.Unlock()
-
 	lines := []string{
 		"# HELP turborg_ws_connections_total Total successful WS auths.",
 		"# TYPE turborg_ws_connections_total counter",
