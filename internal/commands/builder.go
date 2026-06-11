@@ -164,9 +164,10 @@ func llmHandler(d Definition, provider llm.Provider, ctx renderCtx, log *slog.Lo
 // (or the bound, for random) between the colon and the closing brace. `[^}]*`
 // keeps them from spanning across a `}`.
 var (
-	choiceRe  = regexp.MustCompile(`\{choice:([^}]*)\}`)
-	randomRe  = regexp.MustCompile(`\{random:([^}]*)\}`)
-	shuffleRe = regexp.MustCompile(`\{shuffle:([^}]*)\}`)
+	choiceRe     = regexp.MustCompile(`\{choice:([^}]*)\}`)
+	randomRe     = regexp.MustCompile(`\{random:([^}]*)\}`)
+	shuffleRe    = regexp.MustCompile(`\{shuffle:([^}]*)\}`)
+	indexedArgRe = regexp.MustCompile(`\{arg(\d+)\}`)
 )
 
 // render substitutes the supported placeholders in a template.
@@ -186,7 +187,7 @@ func render(tmpl string, env *agent.InboundEnvelope, args []string, ctx renderCt
 	tmpl = expandHelpers(tmpl)
 
 	now := time.Now().UTC()
-	return strings.NewReplacer(
+	tmpl = strings.NewReplacer(
 		"{user}", env.Sender,
 		"{nick}", env.Sender,
 		"{args}", strings.TrimSpace(strings.Join(args, " ")),
@@ -199,6 +200,22 @@ func render(tmpl string, env *agent.InboundEnvelope, args []string, ctx renderCt
 		"{time}", now.Format("15:04:05"),
 		"{datetime}", now.Format("2006-01-02 15:04:05 UTC"),
 	).Replace(tmpl)
+
+	tmpl = indexedArgRe.ReplaceAllStringFunc(tmpl, func(m string) string {
+		match := indexedArgRe.FindStringSubmatch(m)
+		if len(match) != 2 {
+			return ""
+		}
+
+		n, err := strconv.Atoi(match[1])
+		if err != nil || n < 1 || n > len(args) {
+			return ""
+		}
+
+		return args[n-1]
+	})
+
+	return tmpl
 }
 
 // expandHelpers evaluates the random dynamic-placeholder helpers in a template.
