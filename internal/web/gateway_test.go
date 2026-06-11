@@ -218,6 +218,7 @@ func TestHealthEndpoint(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
 	var out map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
 	assert.Equal(t, "ok", out["status"])
@@ -229,6 +230,7 @@ func TestMetricsEndpoint(t *testing.T) {
 
 	resp, err := http.Get("http://" + g.Addr() + "/metrics")
 	require.NoError(t, err)
+	assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	out := string(body)
