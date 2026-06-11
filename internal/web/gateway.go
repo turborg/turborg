@@ -28,6 +28,12 @@ const (
 	channelLogCap = 200
 )
 
+const (
+	gatewayReadHeaderTimeout = 10 * time.Second
+	gatewayWriteTimeout      = 30 * time.Second
+	gatewayIdleTimeout       = 60 * time.Second
+)
+
 // activityHeartbeatInterval is how often an engaged web session
 // re-asserts owner presence. Well under any reasonable idle window,
 // so an engaged, open dashboard never lets the bot idle-pause. A var,
@@ -259,7 +265,13 @@ func (g *Gateway) Serve(ctx context.Context) error {
 
 	srv := &http.Server{
 		Handler:           g.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: gatewayReadHeaderTimeout,
+
+		// Applies only to normal HTTP responses. After a successful
+		// WebSocket upgrade the connection is managed by the websocket
+		// layer, so long-lived WS sessions remain unaffected.
+		WriteTimeout: gatewayWriteTimeout,
+		IdleTimeout:  gatewayIdleTimeout,
 	}
 	g.mu.Lock()
 	g.server = srv
