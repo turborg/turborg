@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
@@ -176,11 +177,15 @@ func healthcheckE() error {
 }
 
 func healthcheckURL(url string) error {
-	//nolint:gosec // Gateway URL is constructed from trusted operator configuration.
-	resp, err := http.Get(url)
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	resp, err := client.Get(url) //nolint:gosec
 	if err != nil {
 		return err
 	}
+
 	defer func() {
 		_ = resp.Body.Close()
 	}()
