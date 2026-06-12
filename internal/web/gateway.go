@@ -28,6 +28,12 @@ const (
 	channelLogCap = 200
 )
 
+const (
+	gatewayReadHeaderTimeout = 10 * time.Second
+	gatewayWriteTimeout      = 30 * time.Second
+	gatewayIdleTimeout       = 60 * time.Second
+)
+
 // activityHeartbeatInterval is how often an engaged web session
 // re-asserts owner presence. Well under any reasonable idle window,
 // so an engaged, open dashboard never lets the bot idle-pause. A var,
@@ -259,7 +265,13 @@ func (g *Gateway) Serve(ctx context.Context) error {
 
 	srv := &http.Server{
 		Handler:           g.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: gatewayReadHeaderTimeout,
+
+		// Applies only to normal HTTP responses. After a successful
+		// WebSocket upgrade the connection is managed by the websocket
+		// layer, so long-lived WS sessions remain unaffected.
+		WriteTimeout: gatewayWriteTimeout,
+		IdleTimeout:  gatewayIdleTimeout,
 	}
 	g.mu.Lock()
 	g.server = srv
@@ -463,8 +475,14 @@ func (g *Gateway) sendInitialConnectorState(ctx context.Context, c *client) {
 	})
 }
 
-func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
+func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	body := map[string]any{
 		"status":         "ok",
 		"uptime_seconds": int(time.Since(g.started).Seconds()),
@@ -473,14 +491,19 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-func (g *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	g.metMu.Lock()
 	conns := g.metrics.connections
 	fails := g.metrics.authFailures
 	fwd := g.metrics.messagesForwarded
 	g.metMu.Unlock()
-
 	lines := []string{
 		"# HELP turborg_ws_connections_total Total successful WS auths.",
 		"# TYPE turborg_ws_connections_total counter",
