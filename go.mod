@@ -3,9 +3,9 @@ module github.com/turborg/turborg
 go 1.26.3
 
 require (
-	github.com/anthropics/anthropic-sdk-go v1.48.0
+	github.com/anthropics/anthropic-sdk-go v1.50.1
 	github.com/caarlos0/env/v11 v11.4.1
-	github.com/coder/websocket v1.8.14
+	github.com/coder/websocket v1.8.15
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
 	github.com/oklog/ulid/v2 v2.1.1
@@ -13,7 +13,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
 	go.uber.org/goleak v1.3.0
-	golang.org/x/sync v0.20.0
+	golang.org/x/sync v0.21.0
 	golang.org/x/time v0.15.0
 )
 
