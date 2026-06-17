@@ -12,10 +12,9 @@ import (
 // irc_test) so it can poke the unexported `now` field without exporting
 // a test-only setter.
 func TestOwnerNudgeResetsAtUTCMidnight(t *testing.T) {
+	// Literal valid args, so construction never returns nil — no guard
+	// needed (and a nil-check-then-deref trips staticcheck SA5011).
 	n := NewOwnerNudge("alice", 2)
-	if n == nil {
-		t.Fatal("nudge construction failed")
-	}
 
 	// Frozen clock pointing at 2026-05-15 23:50 UTC.
 	clock := time.Date(2026, 5, 15, 23, 50, 0, 0, time.UTC)
