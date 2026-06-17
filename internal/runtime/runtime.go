@@ -256,6 +256,14 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		built.Gateway = gw
 	}
 
+	log.Info(
+		"runtime features",
+		"bouncer", ircCfg.BouncerEnabled(),
+		"gateway", built.Gateway != nil,
+		"llm", provider != nil,
+		"commands", len(cmds),
+	)
+
 	return built, nil
 }
 
