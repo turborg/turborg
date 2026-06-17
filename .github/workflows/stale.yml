@@ -1,0 +1,40 @@
+name: Stale PRs
+
+# Closes pull requests that have gone silent so the open-PR queue reflects
+# work that is actually live. A PR is marked `stale` after 14 days with no
+# activity, then closed 7 days later if still untouched. Any comment, review,
+# or push resets the clock — closing is never permanent, and a closed PR can
+# be reopened. Issues are intentionally left alone.
+
+on:
+  schedule:
+    - cron: "30 2 * * *" # daily, 02:30 UTC
+  workflow_dispatch: {}
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  stale:
+    name: Mark and close stale PRs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          days-before-pr-stale: 14
+          days-before-pr-close: 7
+          days-before-issue-stale: -1 # never touch issues
+          days-before-issue-close: -1
+          stale-pr-label: stale
+          exempt-pr-labels: keep,pinned,blocked
+          exempt-draft-pr: true
+          stale-pr-message: >
+            This pull request has had no activity for 14 days, so it's been
+            marked `stale`. If it's still relevant, leave a comment or push an
+            update and the label clears automatically. Otherwise it will be
+            closed in 7 days — you can always reopen it later.
+          close-pr-message: >
+            Closing this pull request after 21 days of inactivity. Thanks for
+            the contribution — feel free to reopen it if you'd like to pick it
+            back up.
