@@ -6,9 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
@@ -36,7 +38,18 @@ func newRootCmd() *cobra.Command {
 	}
 	root.SetVersionTemplate("{{.Version}}\n")
 	root.AddCommand(newRunCmd())
+	root.AddCommand(newHealthcheckCmd())
 	return root
+}
+
+func newHealthcheckCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "healthcheck",
+		Short: "Probe the local gateway health endpoint.",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return healthcheckE()
+		},
+	}
 }
 
 func newRunCmd() *cobra.Command {
@@ -146,4 +159,40 @@ func connectorNames(s *config.Settings) []string {
 		return s.Connectors
 	}
 	return []string{"irc"}
+}
+
+func healthcheckE() error {
+	settings, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+
+	url := fmt.Sprintf(
+		"http://%s:%d/health",
+		settings.GatewayHost,
+		settings.GatewayPort,
+	)
+
+	return healthcheckURL(url)
+}
+
+func healthcheckURL(url string) error {
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	resp, err := client.Get(url) //nolint:gosec
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("gateway unhealthy: status %d", resp.StatusCode)
+	}
+
+	return nil
 }

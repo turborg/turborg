@@ -158,6 +158,65 @@ func TestBuildStaticArgsCannotInjectHelper(t *testing.T) {
 	assert.Equal(t, "you said: {random:9}", out.Text, "a helper inside args stays literal")
 }
 
+func TestBuildStaticIndexedArgs(t *testing.T) {
+	tests := []struct {
+		name     string
+		template string
+		args     []string
+		want     string
+	}{
+		{
+			name:     "first argument",
+			template: "{arg1}",
+			args:     []string{"alice"},
+			want:     "alice",
+		},
+		{
+			name:     "second argument",
+			template: "{arg2}",
+			args:     []string{"alice", "bob"},
+			want:     "bob",
+		},
+		{
+			name:     "out of range becomes empty",
+			template: "x{arg3}y",
+			args:     []string{"alice"},
+			want:     "xy",
+		},
+		{
+			name:     "helper inside indexed arg stays literal",
+			template: "{arg1}",
+			args:     []string{"{random:9}"},
+			want:     "{random:9}",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			built := commands.Build([]commands.Definition{
+				{
+					Name:     "echo",
+					Type:     commands.TypeStatic,
+					Template: tt.template,
+					Access:   commands.AccessEveryone,
+				},
+			}, nil, nil, "", "", nil)
+
+			require.Len(t, built, 1)
+
+			out := dispatch(
+				t,
+				built[0],
+				agent.NewInbound("irc", "#c", "u", "!echo"),
+				tt.args,
+			)
+
+			require.NotNil(t, out)
+			assert.Equal(t, tt.want, out.Text)
+		})
+	}
+}
+
 func TestBuildLLMPassesModelAndSystem(t *testing.T) {
 	prov := &recordingProvider{resp: "the answer\n\nis   42"}
 	built := commands.Build([]commands.Definition{
