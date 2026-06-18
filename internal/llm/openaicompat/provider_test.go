@@ -64,6 +64,28 @@ func TestAskSendsModelAndSystemAndReturnsContent(t *testing.T) {
 	assert.Equal(t, "be terse", first["content"])
 }
 
+func TestAskParsesUsageIncludingCachedTokens(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":40}}}`))
+	}))
+	defer srv.Close()
+
+	p, err := openaicompat.New(openaicompat.Settings{
+		APIKey:     "sk-test",
+		BaseURL:    srv.URL + "/v1",
+		Model:      "m",
+		HTTPClient: srv.Client(),
+	})
+	require.NoError(t, err)
+
+	_, usage, err := p.Ask(context.Background(), "ping")
+	require.NoError(t, err)
+	assert.Equal(t, 100, usage.InputTokens)
+	assert.Equal(t, 20, usage.OutputTokens)
+	assert.Equal(t, 40, usage.CachedTokens)
+}
+
 func TestAskSurfacesAPIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)

@@ -180,13 +180,15 @@ func TestBuildBudgetedProviderPublishesUsageEvent(t *testing.T) {
 	a.Events.Subscribe(agent.EventLLMUsage, func(_ context.Context, ev *agent.Event) {
 		got <- ev
 	})
-	wrapped := runtime.BuildBudgetedProvider(a, &usageProvider{in: 30, out: 12}, 1000, 500, 0, 0, nil)
+	wrapped := runtime.BuildBudgetedProvider(a, &usageProvider{in: 30, out: 12, cached: 8}, 1000, 500, 0, 0, nil)
 	_, _, err := wrapped.Ask(context.Background(), "hi")
 	require.NoError(t, err)
 	select {
 	case ev := <-got:
 		require.Equal(t, 30, ev.Fields["input_tokens"])
 		require.Equal(t, 12, ev.Fields["output_tokens"])
+		require.Equal(t, 8, ev.Fields["cached_tokens"])
+		require.Equal(t, "usage", ev.Fields["model"])
 	default:
 		t.Fatal("expected an EventLLMUsage to be published")
 	}
@@ -195,13 +197,14 @@ func TestBuildBudgetedProviderPublishesUsageEvent(t *testing.T) {
 // usageProvider reports fixed token usage so the budgeted wrapper records
 // and publishes a usage event.
 type usageProvider struct {
-	in  int
-	out int
+	in     int
+	out    int
+	cached int
 }
 
 func (usageProvider) Model() string { return "usage" }
 func (p *usageProvider) Ask(context.Context, string, ...llm.CallOption) (string, llm.Usage, error) {
-	return "ok", llm.Usage{InputTokens: p.in, OutputTokens: p.out}, nil
+	return "ok", llm.Usage{InputTokens: p.in, OutputTokens: p.out, CachedTokens: p.cached}, nil
 }
 func (usageProvider) Stream(context.Context, string, ...llm.CallOption) iter.Seq2[string, error] {
 	return func(func(string, error) bool) {}

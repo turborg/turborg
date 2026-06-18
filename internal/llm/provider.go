@@ -11,10 +11,14 @@ import (
 	"iter"
 )
 
-// Usage reports the token consumption of a single LLM call.
+// Usage reports the token consumption of a single LLM call. CachedTokens is the
+// subset of InputTokens served from the backend's prefix cache (0 when the
+// backend reports none); it lets a downstream meter credit cache hits at a lower
+// rate than fresh input.
 type Usage struct {
 	InputTokens  int
 	OutputTokens int
+	CachedTokens int
 }
 
 // ErrBudgetExhausted is returned by BudgetedProvider when the rolling
