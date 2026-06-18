@@ -240,11 +240,16 @@ func BuildBudgetedProvider(a *agent.Agent, provider llm.Provider, inputCap, outp
 	}
 	budget := llm.NewTokenBudget()
 	budget.SetBaseline(usedInput, usedOutput)
+	model := provider.Model()
 	return llm.NewBudgetedProvider(provider, budget, inputCap, outputCap, func(u llm.Usage) {
 		inTotal, outTotal := budget.Totals()
+		// cached_tokens (prefix-cache subset of input) and model let a downstream
+		// meter price the call per model with cache crediting.
 		log.Info("llm_usage",
 			"input_tokens", u.InputTokens,
 			"output_tokens", u.OutputTokens,
+			"cached_tokens", u.CachedTokens,
+			"model", model,
 			"input_total", inTotal,
 			"output_total", outTotal,
 		)
@@ -254,6 +259,8 @@ func BuildBudgetedProvider(a *agent.Agent, provider llm.Provider, inputCap, outp
 			Fields: map[string]any{
 				"input_tokens":  u.InputTokens,
 				"output_tokens": u.OutputTokens,
+				"cached_tokens": u.CachedTokens,
+				"model":         model,
 				"input_total":   inTotal,
 				"output_total":  outTotal,
 				"input_cap":     inputCap,

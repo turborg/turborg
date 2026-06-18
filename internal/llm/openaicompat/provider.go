@@ -109,8 +109,11 @@ type chatResponse struct {
 		Message string `json:"message"`
 	} `json:"error"`
 	Usage *struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
+		PromptTokens        int `json:"prompt_tokens"`
+		CompletionTokens    int `json:"completion_tokens"`
+		PromptTokensDetails *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	} `json:"usage"`
 }
 
@@ -175,6 +178,9 @@ func (p *Provider) Ask(ctx context.Context, prompt string, opts ...llm.CallOptio
 	if decoded.Usage != nil {
 		usage.InputTokens = decoded.Usage.PromptTokens
 		usage.OutputTokens = decoded.Usage.CompletionTokens
+		if decoded.Usage.PromptTokensDetails != nil {
+			usage.CachedTokens = decoded.Usage.PromptTokensDetails.CachedTokens
+		}
 	}
 	return decoded.Choices[0].Message.Content, usage, nil
 }
