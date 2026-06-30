@@ -37,6 +37,11 @@ const (
 	EventLLMUsage       EventType = "LLM_USAGE"
 	EventError          EventType = "ERROR"
 	EventRaw            EventType = "RAW"
+
+	// EventModeration is emitted when a skill engine applies a moderation
+	// effect (kick/ban/mute/notice/…) so downstream consumers can audit
+	// automated actions. Additive — it does not change any existing value.
+	EventModeration EventType = "MODERATION"
 )
 
 type Event struct {
