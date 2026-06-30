@@ -28,6 +28,7 @@ import (
 	"github.com/turborg/turborg/internal/config"
 	"github.com/turborg/turborg/internal/configrefresh"
 	"github.com/turborg/turborg/internal/connector/irc"
+	"github.com/turborg/turborg/internal/flow"
 	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/messages"
 	"github.com/turborg/turborg/internal/messagesink"
@@ -82,6 +83,11 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	}
 
 	cmds, err := parseCommands(s.Commands)
+	if err != nil {
+		return nil, err
+	}
+
+	flows, err := parseFlows(s.Flows)
 	if err != nil {
 		return nil, err
 	}
@@ -149,6 +155,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	wiring, err := WireCommon(a, ircConn, CommonParams{
 		CustomCommandsMax: s.CustomCommandsMax,
 		Commands:          cmds,
+		Flows:             flows,
 		Platform:          ircCfg.Hostname,
 		Limits: irc.ClientLimits{
 			NickLocked:             s.NickLocked,
@@ -268,6 +275,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		"gateway", built.Gateway != nil,
 		"llm", provider != nil,
 		"commands", len(cmds),
+		"flows", len(flows),
 	)
 
 	return built, nil
@@ -321,6 +329,20 @@ func parseCommands(raw string) ([]skill.Skill, error) {
 		return nil, fmt.Errorf("runtime: parsing TURBORG_COMMANDS: %w", err)
 	}
 	return skills, nil
+}
+
+// parseFlows decodes the TURBORG_FLOWS JSON array into node-graph flows. Empty
+// input is not an error — it just means no flows.
+func parseFlows(raw string) ([]flow.Flow, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var flows []flow.Flow
+	if err := json.Unmarshal([]byte(raw), &flows); err != nil {
+		return nil, fmt.Errorf("runtime: parsing TURBORG_FLOWS: %w", err)
+	}
+	return flows, nil
 }
 
 func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, log *slog.Logger, notifier *activity.Notifier, store messages.Store, llmProvider llm.Provider) (*web.Gateway, error) {

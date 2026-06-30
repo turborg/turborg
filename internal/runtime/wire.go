@@ -10,6 +10,7 @@ import (
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/commands"
 	"github.com/turborg/turborg/internal/connector/irc"
+	"github.com/turborg/turborg/internal/flow"
 	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/llm/anthropic"
 	"github.com/turborg/turborg/internal/llm/openaicompat"
@@ -53,6 +54,10 @@ type CommonParams struct {
 	// registry (command-kind skills) and the skill engine/scheduler (event /
 	// match / schedule skills). Empty → the agent dispatches nothing.
 	Commands []skill.Skill
+
+	// Flows is the tenant's declarative node-graph flow set, run by the flow
+	// engine on event/match triggers. Empty → no flows.
+	Flows []flow.Flow
 
 	// Platform seeds the connector-agnostic {platform} template placeholder
 	// (and its IRC {network} alias) — the transport label a static skill can
@@ -114,6 +119,7 @@ type GuardParams struct {
 type Wiring struct {
 	Engine    *skill.Engine
 	Scheduler *skill.Scheduler
+	Flows     *flow.Engine
 }
 
 // WireCommon installs the connector-agnostic agent wiring shared by the
@@ -201,13 +207,26 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 	})
 	engine.Subscribe(a.Events)
 	scheduler := skill.NewScheduler(engine, log)
-	wiring := &Wiring{Engine: engine, Scheduler: scheduler}
+
+	// Flow engine: the node-graph layer above single-shot skills, sharing the
+	// same actor/provider/owner/platform context and subscribed to the same bus.
+	flowEngine := flow.NewEngine(flow.Options{
+		Actor:    irc.NewActor(ircConn),
+		Provider: provider,
+		Platform: p.Platform,
+		Owner:    p.Owner.OwnerNick,
+		MaxFlows: p.CustomCommandsMax,
+		Log:      log,
+	})
+	flowEngine.Subscribe(a.Events)
+	wiring := &Wiring{Engine: engine, Scheduler: scheduler, Flows: flowEngine}
 
 	// Install the tenant's data-driven skill set. The command registry's
 	// dynamic set, the engine's event/match set, and the scheduler's schedule
 	// set are each fully owned by their Replace primitive, so a later hot reload
 	// swaps all three atomically.
 	ApplySkills(a, wiring, p.Commands, provider, p.Owner, p.Platform, log)
+	ApplyFlows(wiring, p.Flows)
 	return wiring, nil
 }
 
@@ -236,6 +255,14 @@ func ApplySkills(a *agent.Agent, w *Wiring, skills []skill.Skill, provider llm.P
 		if w.Scheduler != nil {
 			w.Scheduler.ReplaceSkills(skills)
 		}
+	}
+}
+
+// ApplyFlows swaps the engine's node-graph flow set in place — an atomic,
+// no-reconnect hot reload, shared by initial wiring and any flow refresher.
+func ApplyFlows(w *Wiring, flows []flow.Flow) {
+	if w != nil && w.Flows != nil {
+		w.Flows.ReplaceFlows(flows)
 	}
 }
 

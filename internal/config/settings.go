@@ -205,6 +205,14 @@ type Settings struct {
 	// delivers through its tenant feed.
 	Commands string `env:"COMMANDS"`
 
+	// Flows is the JSON-encoded set of declarative node-graph flows the agent
+	// runs: an array of {name,trigger,nodes,edges} objects. Each flow wires
+	// activity nodes (set/if/switch/say/effect/llm/webhook/…) into a graph the
+	// agent walks when the flow's trigger fires. Empty → no flows. The graph is
+	// declarative — nodes come from a fixed catalog; there is no arbitrary code
+	// execution.
+	Flows string `env:"FLOWS"`
+
 	// OwnerDMNudgeEvery triggers a DM to the owner after every N outbound
 	// messages. 0 = disabled. Used by operators who want a regular usage
 	// summary delivered through IRC itself.

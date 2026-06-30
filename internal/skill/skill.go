@@ -137,20 +137,23 @@ type Effect struct {
 	Thresholds *Thresholds `json:"thresholds,omitempty"`
 }
 
-// Trigger is what makes a skill fire.
+// Trigger is what makes a skill fire. The JSON tags are used when a Trigger is
+// nested directly in another document (e.g. a flow); the flat skill wire maps
+// these fields by hand in Skill's (Un)MarshalJSON and does not marshal a
+// Trigger directly.
 type Trigger struct {
 	// Kind selects the trigger family. Empty decodes as KindCommand.
-	Kind TriggerKind
+	Kind TriggerKind `json:"kind,omitempty"`
 	// Event is the lifecycle event for KindEvent.
-	Event string
+	Event string `json:"event,omitempty"`
 	// Match is the regex for KindMatch (and the cheap prefilter for an
 	// llm_classify action).
-	Match string
+	Match string `json:"match,omitempty"`
 	// Schedule is the interval ("30m"/"1h"/"45s") or 5-field cron for
 	// KindSchedule.
-	Schedule string
+	Schedule string `json:"schedule,omitempty"`
 	// Channels scopes the trigger to specific channels. Empty = all.
-	Channels []string
+	Channels []string `json:"channels,omitempty"`
 }
 
 // Action is what a skill does when it fires.
