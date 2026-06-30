@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/turborg/turborg/internal/flow"
 	"github.com/turborg/turborg/internal/safe"
 	"github.com/turborg/turborg/internal/skill"
 )
@@ -51,6 +52,10 @@ type TenantSpec struct {
 	// wire is backward-compatible: a legacy command array decodes to
 	// command-kind skills unchanged.
 	Commands []skill.Skill `json:"commands,omitempty"`
+
+	// Flows is the tenant's declarative node-graph flow set, run by the flow
+	// engine on event/match triggers. Ordered; an empty slice means no flows.
+	Flows []flow.Flow `json:"flows,omitempty"`
 
 	// GatewayToken authorizes the per-tenant web shell (the `/ws` surface).
 	// An empty token means "no web shell for this tenant" and the pooled

@@ -426,6 +426,7 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			// below. WireCommon's own wrap is idempotent on this.
 			cp := t.commonParams(cs, caps, settings.Nick, store, ignoredNicks, cmds)
 			cp.Platform = settings.Hostname
+			cp.Flows = t.spec.Flows
 			budgetedProvider := runtime.BuildBudgetedProvider(a, cp.LLM, cp.LLMInputCap, cp.LLMOutputCap, cp.LLMInputUsed, cp.LLMOutputUsed, t.log)
 			cp.LLM = budgetedProvider
 			wiring, err := runtime.WireCommon(a, conn, cp, t.log)
