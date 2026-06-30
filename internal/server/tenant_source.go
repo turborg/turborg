@@ -14,8 +14,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/turborg/turborg/internal/commands"
 	"github.com/turborg/turborg/internal/safe"
+	"github.com/turborg/turborg/internal/skill"
 )
 
 // ConnectorSpec describes one connector instance a tenant runs. The Type field
@@ -47,8 +47,10 @@ type TenantSpec struct {
 	// the single-instance runtime carries as TURBORG_COMMANDS). The pooled runtime
 	// swaps it into the agent's registry, and — uniquely — a change to ONLY
 	// this field is applied in place without dropping the IRC connection
-	// (see Tenant.update). Ordered; an empty slice means no commands.
-	Commands []commands.Definition `json:"commands,omitempty"`
+	// (see Tenant.update). Ordered; an empty slice means no commands. The flat
+	// wire is backward-compatible: a legacy command array decodes to
+	// command-kind skills unchanged.
+	Commands []skill.Skill `json:"commands,omitempty"`
 
 	// GatewayToken authorizes the per-tenant web shell (the `/ws` surface).
 	// An empty token means "no web shell for this tenant" and the pooled

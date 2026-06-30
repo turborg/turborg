@@ -25,13 +25,13 @@ import (
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/budgetrefresh"
 	"github.com/turborg/turborg/internal/commandrefresh"
-	"github.com/turborg/turborg/internal/commands"
 	"github.com/turborg/turborg/internal/config"
 	"github.com/turborg/turborg/internal/configrefresh"
 	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/messages"
 	"github.com/turborg/turborg/internal/messagesink"
+	"github.com/turborg/turborg/internal/skill"
 	"github.com/turborg/turborg/internal/statepush"
 	"github.com/turborg/turborg/internal/web"
 )
@@ -58,6 +58,10 @@ type Built struct {
 	// agent runs (the single-instance mirror of the pooled feed-driven reload). Nil
 	// when COMMANDS_URL is unset (self-host: the boot set is fixed).
 	CommandRefresh *commandrefresh.Refresher
+	// Scheduler drives schedule-trigger skills on their cadence. Supervised by
+	// Run alongside the background refreshers. Never nil (idle when no schedule
+	// skills are installed).
+	Scheduler *skill.Scheduler
 }
 
 // Build wires the agent + connectors + gateway from settings. Callers
@@ -142,7 +146,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	// The connector-agnostic, transport-independent wiring — builtins, owner
 	// guard, throttles, nudge, store submitters. The pooled runtime calls this
 	// same WireCommon from its tenant builder, so the two modes can't drift.
-	if err := WireCommon(a, ircConn, CommonParams{
+	wiring, err := WireCommon(a, ircConn, CommonParams{
 		CustomCommandsMax: s.CustomCommandsMax,
 		Commands:          cmds,
 		Platform:          ircCfg.Hostname,
@@ -169,7 +173,8 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		LLMOutputUsed:             s.LLMOutputTokensUsed,
 		ActivityHook:              activityHook,
 		Store:                     store,
-	}, log); err != nil {
+	}, log)
+	if err != nil {
 		return nil, err
 	}
 
@@ -190,6 +195,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		LLM:       provider,
 		Activity:  notifier,
 		StatePush: stateEmitter,
+		Scheduler: wiring.Scheduler,
 	}
 
 	// Live budget refresh: when the provider is budgeted and a refresh endpoint
@@ -216,7 +222,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		s.CommandsURL,
 		s.CommandsToken,
 		s.CommandsRefreshSeconds,
-		func(defs []commands.Definition) { ApplyCommands(a, defs, provider, owner, ircCfg.Hostname, log) },
+		func(skills []skill.Skill) { ApplySkills(a, wiring, skills, provider, owner, ircCfg.Hostname, log) },
 		log,
 	)
 
@@ -301,18 +307,20 @@ func buildLLM(s *config.Settings) (llm.Provider, error) {
 	return NewAnthropicProvider(s.AnthropicAPIKey, s.AnthropicModel)
 }
 
-// parseCommands decodes the TURBORG_COMMANDS JSON array into command
-// definitions. Empty input is not an error — it just means no commands.
-func parseCommands(raw string) ([]commands.Definition, error) {
+// parseCommands decodes the TURBORG_COMMANDS JSON array into skill
+// definitions. The flat wire is backward-compatible: a legacy command array
+// decodes to command-kind skills unchanged. Empty input is not an error — it
+// just means no skills.
+func parseCommands(raw string) ([]skill.Skill, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, nil
 	}
-	var defs []commands.Definition
-	if err := json.Unmarshal([]byte(raw), &defs); err != nil {
+	var skills []skill.Skill
+	if err := json.Unmarshal([]byte(raw), &skills); err != nil {
 		return nil, fmt.Errorf("runtime: parsing TURBORG_COMMANDS: %w", err)
 	}
-	return defs, nil
+	return skills, nil
 }
 
 func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, log *slog.Logger, notifier *activity.Notifier, store messages.Store, llmProvider llm.Provider) (*web.Gateway, error) {
@@ -746,6 +754,9 @@ func Run(ctx context.Context, b *Built) error {
 	}
 	if b.ConfigRefresh != nil {
 		startRefresher(b.ConfigRefresh.Run)
+	}
+	if b.Scheduler != nil {
+		startRefresher(b.Scheduler.Run)
 	}
 	waitRefresh := func() {
 		for _, done := range refreshDones {

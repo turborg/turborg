@@ -14,6 +14,7 @@ import (
 	"github.com/turborg/turborg/internal/llm/anthropic"
 	"github.com/turborg/turborg/internal/llm/openaicompat"
 	"github.com/turborg/turborg/internal/messages"
+	"github.com/turborg/turborg/internal/skill"
 )
 
 // CommonParams are the per-tenant inputs the shared agent wiring consumes,
@@ -48,9 +49,10 @@ type CommonParams struct {
 	// BouncerWelcomeReplayDepth is clamped to a sane window before use.
 	BouncerWelcomeReplayDepth int
 
-	// Commands is the tenant's data-driven command set, swapped into the
-	// registry via ReplaceDynamic. Empty → the agent dispatches nothing.
-	Commands []commands.Definition
+	// Commands is the tenant's data-driven skill set, swapped into the command
+	// registry (command-kind skills) and the skill engine/scheduler (event /
+	// match / schedule skills). Empty → the agent dispatches nothing.
+	Commands []skill.Skill
 
 	// Platform seeds the connector-agnostic {platform} template placeholder
 	// (and its IRC {network} alias) — the transport label a static skill can
@@ -105,11 +107,22 @@ type GuardParams struct {
 	CommandWindowSeconds int
 }
 
+// Wiring is the live skill machinery WireCommon constructs alongside the
+// command registry: the event/match Engine (subscribed to the agent's bus) and
+// the schedule Scheduler. The caller supervises Scheduler.Run and reaches both
+// from a hot reload (ApplySkills) to swap the skill set in place.
+type Wiring struct {
+	Engine    *skill.Engine
+	Scheduler *skill.Scheduler
+}
+
 // WireCommon installs the connector-agnostic agent wiring shared by the
 // single-instance (cmd/turborg) and pooled (internal/server) runtimes onto an
 // already-constructed agent + IRC connector: client limits, outbound throttle,
-// owner nudge, message store + event submitters, builtin commands, and the
-// command guard. It calls a.AddConnector itself.
+// owner nudge, message store + event submitters, builtin commands, the command
+// guard, and the skill engine + scheduler. It calls a.AddConnector itself and
+// returns the live Wiring so the caller can supervise the scheduler and hot-
+// reload the skill set.
 //
 // The caller owns everything that genuinely differs by mode — agent prefix,
 // gateway (listener vs router), bouncer listener mode, state-push transport —
@@ -117,8 +130,8 @@ type GuardParams struct {
 //
 // No process globals or shared mutable state: invoked once per single-instance
 // process and N times per pooled process, each call producing a fully
-// independent set of throttles/guards/submitters.
-func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slog.Logger) error {
+// independent set of throttles/guards/submitters/engine.
+func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slog.Logger) (*Wiring, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -137,7 +150,7 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 			nil,
 		)
 		if err != nil {
-			return fmt.Errorf("runtime: outbound throttle: %w", err)
+			return nil, fmt.Errorf("runtime: outbound throttle: %w", err)
 		}
 		ircConn.SetOutboundThrottle(t)
 	}
@@ -171,32 +184,59 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 
 	// Registry-wide guard: the ignore list + per-sender throttle, applied to
 	// every command. Per-command access (owner / allowlist / everyone) is
-	// layered on top by the guard each Definition carries.
+	// layered on top by the guard each skill carries.
 	a.Commands.SetGuard(buildRegistryGuard(p.Owner))
 
-	// Install the tenant's data-driven commands. The dynamic set is fully
-	// owned by ReplaceDynamic, so a later hot reload swaps it atomically.
-	ApplyCommands(a, p.Commands, provider, p.Owner, p.Platform, log)
-	return nil
+	// Skill engine (event/match) + scheduler, sharing the same provider and
+	// owner/platform render context as the command path. The engine acts on the
+	// network through the connector-agnostic IRC Actor and is subscribed to the
+	// agent's bus; the scheduler is supervised by the caller.
+	engine := skill.NewEngine(skill.Options{
+		Actor:     irc.NewActor(ircConn),
+		Provider:  provider,
+		Platform:  p.Platform,
+		Owner:     p.Owner.OwnerNick,
+		MaxSkills: p.CustomCommandsMax,
+		Log:       log,
+	})
+	engine.Subscribe(a.Events)
+	scheduler := skill.NewScheduler(engine, log)
+	wiring := &Wiring{Engine: engine, Scheduler: scheduler}
+
+	// Install the tenant's data-driven skill set. The command registry's
+	// dynamic set, the engine's event/match set, and the scheduler's schedule
+	// set are each fully owned by their Replace primitive, so a later hot reload
+	// swaps all three atomically.
+	ApplySkills(a, wiring, p.Commands, provider, p.Owner, p.Platform, log)
+	return wiring, nil
 }
 
-// ApplyCommands rebuilds the data-driven command set from defs and swaps it
-// into the agent's registry in place via ReplaceDynamic — an atomic, no-
-// reconnect hot reload. It is the single source of truth for turning command
-// Definitions into live handlers, shared by initial wiring (WireCommon), the
-// pooled runtime's feed-driven reload, and the single-instance runtime's command
-// refresher, so the three can't drift in how a command is built or
-// access-gated. The registry-wide ignore/throttle guard set at wire time is
-// untouched; per-command access (owner / allowlist / everyone) is reapplied
-// from each Definition.
-func ApplyCommands(a *agent.Agent, defs []commands.Definition, provider llm.Provider, owner GuardParams, platform string, log *slog.Logger) {
+// ApplySkills rebuilds the data-driven skill set from skills and swaps it into
+// the three live surfaces in place — an atomic, no-reconnect hot reload:
+// command-kind skills into the command registry (ReplaceDynamic), event/match
+// skills into the engine (ReplaceSkills), and schedule skills into the
+// scheduler (ReplaceSkills). It is the single source of truth for turning skill
+// definitions into live behavior, shared by initial wiring (WireCommon), the
+// pooled runtime's feed-driven reload, and the single-instance runtime's
+// refresher, so they can't drift. The registry-wide ignore/throttle guard set
+// at wire time is untouched; per-command access (owner / allowlist / everyone)
+// is reapplied from each skill.
+func ApplySkills(a *agent.Agent, w *Wiring, skills []skill.Skill, provider llm.Provider, owner GuardParams, platform string, log *slog.Logger) {
 	if log == nil {
 		log = slog.Default()
 	}
-	built := commands.Build(defs, provider, func(d commands.Definition) agent.CommandGuard {
-		return PerCommandGuard(string(d.Access), d.Allowlist, owner)
+	built := skill.Build(skills, provider, func(s skill.Skill) agent.CommandGuard {
+		return PerCommandGuard(string(s.Access), s.Allowlist, owner)
 	}, platform, owner.OwnerNick, log)
 	a.Commands.ReplaceDynamic(built)
+	if w != nil {
+		if w.Engine != nil {
+			w.Engine.ReplaceSkills(skills)
+		}
+		if w.Scheduler != nil {
+			w.Scheduler.ReplaceSkills(skills)
+		}
+	}
 }
 
 // ApplyRegistryGuard rebuilds the registry-wide guard (ignore list + per-sender

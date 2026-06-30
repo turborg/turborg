@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/turborg/turborg/internal/agent"
-	"github.com/turborg/turborg/internal/commands"
 	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/ident"
 	"github.com/turborg/turborg/internal/llm"
@@ -22,6 +21,7 @@ import (
 	"github.com/turborg/turborg/internal/messagesink"
 	"github.com/turborg/turborg/internal/runtime"
 	"github.com/turborg/turborg/internal/safe"
+	"github.com/turborg/turborg/internal/skill"
 	"github.com/turborg/turborg/internal/statepush"
 	"github.com/turborg/turborg/internal/web"
 )
@@ -92,6 +92,11 @@ type Tenant struct {
 	// swap the command set in place (ReplaceDynamic) when ONLY the commands
 	// changed — no reconnect. nil between runs → reload falls back to restart.
 	agentRef *agent.Agent
+	// wiring is the live skill engine + scheduler for the current run, captured
+	// in buildConnectors and cleared when the run ends. reloadCommands swaps the
+	// skill set in place through it (engine/scheduler ReplaceSkills) alongside
+	// the command registry. nil between runs.
+	wiring *runtime.Wiring
 	// gateway is the live web shell for the current run, built in
 	// buildConnectors when the spec carries a GatewayToken and cleared when the
 	// run ends. The web router reaches it via ServeWS to upgrade an attached
@@ -282,9 +287,30 @@ func (t *Tenant) defaultWork() func(context.Context) error {
 		t.buildConnectors(a)
 		t.mu.Lock()
 		t.agentRef = a
+		var sched *skill.Scheduler
+		if t.wiring != nil {
+			sched = t.wiring.Scheduler
+		}
 		t.mu.Unlock()
 		t.log.Info("tenant attached", "connectors", t.connectorTypes())
+
+		// Drive schedule-trigger skills under a child context for the life of
+		// this run. schedCancel + the wait keep the goroutine goleak-clean across
+		// restarts (it always exits before defaultWork returns).
+		schedCtx, schedCancel := context.WithCancel(ctx)
+		schedDone := make(chan struct{})
+		if sched != nil {
+			safe.Go("skill-scheduler/"+t.ID, func() {
+				defer close(schedDone)
+				_ = sched.Run(schedCtx)
+			})
+		} else {
+			close(schedDone)
+		}
+
 		err := a.Run(ctx)
+		schedCancel()
+		<-schedDone
 		// Run ended (ctx cancelled / restart) — the connector's bouncer, web
 		// gateway, and state emitter are stopping, so drop the handles. A late
 		// inbound conn/WS then closes cleanly instead of hitting a torn-down run,
@@ -298,6 +324,7 @@ func (t *Tenant) defaultWork() func(context.Context) error {
 		t.stateEmitter = nil
 		t.messageSink = nil
 		t.agentRef = nil
+		t.wiring = nil
 		t.mu.Unlock()
 		if gw != nil {
 			gw.Stop()
@@ -401,13 +428,15 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			cp.Platform = settings.Hostname
 			budgetedProvider := runtime.BuildBudgetedProvider(a, cp.LLM, cp.LLMInputCap, cp.LLMOutputCap, cp.LLMInputUsed, cp.LLMOutputUsed, t.log)
 			cp.LLM = budgetedProvider
-			if err := runtime.WireCommon(a, conn, cp, t.log); err != nil {
+			wiring, err := runtime.WireCommon(a, conn, cp, t.log)
+			if err != nil {
 				t.log.Error("skipping irc connector: wiring failed", "err", err)
 				continue
 			}
 
 			t.mu.Lock()
 			t.ircConn = conn
+			t.wiring = wiring
 			t.mu.Unlock()
 
 			// Connector-state sync: mirror upstream status / channels / nick to
@@ -485,7 +514,7 @@ func (t *Tenant) applyTierSettings(s *irc.Settings, caps *PlanCapabilities) {
 // CustomCommandsMax + Commands carry the tenant's data-driven command set
 // and its cap, so pooled tenants get user-defined commands the same way the
 // single-instance runtime does (from TURBORG_COMMANDS).
-func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick string, store messages.Store, ignoredNicks []string, cmds []commands.Definition) runtime.CommonParams {
+func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick string, store messages.Store, ignoredNicks []string, cmds []skill.Skill) runtime.CommonParams {
 	var limits irc.ClientLimits
 	var outMax, outWin, nudge, cmdMax, cmdWin, customCmdMax, llmInCap, llmOutCap, llmInUsed, llmOutUsed int
 	if caps != nil {
@@ -762,7 +791,7 @@ func capsWithoutTokenUsage(caps *PlanCapabilities) *PlanCapabilities {
 }
 
 // commandSetsEqual reports whether two command slices are identical.
-func commandSetsEqual(a, b []commands.Definition) bool {
+func commandSetsEqual(a, b []skill.Skill) bool {
 	return reflect.DeepEqual(a, b)
 }
 
@@ -772,10 +801,11 @@ func commandSetsEqual(a, b []commands.Definition) bool {
 // connector), so the caller falls back to a restart. The per-command guards
 // reuse the same owner-trust config the connector spec carries (the registry-
 // wide ignore + throttle guard set at wire time is untouched).
-func (t *Tenant) reloadCommands(defs []commands.Definition) bool {
+func (t *Tenant) reloadCommands(defs []skill.Skill) bool {
 	t.mu.Lock()
 	a := t.agentRef
 	conn := t.ircConn
+	wiring := t.wiring
 	cs := firstIRCConnectorSpec(t.spec.Connectors)
 	ignoredNicks := t.spec.IgnoredNicks
 	t.mu.Unlock()
@@ -794,8 +824,9 @@ func (t *Tenant) reloadCommands(defs []commands.Definition) bool {
 	// {platform} echoes the IRC server hostname; the connector spec carries it
 	// as "host:port", so reuse the same split the spec→settings mapping does.
 	platform, _, _ := splitNetwork(stringField(cs.Config, "network"))
-	// Same in-place swap the single-instance runtime's command refresher uses.
-	runtime.ApplyCommands(a, defs, t.llmProvider, owner, platform, t.log)
+	// Same in-place swap the single-instance runtime's refresher uses: command
+	// registry + skill engine + scheduler, all atomic, no reconnect.
+	runtime.ApplySkills(a, wiring, defs, t.llmProvider, owner, platform, t.log)
 	return true
 }
 
