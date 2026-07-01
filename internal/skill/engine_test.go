@@ -198,11 +198,11 @@ func TestEngineWebhook(t *testing.T) {
 	var mu sync.Mutex
 	var gotMethod, gotURL string
 	var gotBody []byte
-	e, bus := newEngine(t, Options{Post: func(_ context.Context, method, url string, body []byte) error {
+	e, bus := newEngine(t, Options{Post: func(_ context.Context, method, url string, _ map[string]string, body []byte) ([]byte, error) {
 		mu.Lock()
 		gotMethod, gotURL, gotBody = method, url, body
 		mu.Unlock()
-		return nil
+		return nil, nil
 	}})
 	e.ReplaceSkills([]Skill{{
 		Name:    "to-flow",

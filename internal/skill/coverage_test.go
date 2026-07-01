@@ -38,15 +38,37 @@ func TestDefaultPostSuccessAndError(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	require.NoError(t, defaultPost(context.Background(), "", srv.URL, []byte(`{}`)))
+	_, err := defaultPost(context.Background(), "", srv.URL, nil, []byte(`{}`))
+	require.NoError(t, err)
 	assert.Equal(t, http.MethodPost, gotMethod, "empty method defaults to POST")
 	// A GET carries no body.
-	require.NoError(t, defaultPost(context.Background(), http.MethodGet, srv.URL, []byte(`{"x":1}`)))
+	_, err = defaultPost(context.Background(), http.MethodGet, srv.URL, nil, []byte(`{"x":1}`))
+	require.NoError(t, err)
 	assert.Equal(t, http.MethodGet, gotMethod)
 	assert.Empty(t, gotBody, "GET sends no body")
 
-	require.Error(t, defaultPost(context.Background(), http.MethodPost, "http://127.0.0.1:0/nope", []byte(`{}`)))
-	require.Error(t, defaultPost(context.Background(), http.MethodPost, "://bad-url", []byte(`{}`)))
+	_, err = defaultPost(context.Background(), http.MethodPost, "http://127.0.0.1:0/nope", nil, []byte(`{}`))
+	require.Error(t, err)
+	_, err = defaultPost(context.Background(), http.MethodPost, "://bad-url", nil, []byte(`{}`))
+	require.Error(t, err)
+}
+
+// TestDefaultPostHeadersAndStatus covers header application and the non-2xx
+// status-error classification in defaultPost.
+func TestDefaultPostHeadersAndStatus(t *testing.T) {
+	var gotKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey = r.Header.Get("X-Api-Key")
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	defer srv.Close()
+	body, err := defaultPost(context.Background(), http.MethodPost, srv.URL, map[string]string{"X-Api-Key": "k"}, []byte(`{}`))
+	require.Error(t, err)
+	var se *httpStatusError
+	require.ErrorAs(t, err, &se)
+	assert.Equal(t, http.StatusTeapot, se.status)
+	assert.Equal(t, "k", gotKey, "custom header applied")
+	assert.NotNil(t, body)
 }
 
 func TestDoWebhookEmptyURLAndError(t *testing.T) {
@@ -61,9 +83,9 @@ func TestDoWebhookEmptyURLAndError(t *testing.T) {
 
 	// Post error path is logged, not fatal.
 	called := false
-	e2, bus2 := newEngine(t, Options{Post: func(context.Context, string, string, []byte) error {
+	e2, bus2 := newEngine(t, Options{Post: func(context.Context, string, string, map[string]string, []byte) ([]byte, error) {
 		called = true
-		return errors.New("down")
+		return nil, errors.New("down")
 	}})
 	e2.ReplaceSkills([]Skill{{
 		Name:    "w",

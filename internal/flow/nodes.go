@@ -2,11 +2,15 @@ package flow
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/llm"
@@ -38,11 +42,13 @@ type nodeContext struct {
 	post     PostFunc
 	flowName string
 	bag      Bag
+	log      *slog.Logger
 }
 
-// PostFunc sends a JSON payload to a URL with the given HTTP method (the
-// webhook node's egress). Tests substitute a recorder.
-type PostFunc func(ctx context.Context, method, url string, payload []byte) error
+// PostFunc sends a payload to a URL with the given HTTP method and custom
+// request headers, returning the (bounded) response body. It is the webhook
+// node's egress seam; tests substitute a recorder.
+type PostFunc func(ctx context.Context, method, url string, headers map[string]string, payload []byte) ([]byte, error)
 
 // Handler runs one node. It mutates nc.bag and returns the output port to
 // follow next ("" for the default single output).
@@ -92,7 +98,7 @@ func init() {
 	Register(NodeType{Name: "notice", Ports: []string{""}, Config: map[string]any{"target": "string", "text": "string"}, Handler: nodeNotice})
 	Register(NodeType{Name: "effect", Ports: []string{""}, Config: map[string]any{"action": "kick|ban|mute|op|voice|mode|topic", "channel": "string", "target": "string", "modes": "string", "reason": "string"}, Handler: nodeEffect})
 	Register(NodeType{Name: "llm", Ports: []string{""}, Config: map[string]any{"prompt": "string", "system": "string", "model": "string", "into": "string"}, Handler: nodeLLM})
-	Register(NodeType{Name: "webhook", Ports: []string{""}, Config: map[string]any{"url": "string", "method": "GET|POST|PUT|PATCH|DELETE", "body": "string"}, Handler: nodeWebhook})
+	Register(NodeType{Name: "webhook", Ports: []string{""}, Config: map[string]any{"url": "string", "method": "GET|POST|PUT|PATCH|DELETE", "body": "string", "headers": "map[string]string", "into": "string", "retries": "int", "retry_backoff": "int"}, Handler: nodeWebhook})
 	Register(NodeType{Name: "setvar", Ports: []string{""}, Config: map[string]any{"key": "string", "value": "string"}, Handler: nodeSetvar})
 	Register(NodeType{Name: "getvar", Ports: []string{""}, Config: map[string]any{"key": "string", "into": "string"}, Handler: nodeGetvar})
 	Register(NodeType{Name: "incr", Ports: []string{""}, Config: map[string]any{"key": "string", "by": "string", "into": "string"}, Handler: nodeIncr})
@@ -232,23 +238,154 @@ func nodeLLM(ctx context.Context, n Node, nc *nodeContext) (string, error) {
 	return "", nil
 }
 
+// webhook retry/backoff bounds. Config is clamped into these ranges.
+const (
+	maxWebhookRetries = 5
+	defaultBackoffSec = 3
+	minBackoffSec     = 1
+	maxBackoffSec     = 30
+	maxWebhookBackoff = maxBackoffSec * time.Second
+)
+
 func nodeWebhook(ctx context.Context, n Node, nc *nodeContext) (string, error) {
 	url := cfg(n, "url", nc.bag)
 	if url == "" || nc.post == nil {
 		return "", nil
 	}
 	method := webhookMethod(cfg(n, "method", nc.bag))
+	headers := webhookHeaders(n, nc.bag)
 	// Optional custom body: a template rendered against the bag (e.g. your own
 	// JSON with {user}/{channel}/… placeholders). Empty falls back to posting
 	// the whole data bag as JSON.
+	var payload []byte
 	if body := strings.TrimSpace(cfg(n, "body", nc.bag)); body != "" {
-		return "", nc.post(ctx, method, url, []byte(body))
+		payload = []byte(body)
+	} else {
+		p, err := jsonMarshal(nc.bag)
+		if err != nil {
+			return "", err
+		}
+		payload = p
 	}
-	payload, err := jsonMarshal(nc.bag)
+	retries := clamp(cfgInt(n, "retries", 0), 0, maxWebhookRetries)
+	backoff := clamp(cfgInt(n, "retry_backoff", defaultBackoffSec), minBackoffSec, maxBackoffSec)
+
+	resp, err := postWithRetry(ctx, nc.post, method, url, headers, payload, retries, backoff)
 	if err != nil {
-		return "", err
+		// A webhook failure is logged, not fatal: the flow continues so a
+		// downstream node can degrade gracefully (an unset capture key renders
+		// empty).
+		webhookLog(nc).Warn("flow webhook failed", "flow", nc.flowName, "url", url, "retries", retries, "err", err)
+		return "", nil
 	}
-	return "", nc.post(ctx, method, url, payload)
+	// Optional response capture: bound the body and stash it under the given
+	// bag key so a later node can use it (e.g. a GET that fetches JSON).
+	if into := rawCfg(n, "into"); into != "" {
+		if len(resp) > maxWebhookBody {
+			resp = resp[:maxWebhookBody]
+		}
+		nc.bag[into] = string(resp)
+	}
+	return "", nil
+}
+
+// maxWebhookBody bounds a captured webhook response body (belt-and-braces on
+// top of the poster's own limit).
+const maxWebhookBody = 64 << 10 // 64 KiB
+
+// webhookHeaders renders each configured header value against the bag so a user
+// can interpolate a secret (e.g. {apitoken}) into an Authorization header.
+func webhookHeaders(n Node, bag Bag) map[string]string {
+	raw, ok := n.Config["headers"].(map[string]any)
+	if !ok || len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(raw))
+	for k, v := range raw {
+		s, _ := v.(string)
+		out[k] = renderBag(s, bag)
+	}
+	return out
+}
+
+// cfgInt reads an int config value, tolerating JSON's float64 numbers and
+// string digits, falling back to def when absent or unparseable.
+func cfgInt(n Node, key string, def int) int {
+	switch v := n.Config[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case string:
+		if i, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return i
+		}
+	}
+	return def
+}
+
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+// postWithRetry calls post, retrying transport errors and 5xx/429 responses up
+// to retries times with a linearly increasing backoff (base, 2·base, …) capped
+// at maxWebhookBackoff. 4xx responses (other than 429) are permanent and are
+// not retried. Backoff waits respect ctx cancellation.
+func postWithRetry(ctx context.Context, post PostFunc, method, url string, headers map[string]string, payload []byte, retries, backoffSec int) ([]byte, error) {
+	var (
+		resp []byte
+		err  error
+	)
+	for attempt := 0; ; attempt++ {
+		resp, err = post(ctx, method, url, headers, payload)
+		if err == nil {
+			return resp, nil
+		}
+		if attempt >= retries || !retryable(err) {
+			return resp, err
+		}
+		wait := time.Duration(backoffSec*(attempt+1)) * time.Second
+		if wait > maxWebhookBackoff {
+			wait = maxWebhookBackoff
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return resp, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// retryable reports whether a webhook error warrants a retry: any transport-
+// level error, or a 5xx / 429 HTTP status. Other 4xx statuses are permanent.
+func retryable(err error) bool {
+	var se *httpStatusError
+	if errors.As(err, &se) {
+		return se.status == http.StatusTooManyRequests || se.status >= 500
+	}
+	return true
+}
+
+// httpStatusError carries a non-2xx webhook response status so the retry loop
+// can distinguish retryable (5xx / 429) from permanent (other 4xx) failures.
+type httpStatusError struct{ status int }
+
+func (e *httpStatusError) Error() string { return "webhook: HTTP " + strconv.Itoa(e.status) }
+
+func webhookLog(nc *nodeContext) *slog.Logger {
+	if nc.log != nil {
+		return nc.log
+	}
+	return slog.Default()
 }
 
 // webhookMethod normalizes a configured HTTP method to upper case and
