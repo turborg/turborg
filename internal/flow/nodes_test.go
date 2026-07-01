@@ -144,9 +144,9 @@ func TestNodeWebhookAndVars(t *testing.T) {
 		bag:      Bag{"user": "alice", "channel": "#r"},
 		store:    skill.NewMemoryStore(),
 		flowName: "f1",
-		post: func(_ context.Context, method, url string, body []byte) error {
+		post: func(_ context.Context, method, url string, _ map[string]string, body []byte) ([]byte, error) {
 			gotMethod, gotURL, gotBody = method, url, body
-			return nil
+			return nil, nil
 		},
 	}
 	_, err := nodeWebhook(context.Background(), Node{Config: map[string]any{"url": "https://h/{channel}"}}, nc)

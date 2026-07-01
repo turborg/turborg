@@ -93,7 +93,7 @@ func NewEngine(o Options) *Engine {
 	}
 }
 
-func defaultPost(ctx context.Context, method, url string, payload []byte) error {
+func defaultPost(ctx context.Context, method, url string, headers map[string]string, payload []byte) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, webhookTimeout)
 	defer cancel()
 	if method == "" {
@@ -106,16 +106,26 @@ func defaultPost(ctx context.Context, method, url string, payload []byte) error 
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
+	// Capture a bounded slice of the response so a webhook can feed a later
+	// node; a non-2xx status is surfaced as an error for retry classification.
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxWebhookBody))
+	if resp.StatusCode >= 400 {
+		return respBody, &httpStatusError{status: resp.StatusCode}
+	}
+	return respBody, nil
 }
 
 // SetMaxFlows caps how many flows ReplaceFlows installs: 0 = none (default),
@@ -283,7 +293,7 @@ func (e *Engine) onUserEvent(ctx context.Context, ev *agent.Event) {
 func (e *Engine) run(ctx context.Context, f Flow, bag Bag) {
 	nc := &nodeContext{
 		actor: e.actor, provider: e.provider, store: e.store,
-		post: e.post, flowName: f.Name, bag: bag,
+		post: e.post, flowName: f.Name, bag: bag, log: e.log,
 	}
 	queue := f.entryNodes()
 	index := make(map[string]Node, len(f.Nodes))

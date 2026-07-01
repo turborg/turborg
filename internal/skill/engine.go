@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,10 +22,15 @@ import (
 // can't stall the engine.
 const webhookTimeout = 5 * time.Second
 
-// PostFunc sends a JSON payload to a URL with the given HTTP method. It is the
-// seam external flow engines (n8n and the like) plug into; the default uses
-// net/http and tests substitute a recorder.
-type PostFunc func(ctx context.Context, method, url string, payload []byte) error
+// PostFunc sends a payload to a URL with the given HTTP method and custom
+// request headers, returning the (bounded) response body. It is the seam
+// external flow engines (n8n and the like) plug into; the default uses
+// net/http and tests substitute a recorder. Skills ignore the returned body.
+type PostFunc func(ctx context.Context, method, url string, headers map[string]string, payload []byte) ([]byte, error)
+
+// maxWebhookBody bounds how much of a webhook response body is read, so a
+// hostile or misconfigured endpoint can't stream unbounded data into memory.
+const maxWebhookBody = 64 << 10 // 64 KiB
 
 // floodWindow is the sliding window over which an effect skill with severity
 // thresholds counts a sender's messages. Kept a package constant — operators
@@ -120,8 +126,10 @@ func NewEngine(o Options) *Engine {
 }
 
 // defaultPost sends payload as application/json with the given method (default
-// POST) and a bounded timeout. A GET carries no request body.
-func defaultPost(ctx context.Context, method, url string, payload []byte) error {
+// POST), custom headers, and a bounded timeout, returning the bounded response
+// body. A GET carries no request body. A non-2xx response is returned as an
+// error (with the body captured) so callers can classify it.
+func defaultPost(ctx context.Context, method, url string, headers map[string]string, payload []byte) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, webhookTimeout)
 	defer cancel()
 	if method == "" {
@@ -133,17 +141,31 @@ func defaultPost(ctx context.Context, method, url string, payload []byte) error 
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxWebhookBody))
+	if resp.StatusCode >= 400 {
+		return respBody, &httpStatusError{status: resp.StatusCode}
+	}
+	return respBody, nil
 }
+
+// httpStatusError carries a non-2xx webhook response status so a retry loop can
+// distinguish retryable (5xx / 429) from permanent (other 4xx) failures.
+type httpStatusError struct{ status int }
+
+func (e *httpStatusError) Error() string { return "webhook: HTTP " + strconv.Itoa(e.status) }
 
 // SetMaxSkills caps how many engine skills ReplaceSkills installs: 0 = none
 // (default), -1 = unrestricted, N = at most N. Mirrors the command registry's
@@ -355,7 +377,8 @@ func (e *Engine) doWebhook(ctx context.Context, s Skill, f renderFields) {
 	if err != nil {
 		return
 	}
-	if err := e.post(ctx, http.MethodPost, s.Action.Webhook, payload); err != nil {
+	// Skills have no data bag to capture into, so the response body is ignored.
+	if _, err := e.post(ctx, http.MethodPost, s.Action.Webhook, nil, payload); err != nil {
 		e.log.Warn("skill webhook failed", "skill", s.Name, "err", err)
 	}
 }
