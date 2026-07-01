@@ -62,3 +62,17 @@ func TestStoreIncrDefaultsWindow(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
 }
+
+func TestStoreDelete(t *testing.T) {
+	s := NewMemoryStore()
+	s.Set("ns", "k", "v", 0)
+	if _, ok := s.Get("ns", "k"); !ok {
+		t.Fatal("expected value present before delete")
+	}
+	s.Delete("ns", "k")
+	if _, ok := s.Get("ns", "k"); ok {
+		t.Fatal("expected value gone after delete")
+	}
+	// Deleting an absent key is a no-op (must not panic).
+	s.Delete("ns", "missing")
+}

@@ -291,6 +291,19 @@ type Settings struct {
 	// unset — the write and read halves typically share the same
 	// per-container token.
 	MessageStoreToken string `env:"MESSAGE_STORE_TOKEN"`
+
+	// StateURL is an optional endpoint that gives skills and flows durable
+	// key/value state — counters, per-user values, a seen-database, history —
+	// that survives a restart. Empty = state is kept in-process only (the
+	// default) and lost when the agent stops. When set, point it at an HTTP
+	// service that implements the contract documented on skill.HTTPStore; the
+	// agent reads and writes each value under {StateURL}/state/{namespace}/{key}.
+	StateURL string `env:"STATE_URL"`
+
+	// StateToken is the bearer sent on every state request. Defaults to
+	// MessageSinkToken via normalize() when unset — the state backend typically
+	// terminates at the same per-container endpoint with the same bearer.
+	StateToken string `env:"STATE_TOKEN"`
 }
 
 // Load parses TURBORG_* env vars into a Settings, normalizing the
@@ -341,6 +354,11 @@ func (s *Settings) normalize() error {
 	// endpoint, so it reuses that bearer unless overridden.
 	if s.ConfigToken == "" {
 		s.ConfigToken = s.MessageSinkToken
+	}
+	// The durable-state backend terminates at the same per-container endpoint,
+	// so it reuses that bearer unless overridden.
+	if s.StateToken == "" {
+		s.StateToken = s.MessageSinkToken
 	}
 	return nil
 }

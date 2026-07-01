@@ -95,6 +95,12 @@ type CommonParams struct {
 	// Store backs bouncer welcome replay + web-shell scrollback + CHATHISTORY.
 	// Nil → no store wiring (no submitters, connector keeps its zero value).
 	Store messages.Store
+
+	// SkillStore backs durable skill/flow state (counters, per-user values,
+	// history). Shared by the skill engine and the flow engine so a value a
+	// skill writes is visible to a flow of the same namespace. Nil → each engine
+	// falls back to its own in-process store (state lost on restart).
+	SkillStore skill.Store
 }
 
 // GuardParams are the primitive inputs to the !command guard, lifted out of
@@ -200,6 +206,7 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 	engine := skill.NewEngine(skill.Options{
 		Actor:     irc.NewActor(ircConn),
 		Provider:  provider,
+		Store:     p.SkillStore,
 		Platform:  p.Platform,
 		Owner:     p.Owner.OwnerNick,
 		MaxSkills: p.CustomCommandsMax,
@@ -213,6 +220,7 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 	flowEngine := flow.NewEngine(flow.Options{
 		Actor:    irc.NewActor(ircConn),
 		Provider: provider,
+		Store:    p.SkillStore,
 		Platform: p.Platform,
 		Owner:    p.Owner.OwnerNick,
 		MaxFlows: p.CustomCommandsMax,

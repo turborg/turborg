@@ -17,6 +17,9 @@ type Store interface {
 	// Set stores val for (skill,key). A positive ttl expires it after that
 	// duration; a non-positive ttl stores it without expiry.
 	Set(skill, key, val string, ttl time.Duration)
+	// Delete removes any stored value for (skill,key). A no-op when the key is
+	// absent.
+	Delete(skill, key string)
 	// Incr records one hit for (skill,key) in a sliding window and returns the
 	// number of hits within the window (including this one).
 	Incr(skill, key string, window time.Duration) (int, error)
@@ -75,6 +78,12 @@ func (m *MemoryStore) Set(skill, key, val string, ttl time.Duration) {
 		exp = m.now().Add(ttl)
 	}
 	m.values[storeKey(skill, key)] = memValue{val: val, expiresAt: exp}
+}
+
+func (m *MemoryStore) Delete(skill, key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.values, storeKey(skill, key))
 }
 
 func (m *MemoryStore) Incr(skill, key string, window time.Duration) (int, error) {

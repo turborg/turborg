@@ -120,6 +120,10 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	store, sink := buildMessageStore(s, log)
 	_ = sink // referenced for lifecycle parity; closing happens with the agent
 
+	// Durable skill/flow state backend. Nil when TURBORG_STATE_URL is unset —
+	// the engines then keep state in-process (lost on restart), the default.
+	skillStore := buildSkillStore(s, log)
+
 	// Single-instance activity transport: a per-event POST to ACTIVITY_URL via
 	// the Notifier. Only wired when configured; the pooled runtime supplies its
 	// own coalescing hook instead (per-event POSTs to the control plane don't
@@ -180,6 +184,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		LLMOutputUsed:             s.LLMOutputTokensUsed,
 		ActivityHook:              activityHook,
 		Store:                     store,
+		SkillStore:                skillStore,
 	}, log)
 	if err != nil {
 		return nil, err
@@ -412,6 +417,22 @@ func buildMessageStore(s *config.Settings, log *slog.Logger) (messages.Store, *m
 	// locally; the sink keeps mirroring writes for whatever consumer
 	// runs on the other side.
 	return messages.NewMemoryStore(0), sink
+}
+
+// buildSkillStore picks the durable state backend for skills + flows.
+// When TURBORG_STATE_URL (+ token) is set it returns an HTTP-backed store so
+// counters, per-user values, and history survive a restart; otherwise it
+// returns nil and each engine falls back to its own in-process store (the
+// default, state lost on restart).
+func buildSkillStore(s *config.Settings, log *slog.Logger) skill.Store {
+	if log == nil {
+		log = slog.Default()
+	}
+	if hs := skill.NewHTTPStore(s.StateURL, s.StateToken, log); hs != nil {
+		log.Info("skill state store enabled (HTTP)", "endpoint", s.StateURL)
+		return hs
+	}
+	return nil
 }
 
 // makeStoreSubmitter returns an EventBus handler that mirrors every

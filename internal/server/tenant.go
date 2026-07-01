@@ -572,6 +572,7 @@ func (t *Tenant) commonParams(cs ConnectorSpec, caps *PlanCapabilities, botNick 
 		LLMOutputUsed:         llmOutUsed,
 		ActivityHook:          activityHook,
 		Store:                 store,
+		SkillStore:            t.buildSkillStore(),
 	}
 }
 
@@ -591,6 +592,23 @@ func (t *Tenant) buildMessageStore() (messages.Store, *messagesink.Sink) {
 		return hs, sink
 	}
 	return messages.NewMemoryStore(0), sink
+}
+
+// buildSkillStore builds this tenant's durable skill/flow state backend. With a
+// control plane configured it's an HTTP store pointed at the per-tenant
+// control-plane base (so quiz scores, counters, seen-dbs, and history survive a
+// pool restart); the store appends /state/{ns}/{key} per value. Without a
+// control plane it returns nil and the engines keep state in-process — the
+// OSS/file-source path.
+func (t *Tenant) buildSkillStore() skill.Store {
+	if t.controlPlaneURL == "" {
+		return nil
+	}
+	base := strings.TrimRight(t.controlPlaneURL, "/") + "/turborg/" + t.ID
+	if hs := skill.NewHTTPStore(base, t.controlPlaneToken, t.log); hs != nil {
+		return hs
+	}
+	return nil
 }
 
 // update applies a new desired spec to a running tenant (M7 hot reload). An
