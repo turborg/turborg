@@ -1,6 +1,7 @@
 package flow
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -32,6 +33,36 @@ func TestFlowJSONRoundTrip(t *testing.T) {
 	var again Flow
 	require.NoError(t, json.Unmarshal(out, &again))
 	assert.Equal(t, f, again)
+}
+
+// TestFlowCategoryRoundTripAndRun proves the optional Category field decodes
+// and re-encodes losslessly and is pure display metadata: a flow that carries a
+// category still executes exactly as one without.
+func TestFlowCategoryRoundTripAndRun(t *testing.T) {
+	raw := `{
+	  "name":"greet",
+	  "category":"Moderation",
+	  "trigger":{"kind":"match","match":"hi"},
+	  "nodes":[{"id":"s","type":"say","config":{"channel":"{channel}","text":"hi {user}"}}]
+	}`
+	var f Flow
+	require.NoError(t, json.Unmarshal([]byte(raw), &f))
+	assert.Equal(t, "Moderation", f.Category)
+
+	// Re-encoding preserves the category, and an empty category is omitted.
+	out, err := json.Marshal(f)
+	require.NoError(t, err)
+	assert.Contains(t, string(out), `"category":"Moderation"`)
+	empty, err := json.Marshal(Flow{Name: "x"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(empty), "category")
+
+	// The category is inert: the flow still fires its say node.
+	act := &fakeActor{}
+	e, bus := newEngine(t, Options{Actor: act})
+	e.ReplaceFlows([]Flow{f})
+	bus.Publish(context.Background(), msgEvent("#r", "u", "hi there"))
+	assert.Equal(t, []string{"say #r hi u"}, act.snapshot())
 }
 
 func TestTriggerKindDefault(t *testing.T) {

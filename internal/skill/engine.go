@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -20,10 +21,10 @@ import (
 // can't stall the engine.
 const webhookTimeout = 5 * time.Second
 
-// PostFunc posts a JSON payload to a URL. It is the seam external flow engines
-// (n8n and the like) plug into; the default uses net/http and tests substitute
-// a recorder.
-type PostFunc func(ctx context.Context, url string, payload []byte) error
+// PostFunc sends a JSON payload to a URL with the given HTTP method. It is the
+// seam external flow engines (n8n and the like) plug into; the default uses
+// net/http and tests substitute a recorder.
+type PostFunc func(ctx context.Context, method, url string, payload []byte) error
 
 // floodWindow is the sliding window over which an effect skill with severity
 // thresholds counts a sender's messages. Kept a package constant — operators
@@ -118,15 +119,25 @@ func NewEngine(o Options) *Engine {
 	}
 }
 
-// defaultPost POSTs payload as application/json with a bounded timeout.
-func defaultPost(ctx context.Context, url string, payload []byte) error {
+// defaultPost sends payload as application/json with the given method (default
+// POST) and a bounded timeout. A GET carries no request body.
+func defaultPost(ctx context.Context, method, url string, payload []byte) error {
 	ctx, cancel := context.WithTimeout(ctx, webhookTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if method == "" {
+		method = http.MethodPost
+	}
+	var body io.Reader
+	if method != http.MethodGet {
+		body = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
@@ -344,7 +355,7 @@ func (e *Engine) doWebhook(ctx context.Context, s Skill, f renderFields) {
 	if err != nil {
 		return
 	}
-	if err := e.post(ctx, s.Action.Webhook, payload); err != nil {
+	if err := e.post(ctx, http.MethodPost, s.Action.Webhook, payload); err != nil {
 		e.log.Warn("skill webhook failed", "skill", s.Name, "err", err)
 	}
 }

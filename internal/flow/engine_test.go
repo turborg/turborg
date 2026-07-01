@@ -3,6 +3,7 @@ package flow
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -200,11 +201,25 @@ func TestChannelHelpers(t *testing.T) {
 }
 
 func TestDefaultPost(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))
+	var gotMethod string
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(200)
+	}))
 	defer srv.Close()
-	require.NoError(t, defaultPost(context.Background(), srv.URL, []byte(`{}`)))
-	require.Error(t, defaultPost(context.Background(), "://bad", []byte(`{}`)))
-	require.Error(t, defaultPost(context.Background(), "http://127.0.0.1:0/x", []byte(`{}`)))
+	require.NoError(t, defaultPost(context.Background(), "", srv.URL, []byte(`{}`)))
+	assert.Equal(t, http.MethodPost, gotMethod, "empty method defaults to POST")
+	assert.Equal(t, `{}`, string(gotBody))
+	// A GET carries no request body.
+	require.NoError(t, defaultPost(context.Background(), http.MethodGet, srv.URL, []byte(`{"ignored":true}`)))
+	assert.Equal(t, http.MethodGet, gotMethod)
+	assert.Empty(t, gotBody, "GET sends no body")
+	require.NoError(t, defaultPost(context.Background(), http.MethodDelete, srv.URL, nil))
+	assert.Equal(t, http.MethodDelete, gotMethod)
+	require.Error(t, defaultPost(context.Background(), http.MethodPost, "://bad", []byte(`{}`)))
+	require.Error(t, defaultPost(context.Background(), http.MethodPost, "http://127.0.0.1:0/x", []byte(`{}`)))
 }
 
 func TestValidateUnknownNodeError(t *testing.T) {
@@ -215,7 +230,7 @@ func TestValidateUnknownNodeError(t *testing.T) {
 
 func TestEngineWebhookFlowEndToEnd(t *testing.T) {
 	var got []byte
-	e, bus := newEngine(t, Options{Post: func(_ context.Context, _ string, b []byte) error { got = b; return nil }})
+	e, bus := newEngine(t, Options{Post: func(_ context.Context, _, _ string, b []byte) error { got = b; return nil }})
 	e.ReplaceFlows([]Flow{{
 		Name:    "to-flow",
 		Trigger: skill.Trigger{Kind: skill.KindEvent, Event: "USER_JOIN"},

@@ -3,6 +3,7 @@ package skill
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -29,14 +30,23 @@ func (erroringActor) Invite(string, string) error             { return errors.Ne
 func (erroringActor) SetMode(string, string, ...string) error { return errors.New("boom") }
 
 func TestDefaultPostSuccessAndError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var gotMethod string
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	require.NoError(t, defaultPost(context.Background(), srv.URL, []byte(`{}`)))
+	require.NoError(t, defaultPost(context.Background(), "", srv.URL, []byte(`{}`)))
+	assert.Equal(t, http.MethodPost, gotMethod, "empty method defaults to POST")
+	// A GET carries no body.
+	require.NoError(t, defaultPost(context.Background(), http.MethodGet, srv.URL, []byte(`{"x":1}`)))
+	assert.Equal(t, http.MethodGet, gotMethod)
+	assert.Empty(t, gotBody, "GET sends no body")
 
-	require.Error(t, defaultPost(context.Background(), "http://127.0.0.1:0/nope", []byte(`{}`)))
-	require.Error(t, defaultPost(context.Background(), "://bad-url", []byte(`{}`)))
+	require.Error(t, defaultPost(context.Background(), http.MethodPost, "http://127.0.0.1:0/nope", []byte(`{}`)))
+	require.Error(t, defaultPost(context.Background(), http.MethodPost, "://bad-url", []byte(`{}`)))
 }
 
 func TestDoWebhookEmptyURLAndError(t *testing.T) {
@@ -51,7 +61,7 @@ func TestDoWebhookEmptyURLAndError(t *testing.T) {
 
 	// Post error path is logged, not fatal.
 	called := false
-	e2, bus2 := newEngine(t, Options{Post: func(context.Context, string, []byte) error {
+	e2, bus2 := newEngine(t, Options{Post: func(context.Context, string, string, []byte) error {
 		called = true
 		return errors.New("down")
 	}})

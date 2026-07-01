@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -92,14 +93,24 @@ func NewEngine(o Options) *Engine {
 	}
 }
 
-func defaultPost(ctx context.Context, url string, payload []byte) error {
+func defaultPost(ctx context.Context, method, url string, payload []byte) error {
 	ctx, cancel := context.WithTimeout(ctx, webhookTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if method == "" {
+		method = http.MethodPost
+	}
+	// A GET carries no request body; other verbs send the payload as JSON.
+	var body io.Reader
+	if method != http.MethodGet {
+		body = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err

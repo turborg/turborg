@@ -23,6 +23,10 @@ type Flow struct {
 	Trigger skill.Trigger `json:"trigger"`
 	Nodes   []Node        `json:"nodes"`
 	Edges   []Edge        `json:"edges"`
+	// Category is optional display-only metadata (e.g. a builder-UI grouping
+	// label). The engine ignores it entirely; it round-trips through JSON so an
+	// authoring UI can carry it, but it never affects execution.
+	Category string `json:"category,omitempty"`
 }
 
 // Node is one activity in a flow: a registered Type plus free-form Config the

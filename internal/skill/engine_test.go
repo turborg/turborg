@@ -2,6 +2,7 @@ package skill
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"testing"
 
@@ -195,11 +196,11 @@ func TestEngineLLMAction(t *testing.T) {
 
 func TestEngineWebhook(t *testing.T) {
 	var mu sync.Mutex
-	var gotURL string
+	var gotMethod, gotURL string
 	var gotBody []byte
-	e, bus := newEngine(t, Options{Post: func(_ context.Context, url string, body []byte) error {
+	e, bus := newEngine(t, Options{Post: func(_ context.Context, method, url string, body []byte) error {
 		mu.Lock()
-		gotURL, gotBody = url, body
+		gotMethod, gotURL, gotBody = method, url, body
 		mu.Unlock()
 		return nil
 	}})
@@ -215,6 +216,7 @@ func TestEngineWebhook(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Equal(t, "https://flow.example/hook", gotURL)
+	assert.Equal(t, http.MethodPost, gotMethod, "skill webhook posts via POST")
 	assert.Contains(t, string(gotBody), `"user":"newbie"`)
 	assert.Contains(t, string(gotBody), `"message":"joined newbie"`)
 }

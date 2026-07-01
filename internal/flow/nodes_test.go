@@ -129,21 +129,31 @@ func TestNodeLLM(t *testing.T) {
 }
 
 func TestNodeWebhookAndVars(t *testing.T) {
-	var gotURL string
+	var gotMethod, gotURL string
 	var gotBody []byte
 	nc := &nodeContext{
 		bag:      Bag{"user": "alice", "channel": "#r"},
 		store:    skill.NewMemoryStore(),
 		flowName: "f1",
-		post: func(_ context.Context, url string, body []byte) error {
-			gotURL, gotBody = url, body
+		post: func(_ context.Context, method, url string, body []byte) error {
+			gotMethod, gotURL, gotBody = method, url, body
 			return nil
 		},
 	}
 	_, err := nodeWebhook(context.Background(), Node{Config: map[string]any{"url": "https://h/{channel}"}}, nc)
 	require.NoError(t, err)
 	assert.Equal(t, "https://h/#r", gotURL)
+	assert.Equal(t, "POST", gotMethod, "default method is POST")
 	assert.Contains(t, string(gotBody), `"user":"alice"`)
+
+	// An explicit method is upper-cased and passed through; unknown verbs fall
+	// back to POST.
+	_, err = nodeWebhook(context.Background(), Node{Config: map[string]any{"url": "https://h", "method": "delete"}}, nc)
+	require.NoError(t, err)
+	assert.Equal(t, "DELETE", gotMethod)
+	_, err = nodeWebhook(context.Background(), Node{Config: map[string]any{"url": "https://h", "method": "bogus"}}, nc)
+	require.NoError(t, err)
+	assert.Equal(t, "POST", gotMethod, "unknown method falls back to POST")
 
 	// A custom body template renders against the bag and is posted verbatim
 	// (instead of the whole bag dump).

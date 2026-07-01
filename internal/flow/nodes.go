@@ -40,9 +40,9 @@ type nodeContext struct {
 	bag      Bag
 }
 
-// PostFunc posts a JSON payload to a URL (the webhook node's egress). Tests
-// substitute a recorder.
-type PostFunc func(ctx context.Context, url string, payload []byte) error
+// PostFunc sends a JSON payload to a URL with the given HTTP method (the
+// webhook node's egress). Tests substitute a recorder.
+type PostFunc func(ctx context.Context, method, url string, payload []byte) error
 
 // Handler runs one node. It mutates nc.bag and returns the output port to
 // follow next ("" for the default single output).
@@ -92,7 +92,7 @@ func init() {
 	Register(NodeType{Name: "notice", Ports: []string{""}, Config: map[string]any{"target": "string", "text": "string"}, Handler: nodeNotice})
 	Register(NodeType{Name: "effect", Ports: []string{""}, Config: map[string]any{"action": "kick|ban|mute|op|voice|mode|topic", "channel": "string", "target": "string", "modes": "string", "reason": "string"}, Handler: nodeEffect})
 	Register(NodeType{Name: "llm", Ports: []string{""}, Config: map[string]any{"prompt": "string", "system": "string", "model": "string", "into": "string"}, Handler: nodeLLM})
-	Register(NodeType{Name: "webhook", Ports: []string{""}, Config: map[string]any{"url": "string", "body": "string"}, Handler: nodeWebhook})
+	Register(NodeType{Name: "webhook", Ports: []string{""}, Config: map[string]any{"url": "string", "method": "GET|POST|PUT|PATCH|DELETE", "body": "string"}, Handler: nodeWebhook})
 	Register(NodeType{Name: "setvar", Ports: []string{""}, Config: map[string]any{"key": "string", "value": "string"}, Handler: nodeSetvar})
 	Register(NodeType{Name: "getvar", Ports: []string{""}, Config: map[string]any{"key": "string", "into": "string"}, Handler: nodeGetvar})
 	Register(NodeType{Name: "incr", Ports: []string{""}, Config: map[string]any{"key": "string", "by": "string", "into": "string"}, Handler: nodeIncr})
@@ -237,17 +237,36 @@ func nodeWebhook(ctx context.Context, n Node, nc *nodeContext) (string, error) {
 	if url == "" || nc.post == nil {
 		return "", nil
 	}
+	method := webhookMethod(cfg(n, "method", nc.bag))
 	// Optional custom body: a template rendered against the bag (e.g. your own
 	// JSON with {user}/{channel}/… placeholders). Empty falls back to posting
 	// the whole data bag as JSON.
 	if body := strings.TrimSpace(cfg(n, "body", nc.bag)); body != "" {
-		return "", nc.post(ctx, url, []byte(body))
+		return "", nc.post(ctx, method, url, []byte(body))
 	}
 	payload, err := jsonMarshal(nc.bag)
 	if err != nil {
 		return "", err
 	}
-	return "", nc.post(ctx, url, payload)
+	return "", nc.post(ctx, method, url, payload)
+}
+
+// webhookMethod normalizes a configured HTTP method to upper case and
+// validates it against the supported verbs, defaulting to POST for an empty or
+// unrecognized value.
+func webhookMethod(m string) string {
+	switch strings.ToUpper(strings.TrimSpace(m)) {
+	case "GET":
+		return "GET"
+	case "PUT":
+		return "PUT"
+	case "PATCH":
+		return "PATCH"
+	case "DELETE":
+		return "DELETE"
+	default:
+		return "POST"
+	}
 }
 
 func nodeSetvar(_ context.Context, n Node, nc *nodeContext) (string, error) {
