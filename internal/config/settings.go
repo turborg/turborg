@@ -165,6 +165,20 @@ type Settings struct {
 	// values below the floor are clamped up by the refresher.
 	CommandsRefreshSeconds int `env:"COMMANDS_REFRESH_SECONDS"`
 
+	// FlowsURL is an optional endpoint the agent polls to hot-reload its
+	// declarative node-graph flow set while it runs — no reconnect. Point it at a
+	// service that serves the latest flow set as JSON. Empty = no live reload (the
+	// boot TURBORG_FLOWS set is fixed). This gives a single-instance agent the
+	// same in-place ReplaceFlows the pooled runtime already does from its tenant
+	// feed.
+	FlowsURL string `env:"FLOWS_URL"`
+	// FlowsToken is the bearer sent on every flows poll. Defaults to
+	// MessageSinkToken via normalize() when unset — same per-container endpoint.
+	FlowsToken string `env:"FLOWS_TOKEN"`
+	// FlowsRefreshSeconds is the poll interval. 0 uses the package default;
+	// values below the floor are clamped up by the refresher.
+	FlowsRefreshSeconds int `env:"FLOWS_REFRESH_SECONDS"`
+
 	// ConfigURL is an optional endpoint the agent polls to hot-reload its live
 	// IRC nick + channel set while it runs — no reconnect. Empty = no live
 	// reload (the boot TURBORG_IRC_NICK / CHANNELS are fixed). This gives a
@@ -204,6 +218,14 @@ type Settings struct {
 	// process transport for the same command set a multi-tenant deployment
 	// delivers through its tenant feed.
 	Commands string `env:"COMMANDS"`
+
+	// Flows is the JSON-encoded set of declarative node-graph flows the agent
+	// runs: an array of {name,trigger,nodes,edges} objects. Each flow wires
+	// activity nodes (set/if/switch/say/effect/llm/webhook/…) into a graph the
+	// agent walks when the flow's trigger fires. Empty → no flows. The graph is
+	// declarative — nodes come from a fixed catalog; there is no arbitrary code
+	// execution.
+	Flows string `env:"FLOWS"`
 
 	// OwnerDMNudgeEvery triggers a DM to the owner after every N outbound
 	// messages. 0 = disabled. Used by operators who want a regular usage
@@ -283,6 +305,19 @@ type Settings struct {
 	// unset — the write and read halves typically share the same
 	// per-container token.
 	MessageStoreToken string `env:"MESSAGE_STORE_TOKEN"`
+
+	// StateURL is an optional endpoint that gives skills and flows durable
+	// key/value state — counters, per-user values, a seen-database, history —
+	// that survives a restart. Empty = state is kept in-process only (the
+	// default) and lost when the agent stops. When set, point it at an HTTP
+	// service that implements the contract documented on skill.HTTPStore; the
+	// agent reads and writes each value under {StateURL}/state/{namespace}/{key}.
+	StateURL string `env:"STATE_URL"`
+
+	// StateToken is the bearer sent on every state request. Defaults to
+	// MessageSinkToken via normalize() when unset — the state backend typically
+	// terminates at the same per-container endpoint with the same bearer.
+	StateToken string `env:"STATE_TOKEN"`
 }
 
 // Load parses TURBORG_* env vars into a Settings, normalizing the
@@ -329,10 +364,20 @@ func (s *Settings) normalize() error {
 	if s.CommandsToken == "" {
 		s.CommandsToken = s.MessageSinkToken
 	}
+	// The flows poll terminates at the same per-container endpoint, so it
+	// reuses that bearer unless overridden.
+	if s.FlowsToken == "" {
+		s.FlowsToken = s.MessageSinkToken
+	}
 	// The config (nick/channels) poll terminates at the same per-container
 	// endpoint, so it reuses that bearer unless overridden.
 	if s.ConfigToken == "" {
 		s.ConfigToken = s.MessageSinkToken
+	}
+	// The durable-state backend terminates at the same per-container endpoint,
+	// so it reuses that bearer unless overridden.
+	if s.StateToken == "" {
+		s.StateToken = s.MessageSinkToken
 	}
 	return nil
 }

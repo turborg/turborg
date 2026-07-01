@@ -257,3 +257,18 @@ func TestNormalizeTrimsAllowedNetworksWhitespace(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"irc.libera.chat", "irc.oftc.net"}, s.AllowedNetworks)
 }
+
+func TestStateTokenDefaultsToSinkToken(t *testing.T) {
+	t.Setenv("TURBORG_MESSAGE_SINK_TOKEN", "shared-bearer")
+	t.Setenv("TURBORG_STATE_URL", "https://state.example/agents/bot")
+	s, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "https://state.example/agents/bot", s.StateURL)
+	assert.Equal(t, "shared-bearer", s.StateToken, "state token falls back to the sink token")
+
+	// An explicit state token overrides the fallback.
+	t.Setenv("TURBORG_STATE_TOKEN", "state-only")
+	s, err = config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "state-only", s.StateToken)
+}
