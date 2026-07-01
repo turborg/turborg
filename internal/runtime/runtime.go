@@ -29,6 +29,7 @@ import (
 	"github.com/turborg/turborg/internal/configrefresh"
 	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/flow"
+	"github.com/turborg/turborg/internal/flowrefresh"
 	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/messages"
 	"github.com/turborg/turborg/internal/messagesink"
@@ -59,6 +60,10 @@ type Built struct {
 	// agent runs (the single-instance mirror of the pooled feed-driven reload). Nil
 	// when COMMANDS_URL is unset (self-host: the boot set is fixed).
 	CommandRefresh *commandrefresh.Refresher
+	// FlowRefresh hot-reloads the declarative node-graph flow set in place while
+	// the agent runs (the single-instance mirror of the pooled feed-driven
+	// reload). Nil when FLOWS_URL is unset (self-host: the boot set is fixed).
+	FlowRefresh *flowrefresh.Refresher
 	// Scheduler drives schedule-trigger skills on their cadence. Supervised by
 	// Run alongside the background refreshers. Never nil (idle when no schedule
 	// skills are installed).
@@ -235,6 +240,18 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		s.CommandsToken,
 		s.CommandsRefreshSeconds,
 		func(skills []skill.Skill) { ApplySkills(a, wiring, skills, provider, owner, ircCfg.Hostname, log) },
+		log,
+	)
+
+	// Live flow hot-reload: when FLOWS_URL is set, poll the per-container flows
+	// endpoint and swap the node-graph flow set in place — the same ReplaceFlows
+	// the pooled runtime does from its feed, so a single-instance container picks
+	// up flow add/remove/edit without a respawn/reconnect.
+	built.FlowRefresh = flowrefresh.New(
+		s.FlowsURL,
+		s.FlowsToken,
+		s.FlowsRefreshSeconds,
+		func(flows []flow.Flow) { ApplyFlows(wiring, flows) },
 		log,
 	)
 
@@ -795,6 +812,9 @@ func Run(ctx context.Context, b *Built) error {
 	}
 	if b.CommandRefresh != nil {
 		startRefresher(b.CommandRefresh.Run)
+	}
+	if b.FlowRefresh != nil {
+		startRefresher(b.FlowRefresh.Run)
 	}
 	if b.ConfigRefresh != nil {
 		startRefresher(b.ConfigRefresh.Run)

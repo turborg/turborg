@@ -165,6 +165,20 @@ type Settings struct {
 	// values below the floor are clamped up by the refresher.
 	CommandsRefreshSeconds int `env:"COMMANDS_REFRESH_SECONDS"`
 
+	// FlowsURL is an optional endpoint the agent polls to hot-reload its
+	// declarative node-graph flow set while it runs — no reconnect. Point it at a
+	// service that serves the latest flow set as JSON. Empty = no live reload (the
+	// boot TURBORG_FLOWS set is fixed). This gives a single-instance agent the
+	// same in-place ReplaceFlows the pooled runtime already does from its tenant
+	// feed.
+	FlowsURL string `env:"FLOWS_URL"`
+	// FlowsToken is the bearer sent on every flows poll. Defaults to
+	// MessageSinkToken via normalize() when unset — same per-container endpoint.
+	FlowsToken string `env:"FLOWS_TOKEN"`
+	// FlowsRefreshSeconds is the poll interval. 0 uses the package default;
+	// values below the floor are clamped up by the refresher.
+	FlowsRefreshSeconds int `env:"FLOWS_REFRESH_SECONDS"`
+
 	// ConfigURL is an optional endpoint the agent polls to hot-reload its live
 	// IRC nick + channel set while it runs — no reconnect. Empty = no live
 	// reload (the boot TURBORG_IRC_NICK / CHANNELS are fixed). This gives a
@@ -349,6 +363,11 @@ func (s *Settings) normalize() error {
 	// reuses that bearer unless overridden.
 	if s.CommandsToken == "" {
 		s.CommandsToken = s.MessageSinkToken
+	}
+	// The flows poll terminates at the same per-container endpoint, so it
+	// reuses that bearer unless overridden.
+	if s.FlowsToken == "" {
+		s.FlowsToken = s.MessageSinkToken
 	}
 	// The config (nick/channels) poll terminates at the same per-container
 	// endpoint, so it reuses that bearer unless overridden.
