@@ -92,7 +92,7 @@ func init() {
 	Register(NodeType{Name: "notice", Ports: []string{""}, Config: map[string]any{"target": "string", "text": "string"}, Handler: nodeNotice})
 	Register(NodeType{Name: "effect", Ports: []string{""}, Config: map[string]any{"action": "kick|ban|mute|op|voice|mode|topic", "channel": "string", "target": "string", "modes": "string", "reason": "string"}, Handler: nodeEffect})
 	Register(NodeType{Name: "llm", Ports: []string{""}, Config: map[string]any{"prompt": "string", "system": "string", "model": "string", "into": "string"}, Handler: nodeLLM})
-	Register(NodeType{Name: "webhook", Ports: []string{""}, Config: map[string]any{"url": "string"}, Handler: nodeWebhook})
+	Register(NodeType{Name: "webhook", Ports: []string{""}, Config: map[string]any{"url": "string", "body": "string"}, Handler: nodeWebhook})
 	Register(NodeType{Name: "setvar", Ports: []string{""}, Config: map[string]any{"key": "string", "value": "string"}, Handler: nodeSetvar})
 	Register(NodeType{Name: "getvar", Ports: []string{""}, Config: map[string]any{"key": "string", "into": "string"}, Handler: nodeGetvar})
 }
@@ -235,6 +235,12 @@ func nodeWebhook(ctx context.Context, n Node, nc *nodeContext) (string, error) {
 	url := cfg(n, "url", nc.bag)
 	if url == "" || nc.post == nil {
 		return "", nil
+	}
+	// Optional custom body: a template rendered against the bag (e.g. your own
+	// JSON with {user}/{channel}/… placeholders). Empty falls back to posting
+	// the whole data bag as JSON.
+	if body := strings.TrimSpace(cfg(n, "body", nc.bag)); body != "" {
+		return "", nc.post(ctx, url, []byte(body))
 	}
 	payload, err := jsonMarshal(nc.bag)
 	if err != nil {

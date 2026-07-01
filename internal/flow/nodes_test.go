@@ -145,6 +145,12 @@ func TestNodeWebhookAndVars(t *testing.T) {
 	assert.Equal(t, "https://h/#r", gotURL)
 	assert.Contains(t, string(gotBody), `"user":"alice"`)
 
+	// A custom body template renders against the bag and is posted verbatim
+	// (instead of the whole bag dump).
+	_, err = nodeWebhook(context.Background(), Node{Config: map[string]any{"url": "https://h", "body": `{"msg":"{user} in {channel}"}`}}, nc)
+	require.NoError(t, err)
+	assert.Equal(t, `{"msg":"alice in #r"}`, string(gotBody))
+
 	// setvar then getvar round-trips through the store.
 	_, _ = nodeSetvar(context.Background(), Node{Config: map[string]any{"key": "motd", "value": "hello {user}"}}, nc)
 	_, _ = nodeGetvar(context.Background(), Node{Config: map[string]any{"key": "motd", "into": "m"}}, nc)
