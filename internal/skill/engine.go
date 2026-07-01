@@ -59,6 +59,12 @@ type Engine struct {
 	events    []compiled
 	matches   []compiled
 	bus       *agent.EventBus
+
+	// Timed-effect reversals: applied modes that auto-lift after a duration.
+	// Persisted via the Store so they resume across restarts.
+	liftsMu     sync.Mutex
+	lifts       []pendingLift
+	liftsLoaded bool
 }
 
 // compiled is a runtime-ready skill: the definition plus the compiled match
@@ -440,8 +446,146 @@ func (e *Engine) applyEffect(ctx context.Context, s Skill, f renderFields, eff *
 	}
 	if err != nil {
 		e.log.Warn("skill effect failed", "skill", s.Name, "action", act, "err", err)
+	} else if eff.DurationSeconds > 0 {
+		// Timed effect: schedule the reverse mode so it auto-lifts. Only
+		// reversible actions qualify (kick/notice/topic return ok=false).
+		if modes, arg, ok := reverseEffect(act, offender, eff.Modes); ok {
+			e.scheduleLift(f.channel, modes, arg, eff.DurationSeconds)
+		}
 	}
 	e.publishModeration(ctx, s.Name, string(act), f.channel, offender, reason)
+}
+
+const (
+	liftNS  = "__lifts"
+	liftKey = "pending"
+)
+
+// pendingLift is one scheduled mode reversal: at/after Due (unix seconds),
+// SetMode(Channel, Modes[, Arg]) is issued to undo a timed effect.
+type pendingLift struct {
+	Channel string `json:"c"`
+	Modes   string `json:"m"`
+	Arg     string `json:"a,omitempty"`
+	Due     int64  `json:"d"`
+}
+
+// reverseEffect returns the SetMode arguments that undo a timed effect, and
+// whether the action is reversible at all.
+func reverseEffect(act EffectAction, offender, modes string) (revModes, arg string, ok bool) {
+	switch act {
+	case EffectMute:
+		return "-q", offender, true
+	case EffectBan:
+		return "-b", offender, true
+	case EffectOp:
+		return "-o", offender, true
+	case EffectVoice:
+		return "-v", offender, true
+	case EffectMode:
+		return flipModeSign(modes), "", modes != ""
+	default:
+		return "", "", false
+	}
+}
+
+// flipModeSign turns "+m" into "-m" (and vice versa); a bare mode string is
+// treated as a removal.
+func flipModeSign(m string) string {
+	if m == "" {
+		return m
+	}
+	switch m[0] {
+	case '+':
+		return "-" + m[1:]
+	case '-':
+		return "+" + m[1:]
+	default:
+		return "-" + m
+	}
+}
+
+// ensureLiftsLoaded lazily hydrates the pending-lift set from the Store on
+// first use so restarts resume scheduled reversals. Caller holds liftsMu.
+func (e *Engine) ensureLiftsLoaded() {
+	if e.liftsLoaded {
+		return
+	}
+	e.liftsLoaded = true
+	raw, ok := e.store.Get(liftNS, liftKey)
+	if !ok || raw == "" {
+		return
+	}
+	var ls []pendingLift
+	if err := json.Unmarshal([]byte(raw), &ls); err == nil {
+		e.lifts = ls
+	}
+}
+
+func (e *Engine) scheduleLift(channel, modes, arg string, secs int) {
+	e.liftsMu.Lock()
+	defer e.liftsMu.Unlock()
+	e.ensureLiftsLoaded()
+	e.lifts = append(e.lifts, pendingLift{
+		Channel: channel,
+		Modes:   modes,
+		Arg:     arg,
+		Due:     time.Now().Add(time.Duration(secs) * time.Second).Unix(),
+	})
+	e.persistLifts()
+}
+
+// SweepLifts issues any pending mode reversals whose deadline has passed. The
+// scheduler calls it on every tick, so timed effects auto-lift (within the
+// tick granularity) and survive a restart via the Store.
+func (e *Engine) SweepLifts(now time.Time) {
+	e.liftsMu.Lock()
+	e.ensureLiftsLoaded()
+	if len(e.lifts) == 0 {
+		e.liftsMu.Unlock()
+		return
+	}
+	cutoff := now.Unix()
+	due := make([]pendingLift, 0)
+	keep := make([]pendingLift, 0, len(e.lifts))
+	for _, l := range e.lifts {
+		if l.Due <= cutoff {
+			due = append(due, l)
+		} else {
+			keep = append(keep, l)
+		}
+	}
+	if len(due) == 0 {
+		e.liftsMu.Unlock()
+		return
+	}
+	e.lifts = keep
+	e.persistLifts()
+	e.liftsMu.Unlock()
+
+	if e.actor == nil {
+		return
+	}
+	for _, l := range due {
+		var err error
+		if l.Arg != "" {
+			err = e.actor.SetMode(l.Channel, l.Modes, l.Arg)
+		} else {
+			err = e.actor.SetMode(l.Channel, l.Modes)
+		}
+		if err != nil {
+			e.log.Warn("skill effect lift failed", "channel", l.Channel, "modes", l.Modes, "err", err)
+		}
+	}
+}
+
+// persistLifts writes the pending-lift set to the Store. Caller holds liftsMu.
+func (e *Engine) persistLifts() {
+	b, err := json.Marshal(e.lifts)
+	if err != nil {
+		return
+	}
+	e.store.Set(liftNS, liftKey, string(b), 0)
 }
 
 func (e *Engine) publishModeration(ctx context.Context, skill, action, channel, target, reason string) {

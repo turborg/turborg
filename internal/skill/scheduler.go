@@ -98,6 +98,9 @@ func (s *Scheduler) tick(ctx context.Context, now time.Time) {
 		}
 		s.engine.fire(ctx, sk, f)
 	}
+	// Auto-lift any timed effects whose deadline has passed (mute/ban/mode
+	// with duration_seconds). Runs every tick regardless of due schedules.
+	s.engine.SweepLifts(now)
 }
 
 // advance computes the next due time after now for this schedule.

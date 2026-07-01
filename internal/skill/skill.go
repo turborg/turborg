@@ -135,6 +135,11 @@ type Effect struct {
 	Reason string `json:"reason,omitempty"`
 	// Thresholds maps a verdict severity / flood count onto an action.
 	Thresholds *Thresholds `json:"thresholds,omitempty"`
+	// DurationSeconds, when > 0 and Action is a reversible mode
+	// (mute/ban/mode/op/voice), auto-lifts the applied mode after that many
+	// seconds. The pending lift is persisted via the Store so it survives a
+	// restart. Non-reversible actions (kick/notice/topic) ignore it.
+	DurationSeconds int `json:"duration_seconds,omitempty"`
 }
 
 // Trigger is what makes a skill fire. The JSON tags are used when a Trigger is
