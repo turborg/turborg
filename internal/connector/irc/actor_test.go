@@ -86,3 +86,39 @@ func TestNewActorBindsConnector(t *testing.T) {
 	// Not connected → SendRaw surfaces the connector's "not connected" error.
 	require.Error(t, a.Say("#room", "hi"))
 }
+
+func TestActorSaySplitsMultilineText(t *testing.T) {
+	a, rs := newTestActor()
+	require.NoError(t, a.Say("#room", "line one\nline two\nline three"))
+	assert.Equal(t, []string{
+		"PRIVMSG #room :line one",
+		"PRIVMSG #room :line two",
+		"PRIVMSG #room :line three",
+	}, rs.lines)
+}
+
+func TestActorSaySkipsBlankLinesAndNormalizesCRLF(t *testing.T) {
+	a, rs := newTestActor()
+	require.NoError(t, a.Say("#room", "Top 10 Crypto Prices:\r\n\r\nBTC $65000\nETH $3400"))
+	assert.Equal(t, []string{
+		"PRIVMSG #room :Top 10 Crypto Prices:",
+		"PRIVMSG #room :BTC $65000",
+		"PRIVMSG #room :ETH $3400",
+	}, rs.lines)
+}
+
+func TestActorSayNeutralizesCRLFInjection(t *testing.T) {
+	a, rs := newTestActor()
+	// A newline in user/LLM text must not smuggle a second raw IRC command.
+	require.NoError(t, a.Say("#room", "hi\nQUIT :bye"))
+	assert.Equal(t, []string{
+		"PRIVMSG #room :hi",
+		"PRIVMSG #room :QUIT :bye", // sent as message text, never a bare QUIT
+	}, rs.lines)
+}
+
+func TestActorNoticeSplitsMultilineText(t *testing.T) {
+	a, rs := newTestActor()
+	require.NoError(t, a.Notice("alice", "a\nb"))
+	assert.Equal(t, []string{"NOTICE alice :a", "NOTICE alice :b"}, rs.lines)
+}

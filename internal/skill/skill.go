@@ -154,6 +154,10 @@ type Effect struct {
 type Trigger struct {
 	// Kind selects the trigger family. Empty decodes as KindCommand.
 	Kind TriggerKind `json:"kind,omitempty"`
+	// Command is the bare command word (no prefix) for a KindCommand trigger
+	// when this Trigger is nested in a flow — a flow names its command here.
+	// Skills leave it empty (their command word is the skill Name).
+	Command string `json:"command,omitempty"`
 	// Event is the lifecycle event for KindEvent.
 	Event string `json:"event,omitempty"`
 	// Match is the regex for KindMatch (and the cheap prefilter for an
