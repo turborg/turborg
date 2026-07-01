@@ -15,7 +15,7 @@ func TestTypesCatalogSortedAndComplete(t *testing.T) {
 	for i, nt := range types {
 		names[i] = nt.Name
 	}
-	for _, want := range []string{"set", "if", "switch", "stop", "say", "notice", "effect", "llm", "webhook", "setvar", "getvar"} {
+	for _, want := range []string{"set", "if", "switch", "stop", "say", "notice", "effect", "llm", "webhook", "setvar", "getvar", "incr"} {
 		assert.Contains(t, names, want)
 	}
 	// Sorted by name.
@@ -159,6 +159,18 @@ func TestNodeWebhookAndVars(t *testing.T) {
 	// Default into key for getvar + empty url / nil store no-ops.
 	_, _ = nodeGetvar(context.Background(), Node{Config: map[string]any{"key": "motd"}}, nc)
 	assert.Equal(t, "hello alice", nc.bag["var"])
+
+	// incr persists a monotonic counter (default step 1, or "by") and writes the
+	// new value into the bag; the key template renders against the bag.
+	_, _ = nodeIncr(context.Background(), Node{Config: map[string]any{"key": "score-{user}", "into": "s"}}, nc)
+	assert.Equal(t, "1", nc.bag["s"])
+	_, _ = nodeIncr(context.Background(), Node{Config: map[string]any{"key": "score-{user}", "by": "5", "into": "s"}}, nc)
+	assert.Equal(t, "6", nc.bag["s"])
+	// Default into = the key; empty key and nil store are no-ops.
+	_, _ = nodeIncr(context.Background(), Node{Config: map[string]any{"key": "n"}}, nc)
+	assert.Equal(t, "1", nc.bag["n"])
+	_, _ = nodeIncr(context.Background(), Node{Config: map[string]any{}}, nc)
+	_, _ = nodeIncr(context.Background(), Node{Config: map[string]any{"key": "x"}}, &nodeContext{})
 
 	_, err = nodeWebhook(context.Background(), Node{Config: map[string]any{"url": ""}}, nc)
 	require.NoError(t, err)

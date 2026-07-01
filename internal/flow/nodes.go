@@ -95,6 +95,7 @@ func init() {
 	Register(NodeType{Name: "webhook", Ports: []string{""}, Config: map[string]any{"url": "string", "body": "string"}, Handler: nodeWebhook})
 	Register(NodeType{Name: "setvar", Ports: []string{""}, Config: map[string]any{"key": "string", "value": "string"}, Handler: nodeSetvar})
 	Register(NodeType{Name: "getvar", Ports: []string{""}, Config: map[string]any{"key": "string", "into": "string"}, Handler: nodeGetvar})
+	Register(NodeType{Name: "incr", Ports: []string{""}, Config: map[string]any{"key": "string", "by": "string", "into": "string"}, Handler: nodeIncr})
 }
 
 // cfg reads a string config value, rendered against the bag.
@@ -267,6 +268,37 @@ func nodeGetvar(_ context.Context, n Node, nc *nodeContext) (string, error) {
 		into = "var"
 	}
 	nc.bag[into] = v
+	return "", nil
+}
+
+// nodeIncr atomically-for-this-tenant increments a persisted integer counter
+// (default step 1, or "by") and writes the new value into the bag under "into"
+// (default the key). This is the counter/score/karma primitive that a linear
+// graph can't express with set alone. Backed by the persistent Store, so the
+// tally survives restarts.
+func nodeIncr(_ context.Context, n Node, nc *nodeContext) (string, error) {
+	if nc.store == nil {
+		return "", nil
+	}
+	key := cfg(n, "key", nc.bag)
+	if key == "" {
+		return "", nil
+	}
+	cur, _ := nc.store.Get(nc.flowName, key)
+	base, _ := strconv.Atoi(strings.TrimSpace(cur))
+	by := 1
+	if b := strings.TrimSpace(cfg(n, "by", nc.bag)); b != "" {
+		if v, err := strconv.Atoi(b); err == nil {
+			by = v
+		}
+	}
+	next := strconv.Itoa(base + by)
+	nc.store.Set(nc.flowName, key, next, 0)
+	into := cfg(n, "into", nc.bag)
+	if into == "" {
+		into = key
+	}
+	nc.bag[into] = next
 	return "", nil
 }
 
