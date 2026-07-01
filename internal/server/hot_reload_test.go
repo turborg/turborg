@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/connector/irc"
+	"github.com/turborg/turborg/internal/flow"
+	"github.com/turborg/turborg/internal/runtime"
 	"github.com/turborg/turborg/internal/skill"
 )
 
@@ -181,6 +183,36 @@ func TestReloadCommandsFallsBackWhenNotRunning(t *testing.T) {
 	tn := &Tenant{ID: "t1", log: testLogger()}
 	require.False(t, tn.reloadCommands([]skill.Skill{staticCmd("x", "y")}),
 		"no live agent/connector → reload defers to a restart")
+}
+
+func TestReloadFlowsSwapsInPlace(t *testing.T) {
+	eng := flow.NewEngine(flow.Options{})
+	eng.SetMaxFlows(-1)
+	tn := &Tenant{ID: "t1", log: testLogger(), wiring: &runtime.Wiring{Flows: eng}}
+
+	require.True(t, tn.reloadFlows([]flow.Flow{{
+		Name:    "greet",
+		Trigger: skill.Trigger{Kind: skill.KindEvent, Event: skill.EventUserJoin},
+		Nodes:   []flow.Node{{ID: "s", Type: "say", Config: map[string]any{"text": "hi"}}},
+		Edges:   []flow.Edge{{From: "start", To: "s"}},
+	}}))
+	// A second reload replaces the set in place — no reconnect involved.
+	require.True(t, tn.reloadFlows(nil))
+}
+
+func TestReloadFlowsFallsBackWhenNotRunning(t *testing.T) {
+	tn := &Tenant{ID: "t1", log: testLogger()}
+	require.False(t, tn.reloadFlows([]flow.Flow{}),
+		"no live wiring → reload defers to a restart")
+}
+
+func TestServerAccessorsAndSuspendFallback(t *testing.T) {
+	s := New(nil, testLogger())
+	_ = s.Idents()
+	s.SetLLM(nil)
+	// applySuspend with no live connector defers to a restart.
+	tn := &Tenant{ID: "t1", log: testLogger()}
+	require.False(t, tn.applySuspend(TenantSpec{}))
 }
 
 // TestUpdateCommandsOnlyReloadsWithoutRestart is the no-reconnect deliverable:

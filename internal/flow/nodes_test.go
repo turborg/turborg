@@ -24,6 +24,15 @@ func TestTypesCatalogSortedAndComplete(t *testing.T) {
 	}
 }
 
+func TestWebhookMethod(t *testing.T) {
+	for in, want := range map[string]string{
+		"get": "GET", "GET": "GET", " put ": "PUT", "patch": "PATCH",
+		"delete": "DELETE", "post": "POST", "": "POST", "weird": "POST",
+	} {
+		assert.Equal(t, want, webhookMethod(in), "webhookMethod(%q)", in)
+	}
+}
+
 func TestRenderBag(t *testing.T) {
 	bag := Bag{"user": "alice", "count": 3}
 	assert.Equal(t, "hi alice (3)", renderBag("hi {user} ({count})", bag))
