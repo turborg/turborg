@@ -15,6 +15,7 @@ import (
 
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/connector/irc"
+	"github.com/turborg/turborg/internal/flow"
 	"github.com/turborg/turborg/internal/ident"
 	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/messages"
@@ -665,10 +666,11 @@ func (t *Tenant) update(spec TenantSpec) {
 // applies nothing and returns true (nothing to reconnect for).
 func (t *Tenant) applyLiveUpdate(prev, spec TenantSpec) bool {
 	commandsChanged := !commandSetsEqual(prev.Commands, spec.Commands)
+	flowsChanged := !reflect.DeepEqual(prev.Flows, spec.Flows)
 	ignoresChanged := !reflect.DeepEqual(prev.IgnoredNicks, spec.IgnoredNicks)
 	nickChanged, channelsChanged := ircNickChannelsChanged(prev, spec)
 	suspendChanged := ircSuspendChanged(prev, spec)
-	if !commandsChanged && !ignoresChanged && !nickChanged && !channelsChanged && !suspendChanged {
+	if !commandsChanged && !flowsChanged && !ignoresChanged && !nickChanged && !channelsChanged && !suspendChanged {
 		return true // only the usage baseline moved — nothing to reconnect for
 	}
 	// Apply each changed facet in place. The command set swaps via
@@ -676,12 +678,13 @@ func (t *Tenant) applyLiveUpdate(prev, spec TenantSpec) bool {
 	// channels apply live via NICK / JOIN+PART; the connect/disconnect intent
 	// parks/resumes the upstream link.
 	okCommands := !commandsChanged || t.reloadCommands(spec.Commands)
+	okFlows := !flowsChanged || t.reloadFlows(spec.Flows)
 	okIgnores := !ignoresChanged || t.reloadGuard()
 	okNickChan := (!nickChanged && !channelsChanged) || t.applyNickChannels(spec)
 	okSuspend := !suspendChanged || t.applySuspend(spec)
-	if okCommands && okIgnores && okNickChan && okSuspend {
+	if okCommands && okFlows && okIgnores && okNickChan && okSuspend {
 		t.log.Info("tenant settings reloaded in place",
-			"commands", len(spec.Commands), "ignored", len(spec.IgnoredNicks),
+			"commands", len(spec.Commands), "flows", len(spec.Flows), "ignored", len(spec.IgnoredNicks),
 			"nick_changed", nickChanged, "channels_changed", channelsChanged,
 			"suspend_changed", suspendChanged)
 		return true
@@ -706,6 +709,7 @@ func commandsOnlyChange(a, b TenantSpec) bool {
 // hot-swapped in place, so an ignore edit must not drop the connection.
 func liveUpdatableOnlyChange(a, b TenantSpec) bool {
 	a.Commands, b.Commands = nil, nil
+	a.Flows, b.Flows = nil, nil
 	a.IgnoredNicks, b.IgnoredNicks = nil, nil
 	a.PlanCapabilities = capsWithoutTokenUsage(a.PlanCapabilities)
 	b.PlanCapabilities = capsWithoutTokenUsage(b.PlanCapabilities)
@@ -846,6 +850,21 @@ func (t *Tenant) reloadCommands(defs []skill.Skill) bool {
 	// Same in-place swap the single-instance runtime's refresher uses: command
 	// registry + skill engine + scheduler, all atomic, no reconnect.
 	runtime.ApplySkills(a, wiring, defs, t.llmProvider, owner, platform, t.log)
+	return true
+}
+
+// reloadFlows swaps the live tenant's node-graph flow set in place — the same
+// atomic, no-reconnect ApplyFlows the runtime uses at build time — without
+// touching the connection. Returns false when the tenant isn't running (no live
+// wiring), so the caller falls back to a restart that re-seeds flows at build.
+func (t *Tenant) reloadFlows(flows []flow.Flow) bool {
+	t.mu.Lock()
+	wiring := t.wiring
+	t.mu.Unlock()
+	if wiring == nil {
+		return false
+	}
+	runtime.ApplyFlows(wiring, flows)
 	return true
 }
 
