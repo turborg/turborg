@@ -41,6 +41,9 @@ type Engine struct {
 	maxFlows int
 	events   []compiled
 	matches  []compiled
+	// webhooks indexes inbound-webhook-trigger flows by lowercased name so
+	// FireWebhook can dispatch an external POST in O(1) without leaking the set.
+	webhooks map[string]compiled
 }
 
 // compiled is a runtime-ready flow: the definition plus the compiled match
@@ -121,6 +124,7 @@ func (e *Engine) ReplaceFlows(flows []Flow) {
 	e.mu.RUnlock()
 
 	var events, matches []compiled
+	webhooks := map[string]compiled{}
 	installed := 0
 	for _, f := range flows {
 		if limit != -1 && installed >= limit {
@@ -142,6 +146,14 @@ func (e *Engine) ReplaceFlows(flows []Flow) {
 		case skill.KindEvent:
 			events = append(events, compiled{flow: f, channels: channelSet(f.Trigger.Channels)})
 			installed++
+		case skill.KindWebhook:
+			key := strings.ToLower(strings.TrimSpace(f.Name))
+			if key == "" {
+				e.log.Warn("skipping webhook flow: empty name")
+				continue
+			}
+			webhooks[key] = compiled{flow: f, channels: channelSet(f.Trigger.Channels)}
+			installed++
 		default:
 			// command / schedule flows are not the bus engine's concern.
 		}
@@ -150,7 +162,34 @@ func (e *Engine) ReplaceFlows(flows []Flow) {
 	e.mu.Lock()
 	e.events = events
 	e.matches = matches
+	e.webhooks = webhooks
 	e.mu.Unlock()
+}
+
+// FireWebhook walks the flow whose webhook trigger matches name (case-
+// insensitive), seeding the data bag from bag. It returns true when a matching
+// webhook flow ran, false when no flow carries that name — the ingress handler
+// maps false onto a 404 with no detail so a caller can't enumerate the set. The
+// bag's "channel" is the trigger's first scoped channel when set, else whatever
+// the caller seeded.
+func (e *Engine) FireWebhook(name string, bag map[string]string) bool {
+	e.mu.RLock()
+	c, ok := e.webhooks[strings.ToLower(strings.TrimSpace(name))]
+	e.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	b := Bag{}
+	for k, v := range bag {
+		b[k] = v
+	}
+	if chans := c.flow.Trigger.Channels; len(chans) > 0 {
+		b["channel"] = chans[0]
+	}
+	b["platform"] = e.platform
+	b["owner"] = e.owner
+	e.run(context.Background(), c.flow, b)
+	return true
 }
 
 // validate checks a flow's node types are all registered. An empty graph is

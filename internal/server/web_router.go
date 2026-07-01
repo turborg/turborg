@@ -41,6 +41,16 @@ func (s *Server) serveWebGatewayRouter(ctx context.Context, ln net.Listener) err
 			http.Error(w, "no such tenant", http.StatusNotFound)
 		}
 	})
+	// Inbound-webhook ingress: an external system POSTs to /c/<id>/hook/<name>
+	// to fire that tenant's per-flow webhook trigger. The tenant gateway does the
+	// auth + dispatch; an unknown tenant is a 404 with no detail (never leaks
+	// which ids exist), same as the WS route.
+	mux.HandleFunc("POST /c/{turborg_id}/hook/{name}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("turborg_id")
+		if id == "" || !s.RouteHook(id, w, r) {
+			http.Error(w, "no such tenant", http.StatusNotFound)
+		}
+	})
 
 	srv := &http.Server{
 		Handler:           mux,

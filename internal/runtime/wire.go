@@ -128,6 +128,24 @@ type Wiring struct {
 	Flows     *flow.Engine
 }
 
+// FireWebhook dispatches an inbound webhook (named by the per-flow ingress path,
+// seeded from the decoded request body) to both engines: the node-graph flow
+// engine and the single-shot skill engine. It returns true when either fired a
+// matching webhook trigger, which the gateway ingress handler maps onto a 200;
+// false means no flow or skill carries that name and the handler answers 404
+// with no detail. It is the seam the gateway holds so the ingress route can
+// reach the live engines without importing them.
+func (w *Wiring) FireWebhook(name string, bag map[string]string) bool {
+	if w == nil {
+		return false
+	}
+	// Both engines are consulted (a name could belong to either), so evaluate
+	// each — don't short-circuit — before OR-ing the outcomes.
+	flowFired := w.Flows != nil && w.Flows.FireWebhook(name, bag)
+	skillFired := w.Engine != nil && w.Engine.FireWebhook(name, bag)
+	return flowFired || skillFired
+}
+
 // WireCommon installs the connector-agnostic agent wiring shared by the
 // single-instance (cmd/turborg) and pooled (internal/server) runtimes onto an
 // already-constructed agent + IRC connector: client limits, outbound throttle,

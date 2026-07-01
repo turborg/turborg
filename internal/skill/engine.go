@@ -58,7 +58,10 @@ type Engine struct {
 	maxSkills int
 	events    []compiled
 	matches   []compiled
-	bus       *agent.EventBus
+	// webhooks indexes inbound-webhook-trigger skills by lowercased name so
+	// FireWebhook can dispatch an external POST in O(1) without leaking the set.
+	webhooks map[string]compiled
+	bus      *agent.EventBus
 
 	// Timed-effect reversals: applied modes that auto-lift after a duration.
 	// Persisted via the Store so they resume across restarts.
@@ -146,6 +149,7 @@ func (e *Engine) SetMaxSkills(n int) {
 // The MaxSkills cap is enforced as a safety net.
 func (e *Engine) ReplaceSkills(skills []Skill) {
 	var events, matches []compiled
+	webhooks := map[string]compiled{}
 	e.mu.RLock()
 	limit := e.maxSkills
 	e.mu.RUnlock()
@@ -171,6 +175,14 @@ func (e *Engine) ReplaceSkills(skills []Skill) {
 			}
 			events = append(events, compiled{skill: s, channels: channelSet(s.Trigger.Channels)})
 			installed++
+		case KindWebhook:
+			key := strings.ToLower(strings.TrimSpace(s.Name))
+			if key == "" {
+				e.log.Warn("skipping webhook skill: empty name")
+				continue
+			}
+			webhooks[key] = compiled{skill: s, channels: channelSet(s.Trigger.Channels)}
+			installed++
 		default:
 			// command / schedule kinds are not the Engine's concern.
 		}
@@ -179,7 +191,48 @@ func (e *Engine) ReplaceSkills(skills []Skill) {
 	e.mu.Lock()
 	e.events = events
 	e.matches = matches
+	e.webhooks = webhooks
 	e.mu.Unlock()
+}
+
+// FireWebhook dispatches an inbound webhook to the skill whose webhook trigger
+// matches name (case-insensitive), seeding the render context from bag. It
+// returns true when a matching webhook skill fired, false when no skill carries
+// that name — the ingress handler maps false onto a 404 with no detail, so a
+// caller can't enumerate the installed set. The firing channel is the trigger's
+// first scoped channel when set, else the bag's "channel" field.
+func (e *Engine) FireWebhook(name string, bag map[string]string) bool {
+	e.mu.RLock()
+	c, ok := e.webhooks[strings.ToLower(strings.TrimSpace(name))]
+	e.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	f := fieldsFromBag(bag)
+	if chans := c.skill.Trigger.Channels; len(chans) > 0 {
+		f.channel = chans[0]
+	}
+	f.platform = e.platform
+	f.owner = e.owner
+	e.fire(context.Background(), c.skill, f)
+	return true
+}
+
+// fieldsFromBag maps a flat webhook bag onto the render fields a skill template
+// can reference. Only the recognized keys are lifted; the full body remains
+// available to callers that seeded it into the bag.
+func fieldsFromBag(bag map[string]string) renderFields {
+	return renderFields{
+		user:    bag["user"],
+		channel: bag["channel"],
+		text:    bag["text"],
+		target:  bag["target"],
+		reason:  bag["reason"],
+		topic:   bag["topic"],
+		modes:   bag["modes"],
+		oldNick: bag["old"],
+		newNick: bag["new"],
+	}
 }
 
 // Subscribe wires the engine onto the agent's EventBus: inbound messages drive

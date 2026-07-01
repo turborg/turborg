@@ -84,6 +84,11 @@ const (
 	KindMatch TriggerKind = "match"
 	// KindSchedule fires on the cadence named by Trigger.Schedule.
 	KindSchedule TriggerKind = "schedule"
+	// KindWebhook fires when an external system POSTs to the skill's inbound
+	// webhook URL. The decoded request body seeds the render/data bag. It is the
+	// inbound counterpart to the outbound TypeWebhook action: here turborg is the
+	// action sink an external event drives, rather than the trigger source.
+	KindWebhook TriggerKind = "webhook"
 )
 
 // Event names valid for an event-trigger skill. They mirror the agent's

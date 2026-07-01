@@ -266,7 +266,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	)
 
 	if s.GatewayEnabled() {
-		gw, err := buildGateway(s, ircConn, a, log, notifier, store, provider)
+		gw, err := buildGateway(s, ircConn, a, log, notifier, store, provider, wiring.FireWebhook)
 		if err != nil {
 			return nil, err
 		}
@@ -350,7 +350,7 @@ func parseFlows(raw string) ([]flow.Flow, error) {
 	return flows, nil
 }
 
-func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, log *slog.Logger, notifier *activity.Notifier, store messages.Store, llmProvider llm.Provider) (*web.Gateway, error) {
+func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, log *slog.Logger, notifier *activity.Notifier, store messages.Store, llmProvider llm.Provider, webhookFire func(name string, bag map[string]string) bool) (*web.Gateway, error) {
 	verifier, err := web.NewStaticPasswordVerifier(s.GatewayPassword)
 	if err != nil {
 		return nil, fmt.Errorf("runtime: gateway verifier: %w", err)
@@ -373,6 +373,7 @@ func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, lo
 		MessageStore:           store,
 		LLMProvider:            llmProvider,
 		TBSummarizeMaxMessages: s.TBSummarizeMaxMessages,
+		WebhookFire:            webhookFire,
 	}
 	if notifier.Enabled() {
 		opts.OnActivity = notifier.Hook

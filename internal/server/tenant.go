@@ -465,7 +465,7 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 						t.activity.Mark(t.ID)
 					}
 				}
-				gw, err := buildTenantGateway(conn, gatewayToken, t.log, store, budgetedProvider, tbCap, gwActivity)
+				gw, err := buildTenantGateway(conn, gatewayToken, t.log, store, budgetedProvider, tbCap, gwActivity, wiring.FireWebhook)
 				if err != nil {
 					t.log.Error("skipping web gateway", "err", err)
 					continue
@@ -926,6 +926,25 @@ func (t *Tenant) ServeWS(w http.ResponseWriter, r *http.Request) {
 	// The shared mux routes on `/ws`; rewrite the path the router matched
 	// (`/c/<id>`) to it. Query (the token) is untouched.
 	r.URL.Path = "/ws"
+	gw.Handler().ServeHTTP(w, r)
+}
+
+// ServeHook hands one inbound-webhook request (POST /c/<id>/hook/<name>) to this
+// tenant's live web gateway. The web router calls it after resolving the tenant
+// from the request path. Returns 404 when the tenant has no running gateway
+// (between runs / quarantined / no web shell configured). The gateway's shared
+// handler does the token auth, body cap, and trigger dispatch; the `{name}` path
+// segment the router matched is preserved by rewriting to the gateway's own
+// `/hook/<name>` route so PathValue resolves there.
+func (t *Tenant) ServeHook(w http.ResponseWriter, r *http.Request) {
+	t.mu.Lock()
+	gw := t.gateway
+	t.mu.Unlock()
+	if gw == nil {
+		http.Error(w, "no web shell for tenant", http.StatusNotFound)
+		return
+	}
+	r.URL.Path = "/hook/" + r.PathValue("name")
 	gw.Handler().ServeHTTP(w, r)
 }
 

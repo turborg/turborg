@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +34,15 @@ const (
 	gatewayReadHeaderTimeout = 10 * time.Second
 	gatewayWriteTimeout      = 30 * time.Second
 	gatewayIdleTimeout       = 60 * time.Second
+)
+
+const (
+	// hookMaxBodyBytes bounds an inbound webhook body so a large or streaming
+	// POST can't exhaust memory. 64 KiB is generous for a JSON event envelope.
+	hookMaxBodyBytes = 64 << 10
+	// hookReadTimeout bounds how long the handler waits on the request body so a
+	// slow sender can't pin the connection.
+	hookReadTimeout = 5 * time.Second
 )
 
 // activityHeartbeatInterval is how often an engaged web session
@@ -112,6 +123,14 @@ type Options struct {
 	// TBSummarizeMaxMessages caps how many messages /tb summarize can
 	// consume per invocation. 0 = feature disabled.
 	TBSummarizeMaxMessages int
+
+	// WebhookFire dispatches an authenticated inbound webhook (POST /hook/{name})
+	// to the trigger machinery. name is the per-flow path segment; bag is the
+	// flat string data bag decoded from the request body. It returns true when a
+	// matching webhook trigger fired. Nil disables the /hook ingress route (every
+	// request answers 404), so a deployment without trigger wiring exposes no
+	// ingress surface.
+	WebhookFire func(name string, bag map[string]string) bool
 }
 
 // Gateway is an HTTP server exposing /ws (WebSocket), /health, /metrics,
@@ -243,6 +262,7 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("/ws", g.handleWS)
 	mux.HandleFunc("/health", g.handleHealth)
 	mux.HandleFunc("/metrics", g.handleMetrics)
+	mux.HandleFunc("POST /hook/{name}", g.handleHook)
 	if staticSub, err := fs.Sub(staticFS, "static"); err == nil {
 		mux.Handle("/", http.FileServer(http.FS(staticSub)))
 	}
@@ -473,6 +493,128 @@ func (g *Gateway) sendInitialConnectorState(ctx context.Context, c *client) {
 		"severity":      irc.SeverityForUpstreamState(state),
 		"server_reason": machine.ServerReason(),
 	})
+}
+
+// handleHook is the inbound-webhook ingress: an external system POSTs a JSON
+// body to POST /hook/{name} to fire the flow/skill whose webhook trigger carries
+// that name. It authenticates every request against the same verifier the WS
+// surface uses (Authorization: Bearer <token> or ?token=), rejecting an
+// unauthenticated caller with 401 and no body detail before any body is read or
+// any trigger is consulted. A missing/unknown name — or a deployment with no
+// trigger wiring — answers 404 with no detail so a caller can neither enumerate
+// installed triggers nor probe other tenants. The body is size-capped and read
+// under a short deadline.
+func (g *Gateway) handleHook(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	token := extractToken(r)
+
+	// Brute-force gate — identical to the WS path so both surfaces share one
+	// lockout bucket per IP.
+	if g.opts.RateLimiter != nil && ip != "" && g.opts.RateLimiter.IsLocked(ip) {
+		http.Error(w, "Too many attempts", http.StatusTooManyRequests)
+		return
+	}
+	if !g.opts.Verifier.Verify(token) {
+		if g.opts.RateLimiter != nil && ip != "" {
+			g.opts.RateLimiter.RecordFailure(ip)
+		}
+		g.metMu.Lock()
+		g.metrics.authFailures++
+		g.metMu.Unlock()
+		g.log.Info("web hook auth fail", "ip", ip)
+		http.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+	if g.opts.RateLimiter != nil && ip != "" {
+		g.opts.RateLimiter.RecordSuccess(ip)
+	}
+
+	// No wiring or no name → 404 with no detail. Same opaque answer as an
+	// unknown trigger, so an authenticated caller can't distinguish "no ingress
+	// configured" from "name not found".
+	if g.opts.WebhookFire == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	name := r.PathValue("name")
+	if name == "" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	// Bound the body and read it under a short deadline. LimitReader takes one
+	// byte past the cap so an over-cap body is detectable rather than silently
+	// truncated into a valid-looking payload.
+	if rc := http.NewResponseController(w); rc != nil {
+		_ = rc.SetReadDeadline(time.Now().Add(hookReadTimeout))
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, hookMaxBodyBytes+1))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if len(body) > hookMaxBodyBytes {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	if !g.opts.WebhookFire(name, webhookBag(body)) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	// Additive audit signal — one WEBHOOK_RECEIVED per fired trigger. Carries
+	// only the trigger name (no body), so the audit trail can't leak payloads.
+	g.mu.Lock()
+	bus := g.bus
+	g.mu.Unlock()
+	if bus != nil {
+		bus.Publish(context.Background(), &agent.Event{
+			Type:   agent.EventWebhookReceived,
+			Time:   time.Now(),
+			Fields: map[string]any{"name": name},
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+// webhookBag flattens a decoded webhook JSON body into the string data bag the
+// trigger machinery consumes: each top-level scalar (string/number/bool/null)
+// becomes a string var, the raw JSON is preserved under "body", and {user} is
+// seeded from the first present user/from/sender field. A body that isn't a JSON
+// object still yields a bag with the raw "body" so a flow can parse it itself.
+func webhookBag(raw []byte) map[string]string {
+	bag := map[string]string{"body": string(raw)}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return bag
+	}
+	for k, v := range obj {
+		switch val := v.(type) {
+		case string:
+			bag[k] = val
+		case float64:
+			bag[k] = strconv.FormatFloat(val, 'f', -1, 64)
+		case bool:
+			bag[k] = strconv.FormatBool(val)
+		case nil:
+			bag[k] = ""
+		default:
+			// Nested object/array: not a scalar var, but still reachable via
+			// the raw "body" for a flow that wants to parse it.
+		}
+	}
+	for _, k := range []string{"user", "from", "sender"} {
+		if v := bag[k]; v != "" {
+			bag["user"] = v
+			break
+		}
+	}
+	return bag
 }
 
 func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
