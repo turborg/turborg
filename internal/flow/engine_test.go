@@ -247,3 +247,71 @@ func TestEngineWebhookFlowEndToEnd(t *testing.T) {
 	bus.Publish(context.Background(), &agent.Event{Type: agent.EventUserJoin, Fields: map[string]any{"channel": "#r", "nick": "newbie"}})
 	assert.Contains(t, string(got), `"user":"newbie"`)
 }
+
+// commandFlow: a !cryptoprice command trigger that says a line.
+func commandFlow() Flow {
+	return Flow{
+		Name:    "Crypto price",
+		Trigger: skill.Trigger{Kind: skill.KindCommand, Command: "cryptoprice"},
+		Nodes: []Node{
+			{ID: "say", Type: "say", Config: map[string]any{"channel": "{channel}", "text": "top prices for {user}"}},
+		},
+		Edges: []Edge{{From: "start", To: "say"}},
+	}
+}
+
+func TestEngineCommandDispatch(t *testing.T) {
+	act := &fakeActor{}
+	e, bus := newEngine(t, Options{Actor: act, Prefix: "!"})
+	e.ReplaceFlows([]Flow{commandFlow()})
+	bus.Publish(context.Background(), msgEvent("#r", "alice", "!cryptoprice"))
+	assert.Equal(t, []string{"say #r top prices for alice"}, act.snapshot())
+}
+
+func TestEngineCommandArgsAndCase(t *testing.T) {
+	act := &fakeActor{}
+	e, bus := newEngine(t, Options{Actor: act, Prefix: "!"})
+	e.ReplaceFlows([]Flow{{
+		Name:    "echo",
+		Trigger: skill.Trigger{Kind: skill.KindCommand, Command: "echo"},
+		Nodes:   []Node{{ID: "s", Type: "say", Config: map[string]any{"channel": "{channel}", "text": "got: {args}"}}},
+		Edges:   []Edge{{From: "start", To: "s"}},
+	}})
+	// Prefix + mixed case + trailing args; word match is case-insensitive.
+	bus.Publish(context.Background(), msgEvent("#r", "bob", "!ECHO hello world"))
+	assert.Equal(t, []string{"say #r got: hello world"}, act.snapshot())
+}
+
+func TestEngineCommandNoPrefixIgnored(t *testing.T) {
+	act := &fakeActor{}
+	e, bus := newEngine(t, Options{Actor: act, Prefix: "!"})
+	e.ReplaceFlows([]Flow{commandFlow()})
+	// Same word without the prefix must not fire the command flow.
+	bus.Publish(context.Background(), msgEvent("#r", "alice", "cryptoprice"))
+	assert.Empty(t, act.snapshot())
+}
+
+func TestEngineCommandChannelScope(t *testing.T) {
+	act := &fakeActor{}
+	e, bus := newEngine(t, Options{Actor: act, Prefix: "!"})
+	scoped := commandFlow()
+	scoped.Trigger.Channels = []string{"#allowed"}
+	e.ReplaceFlows([]Flow{scoped})
+	bus.Publish(context.Background(), msgEvent("#other", "alice", "!cryptoprice"))
+	assert.Empty(t, act.snapshot(), "command flow scoped to another channel does not fire")
+	bus.Publish(context.Background(), msgEvent("#allowed", "alice", "!cryptoprice"))
+	assert.Equal(t, []string{"say #allowed top prices for alice"}, act.snapshot())
+}
+
+func TestEngineCommandEmptyWordSkipped(t *testing.T) {
+	act := &fakeActor{}
+	e, bus := newEngine(t, Options{Actor: act, Prefix: "!"})
+	e.ReplaceFlows([]Flow{{
+		Name:    "no-word",
+		Trigger: skill.Trigger{Kind: skill.KindCommand, Command: "  "},
+		Nodes:   []Node{{ID: "s", Type: "say", Config: map[string]any{"channel": "{channel}", "text": "x"}}},
+		Edges:   []Edge{{From: "start", To: "s"}},
+	}})
+	bus.Publish(context.Background(), msgEvent("#r", "alice", "! "))
+	assert.Empty(t, act.snapshot())
+}
