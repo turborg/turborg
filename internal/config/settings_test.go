@@ -81,6 +81,14 @@ func TestLoadRejectsMalformedTypedEnv(t *testing.T) {
 	t.Setenv("TURBORG_GATEWAY_PORT", "not-a-number")
 	_, err := config.Load()
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parsing")
+}
+
+func TestLoadRejectsMalformedLLMTokensEnv(t *testing.T) {
+	t.Setenv("TURBORG_LLM_INPUT_TOKENS_PER_DAY", "not-a-number")
+	_, err := config.Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parsing")
 }
 
 func TestLoadRejectsCSVWithStrayWhitespaceUnknownEntries(t *testing.T) {
