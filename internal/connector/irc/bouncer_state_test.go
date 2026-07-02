@@ -273,6 +273,12 @@ func TestBouncerSkipsIntraDetachedTransitions(t *testing.T) {
 	machine.Transition(irc.UpstreamStateRegistered)
 
 	conn, r := authBouncerClient(t, addr)
+	// sendWelcome runs async on the bouncer's handleClient goroutine, and
+	// surfaceStateToClient fires right after it. Drain the welcome flow
+	// while upstream is still Registered so surface reads that state (and
+	// sends nothing) instead of racing the transitions below and injecting
+	// its own "Currently connecting" NOTICE * that the scan would pick up.
+	drainBuffered(t, conn, r)
 	machine.Transition(irc.UpstreamStateDisconnectedTransient,
 		irc.WithServerReason("EOF"))
 	_ = readUntilContains(r, conn, "Currently disconnected", time.Second)

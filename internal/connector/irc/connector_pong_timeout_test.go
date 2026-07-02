@@ -70,8 +70,16 @@ func TestPongTimeoutTransitionsTransient(t *testing.T) {
 }
 
 // TestPongAckResetsLedger: server echoes PONGs back so every PING is
-// matched within the timeout window. Run for 3x PongTimeout and assert
-// the connector stays Registered (no transient transition emitted).
+// matched within the timeout window. Assert the connector stays
+// Registered (no transient transition emitted).
+//
+// PongTimeout is held well above the worst-case localhost PONG
+// round-trip under a loaded -race runner (goroutine wakeups + GC pauses
+// can add tens of ms), so a healthy session never trips a false
+// transient. The soak window is kept longer than PongTimeout so the
+// test stays non-vacuous: had acks been broken, the first unacked PING
+// would trip the watchdog (~ClientPingInterval + PongTimeout) well
+// inside the window.
 func TestPongAckResetsLedger(t *testing.T) {
 	fs := fakeirc.New(t, fakeirc.WithPongResponses(true))
 	defer fs.Close()
@@ -82,7 +90,7 @@ func TestPongAckResetsLedger(t *testing.T) {
 		Nick:               "turborg",
 		Channels:           []string{"#test"},
 		ClientPingInterval: 50 * time.Millisecond,
-		PongTimeout:        30 * time.Millisecond,
+		PongTimeout:        200 * time.Millisecond,
 		ReadIdleTimeout:    10 * time.Second,
 	}, nil, nil)
 
@@ -110,9 +118,10 @@ func TestPongAckResetsLedger(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- a.Run(ctx) }()
 
-	// Hold the session for several ping cycles. Acks should keep the
-	// ledger drained continuously — no transient transition.
-	time.Sleep(300 * time.Millisecond)
+	// Hold the session for several ping cycles, longer than PongTimeout so
+	// a broken-ack regression would surface a transient inside the window.
+	// Acks should keep the ledger drained continuously — no transition.
+	time.Sleep(700 * time.Millisecond)
 
 	mu.Lock()
 	gotRegistered := registeredOnce
