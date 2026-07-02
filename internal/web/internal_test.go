@@ -3,10 +3,12 @@ package web
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -96,6 +98,48 @@ func TestMapCopyIndependentOfSource(t *testing.T) {
 	assert.Equal(t, 1, src["a"], "mutating the copy must not bleed into the source")
 	assert.Equal(t, 99, dst["a"])
 	assert.Equal(t, "two", dst["b"])
+}
+
+// TestSendToRemovesClientOnWriteError drives sendTo's error branch
+// deterministically: the client's underlying conn is closed before the
+// write, so c.conn.Write returns an error and the client must be dropped
+// from the gateway's set. The integration variant races on client-side
+// close timing; this white-box test forces the branch every run.
+func TestSendToRemovesClientOnWriteError(t *testing.T) {
+	// Stand up a trivial WS endpoint so we can obtain a real server-side
+	// *websocket.Conn, then close it to guarantee the next write fails.
+	connCh := make(chan *websocket.Conn, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		connCh <- c
+	}))
+	defer srv.Close()
+
+	url := "ws" + srv.URL[len("http"):]
+	dialConn, _, err := websocket.Dial(context.Background(), url, nil)
+	require.NoError(t, err)
+	defer dialConn.CloseNow()
+
+	srvConn := <-connCh
+	require.NoError(t, srvConn.CloseNow()) // force subsequent Write to fail
+
+	c := &client{conn: srvConn, addr: "test"}
+	g := &Gateway{clients: map[*client]struct{}{c: {}}}
+
+	g.sendTo(context.Background(), c, map[string]any{"op": "ping"})
+
+	g.mu.Lock()
+	_, present := g.clients[c]
+	g.mu.Unlock()
+	assert.False(t, present, "client with a broken write must be removed")
+
+	g.metMu.Lock()
+	forwarded := g.metrics.messagesForwarded
+	g.metMu.Unlock()
+	assert.Equal(t, uint64(1), forwarded, "a write attempt still counts as forwarded")
 }
 
 func TestStartsWithChannelSigil(t *testing.T) {
