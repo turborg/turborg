@@ -7,16 +7,16 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/turborg/turborg/internal/agent"
-	"github.com/turborg/turborg/internal/commands"
 	"github.com/turborg/turborg/internal/connector/irc"
 	"github.com/turborg/turborg/internal/messages"
+	"github.com/turborg/turborg/internal/skill"
 )
 
 // newIRCTenant builds a Tenant whose spec carries one IRC connector with the
 // given extra config keys merged in. No control plane / gateway token, so
 // buildConnectors wires only the connector + shared agent wiring. cmds is the
 // tenant's data-driven command set (with an unrestricted cap for the tests).
-func newIRCTenant(configOverrides map[string]any, caps *PlanCapabilities, cmds ...commands.Definition) *Tenant {
+func newIRCTenant(configOverrides map[string]any, caps *PlanCapabilities, cmds ...skill.Skill) *Tenant {
 	cfg := map[string]any{"network": "irc.example:6697", "nick": "bot"}
 	for k, v := range configOverrides {
 		cfg[k] = v
@@ -45,7 +45,7 @@ func TestBuildConnectorsWiresCommands(t *testing.T) {
 	tn := newIRCTenant(
 		map[string]any{"owner_mode": "self"},
 		&PlanCapabilities{MaxChannels: 3},
-		commands.Definition{Name: "rules", Type: commands.TypeStatic, Template: "be nice", Access: commands.AccessEveryone},
+		skill.Command("rules", skill.TypeStatic, "be nice", skill.AccessEveryone),
 	)
 	a := agent.NewWithPrefix(tn.log, "!")
 	tn.buildConnectors(a)
@@ -64,7 +64,7 @@ func TestBuildConnectorsWiresCommands(t *testing.T) {
 func TestBuildConnectorsOwnerGuardFromConfig(t *testing.T) {
 	tn := newIRCTenant(
 		map[string]any{"owner_mode": "self"}, nil,
-		commands.Definition{Name: "secret", Type: commands.TypeStatic, Template: "shh", Access: commands.AccessOwner},
+		skill.Command("secret", skill.TypeStatic, "shh", skill.AccessOwner),
 	)
 	a := agent.NewWithPrefix(tn.log, "!")
 	tn.buildConnectors(a)
@@ -86,7 +86,7 @@ func TestBuildConnectorsOwnerGuardFromConfig(t *testing.T) {
 func TestBuildConnectorsOwnerGuardDefaultDenies(t *testing.T) {
 	tn := newIRCTenant(
 		nil, nil,
-		commands.Definition{Name: "secret", Type: commands.TypeStatic, Template: "shh", Access: commands.AccessOwner},
+		skill.Command("secret", skill.TypeStatic, "shh", skill.AccessOwner),
 	)
 	a := agent.NewWithPrefix(tn.log, "!")
 	tn.buildConnectors(a)
