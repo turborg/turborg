@@ -241,6 +241,22 @@ func (s *Server) RouteWS(turborgID string, w http.ResponseWriter, r *http.Reques
 	return true
 }
 
+// RouteHook hands one inbound-webhook request (POST /c/<id>/hook/<name>) to the
+// named tenant's web gateway. Returns false (and does not touch w) when no such
+// tenant is attached, so the router can answer 404 without revealing whether the
+// id exists. The gateway does the auth + trigger dispatch (and the 404 on a
+// between-runs tenant with no live gateway).
+func (s *Server) RouteHook(turborgID string, w http.ResponseWriter, r *http.Request) bool {
+	s.mu.Lock()
+	t, ok := s.tenants[turborgID]
+	s.mu.Unlock()
+	if !ok {
+		return false
+	}
+	t.ServeHook(w, r)
+	return true
+}
+
 // Status returns a tenant's supervision phase, and whether it is attached.
 func (s *Server) Status(id string) (TenantStatus, bool) {
 	s.mu.Lock()

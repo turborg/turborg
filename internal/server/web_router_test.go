@@ -31,7 +31,7 @@ func liveGatewayTenant(t *testing.T, id, token string) *Tenant {
 		Username: "bot",
 		RealName: "pooled tenant",
 	}, testLogger(), bus)
-	gw, err := buildTenantGateway(conn, token, testLogger(), nil, nil, 0, nil)
+	gw, err := buildTenantGateway(conn, token, testLogger(), nil, nil, 0, nil, nil)
 	require.NoError(t, err)
 	gw.Subscribe(bus)
 	t.Cleanup(gw.Stop)
@@ -144,7 +144,7 @@ func TestWebGatewayRouterUpgradeAndAuth(t *testing.T) {
 // the guard is the StaticPasswordVerifier's, so prove it here.
 func TestBuildTenantGatewayEmptyToken(t *testing.T) {
 	conn := irc.New(&irc.Settings{Hostname: "127.0.0.1", Port: 6667, Nick: "bot"}, testLogger(), nil)
-	_, err := buildTenantGateway(conn, "", testLogger(), nil, nil, 0, nil)
+	_, err := buildTenantGateway(conn, "", testLogger(), nil, nil, 0, nil, nil)
 	require.Error(t, err)
 }
 

@@ -32,7 +32,7 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/turborg/turborg/internal/commands"
+	"github.com/turborg/turborg/internal/skill"
 )
 
 const (
@@ -44,7 +44,7 @@ const (
 // Apply installs a new command set on the live agent. The runtime supplies a
 // closure that rebuilds the handlers (with the agent's provider + owner-trust)
 // and swaps them via CommandRegistry.ReplaceDynamic.
-type Apply func(defs []commands.Definition)
+type Apply func(defs []skill.Skill)
 
 // Refresher periodically pulls the tenant's command set and applies changes.
 type Refresher struct {
@@ -55,7 +55,7 @@ type Refresher struct {
 	client   *http.Client
 	log      *slog.Logger
 
-	last     []commands.Definition
+	last     []skill.Skill
 	haveLast bool
 }
 
@@ -122,7 +122,7 @@ func (r *Refresher) refreshOnce(ctx context.Context) {
 	r.log.Info("commands reloaded in place", "commands", len(defs))
 }
 
-func (r *Refresher) fetch(ctx context.Context) ([]commands.Definition, error) {
+func (r *Refresher) fetch(ctx context.Context) ([]skill.Skill, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -138,7 +138,7 @@ func (r *Refresher) fetch(ctx context.Context) ([]commands.Definition, error) {
 		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 
-	var defs []commands.Definition
+	var defs []skill.Skill
 	if err := json.NewDecoder(resp.Body).Decode(&defs); err != nil {
 		return nil, fmt.Errorf("decode body: %w", err)
 	}

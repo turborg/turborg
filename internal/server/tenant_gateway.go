@@ -30,7 +30,7 @@ const (
 // No Host/Port: the pooled gateway never binds its own listener — the web
 // router serves the shared Handler() per request. No MessageStore: durable
 // pooled scrollback is a follow-up; live streaming works without it.
-func buildTenantGateway(bridge *irc.Connector, token string, log *slog.Logger, store messages.Store, llmProvider llm.Provider, tbSummarizeCap int, onActivity func(reason string)) (*web.Gateway, error) {
+func buildTenantGateway(bridge *irc.Connector, token string, log *slog.Logger, store messages.Store, llmProvider llm.Provider, tbSummarizeCap int, onActivity func(reason string), webhookFire func(name string, bag map[string]string) bool) (*web.Gateway, error) {
 	verifier, err := web.NewStaticPasswordVerifier(token)
 	if err != nil {
 		return nil, fmt.Errorf("gateway verifier: %w", err)
@@ -50,6 +50,9 @@ func buildTenantGateway(bridge *irc.Connector, token string, log *slog.Logger, s
 		// in the pool's coalescing aggregator (same sink the bouncer attach
 		// hook uses) — engaged web session / owner /tb keep it alive.
 		OnActivity: onActivity,
+		// Inbound-webhook ingress: POST /c/<id>/hook/<name> dispatches to this
+		// tenant's flow/skill engines through the live wiring.
+		WebhookFire: webhookFire,
 	})
 	if err != nil {
 		return nil, err

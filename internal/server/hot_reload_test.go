@@ -9,12 +9,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/turborg/turborg/internal/agent"
-	"github.com/turborg/turborg/internal/commands"
 	"github.com/turborg/turborg/internal/connector/irc"
+	"github.com/turborg/turborg/internal/flow"
+	"github.com/turborg/turborg/internal/runtime"
+	"github.com/turborg/turborg/internal/skill"
 )
 
-func staticCmd(name, tmpl string) commands.Definition {
-	return commands.Definition{Name: name, Type: commands.TypeStatic, Template: tmpl, Access: commands.AccessEveryone}
+func staticCmd(name, tmpl string) skill.Skill {
+	return skill.Command(name, skill.TypeStatic, tmpl, skill.AccessEveryone)
 }
 
 func specWithChannel(id, channel string) TenantSpec {
@@ -115,7 +117,7 @@ func TestIdenticalUpsertDoesNotRestart(t *testing.T) {
 func TestCommandsOnlyChange(t *testing.T) {
 	base := specWithChannel("x", "#one")
 	withCmds := specWithChannel("x", "#one")
-	withCmds.Commands = []commands.Definition{staticCmd("a", "x")}
+	withCmds.Commands = []skill.Skill{staticCmd("a", "x")}
 	require.True(t, commandsOnlyChange(base, withCmds),
 		"specs differing only in their command set is a commands-only change")
 
@@ -168,19 +170,49 @@ func TestReloadCommandsSwapsInPlace(t *testing.T) {
 		ircConn:  conn,
 	}
 
-	require.True(t, tn.reloadCommands([]commands.Definition{staticCmd("rules", "be nice")}))
+	require.True(t, tn.reloadCommands([]skill.Skill{staticCmd("rules", "be nice")}))
 	require.Contains(t, a.Commands.Names(), "rules")
 
 	// A second reload fully replaces the prior set — no reconnect involved.
-	require.True(t, tn.reloadCommands([]commands.Definition{staticCmd("hi", "yo")}))
+	require.True(t, tn.reloadCommands([]skill.Skill{staticCmd("hi", "yo")}))
 	require.NotContains(t, a.Commands.Names(), "rules")
 	require.Contains(t, a.Commands.Names(), "hi")
 }
 
 func TestReloadCommandsFallsBackWhenNotRunning(t *testing.T) {
 	tn := &Tenant{ID: "t1", log: testLogger()}
-	require.False(t, tn.reloadCommands([]commands.Definition{staticCmd("x", "y")}),
+	require.False(t, tn.reloadCommands([]skill.Skill{staticCmd("x", "y")}),
 		"no live agent/connector → reload defers to a restart")
+}
+
+func TestReloadFlowsSwapsInPlace(t *testing.T) {
+	eng := flow.NewEngine(flow.Options{})
+	eng.SetMaxFlows(-1)
+	tn := &Tenant{ID: "t1", log: testLogger(), wiring: &runtime.Wiring{Flows: eng}}
+
+	require.True(t, tn.reloadFlows([]flow.Flow{{
+		Name:    "greet",
+		Trigger: skill.Trigger{Kind: skill.KindEvent, Event: skill.EventUserJoin},
+		Nodes:   []flow.Node{{ID: "s", Type: "say", Config: map[string]any{"text": "hi"}}},
+		Edges:   []flow.Edge{{From: "start", To: "s"}},
+	}}))
+	// A second reload replaces the set in place — no reconnect involved.
+	require.True(t, tn.reloadFlows(nil))
+}
+
+func TestReloadFlowsFallsBackWhenNotRunning(t *testing.T) {
+	tn := &Tenant{ID: "t1", log: testLogger()}
+	require.False(t, tn.reloadFlows([]flow.Flow{}),
+		"no live wiring → reload defers to a restart")
+}
+
+func TestServerAccessorsAndSuspendFallback(t *testing.T) {
+	s := New(nil, testLogger())
+	_ = s.Idents()
+	s.SetLLM(nil)
+	// applySuspend with no live connector defers to a restart.
+	tn := &Tenant{ID: "t1", log: testLogger()}
+	require.False(t, tn.applySuspend(TenantSpec{}))
 }
 
 // TestUpdateCommandsOnlyReloadsWithoutRestart is the no-reconnect deliverable:
@@ -228,7 +260,7 @@ func TestUpdateCommandsOnlyReloadsWithoutRestart(t *testing.T) {
 
 	// Command-only upsert: must reload in place, not restart.
 	cmdSpec := base
-	cmdSpec.Commands = []commands.Definition{staticCmd("rules", "be nice")}
+	cmdSpec.Commands = []skill.Skill{staticCmd("rules", "be nice")}
 	events <- TenantEvent{Kind: TenantUpserted, Spec: cmdSpec}
 
 	require.Eventually(t, func() bool {
@@ -369,7 +401,7 @@ func TestReloadGuardSwapsIgnoreInPlace(t *testing.T) {
 		agentRef: a,
 		ircConn:  conn,
 	}
-	require.True(t, tn.reloadCommands([]commands.Definition{staticCmd("ping", "pong")}))
+	require.True(t, tn.reloadCommands([]skill.Skill{staticCmd("ping", "pong")}))
 
 	ctx := context.Background()
 	send := func(sender string) bool {

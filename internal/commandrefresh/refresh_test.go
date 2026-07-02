@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
-	"github.com/turborg/turborg/internal/commands"
+	"github.com/turborg/turborg/internal/skill"
 )
 
 func TestMain(m *testing.M) {
@@ -23,17 +23,17 @@ func TestMain(m *testing.M) {
 type spyApply struct {
 	mu    sync.Mutex
 	calls int
-	last  []commands.Definition
+	last  []skill.Skill
 }
 
-func (s *spyApply) apply(defs []commands.Definition) {
+func (s *spyApply) apply(defs []skill.Skill) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
 	s.last = defs
 }
 
-func (s *spyApply) snapshot() (int, []commands.Definition) {
+func (s *spyApply) snapshot() (int, []skill.Skill) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.calls, s.last
@@ -65,7 +65,7 @@ func TestRefreshAppliesCommandsAndSendsAuth(t *testing.T) {
 	assert.Equal(t, 1, calls)
 	require.Len(t, last, 1)
 	assert.Equal(t, "weather", last[0].Name)
-	assert.Equal(t, commands.AccessOwner, last[0].Access)
+	assert.Equal(t, skill.AccessOwner, last[0].Access)
 	assert.Equal(t, "Bearer secret-tok", gotAuth.Load())
 }
 
