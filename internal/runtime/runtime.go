@@ -25,13 +25,15 @@ import (
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/budgetrefresh"
 	"github.com/turborg/turborg/internal/commandrefresh"
-	"github.com/turborg/turborg/internal/commands"
 	"github.com/turborg/turborg/internal/config"
 	"github.com/turborg/turborg/internal/configrefresh"
 	"github.com/turborg/turborg/internal/connector/irc"
+	"github.com/turborg/turborg/internal/flow"
+	"github.com/turborg/turborg/internal/flowrefresh"
 	"github.com/turborg/turborg/internal/llm"
 	"github.com/turborg/turborg/internal/messages"
 	"github.com/turborg/turborg/internal/messagesink"
+	"github.com/turborg/turborg/internal/skill"
 	"github.com/turborg/turborg/internal/statepush"
 	"github.com/turborg/turborg/internal/web"
 )
@@ -58,6 +60,14 @@ type Built struct {
 	// agent runs (the single-instance mirror of the pooled feed-driven reload). Nil
 	// when COMMANDS_URL is unset (self-host: the boot set is fixed).
 	CommandRefresh *commandrefresh.Refresher
+	// FlowRefresh hot-reloads the declarative node-graph flow set in place while
+	// the agent runs (the single-instance mirror of the pooled feed-driven
+	// reload). Nil when FLOWS_URL is unset (self-host: the boot set is fixed).
+	FlowRefresh *flowrefresh.Refresher
+	// Scheduler drives schedule-trigger skills on their cadence. Supervised by
+	// Run alongside the background refreshers. Never nil (idle when no schedule
+	// skills are installed).
+	Scheduler *skill.Scheduler
 }
 
 // Build wires the agent + connectors + gateway from settings. Callers
@@ -78,6 +88,11 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	}
 
 	cmds, err := parseCommands(s.Commands)
+	if err != nil {
+		return nil, err
+	}
+
+	flows, err := parseFlows(s.Flows)
 	if err != nil {
 		return nil, err
 	}
@@ -109,6 +124,10 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	// and the gateway see the same instance.
 	store, sink := buildMessageStore(s, log)
 	_ = sink // referenced for lifecycle parity; closing happens with the agent
+
+	// Durable skill/flow state backend. Nil when TURBORG_STATE_URL is unset —
+	// the engines then keep state in-process (lost on restart), the default.
+	skillStore := buildSkillStore(s, log)
 
 	// Single-instance activity transport: a per-event POST to ACTIVITY_URL via
 	// the Notifier. Only wired when configured; the pooled runtime supplies its
@@ -142,9 +161,10 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	// The connector-agnostic, transport-independent wiring — builtins, owner
 	// guard, throttles, nudge, store submitters. The pooled runtime calls this
 	// same WireCommon from its tenant builder, so the two modes can't drift.
-	if err := WireCommon(a, ircConn, CommonParams{
+	wiring, err := WireCommon(a, ircConn, CommonParams{
 		CustomCommandsMax: s.CustomCommandsMax,
 		Commands:          cmds,
+		Flows:             flows,
 		Platform:          ircCfg.Hostname,
 		Limits: irc.ClientLimits{
 			NickLocked:             s.NickLocked,
@@ -169,7 +189,9 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		LLMOutputUsed:             s.LLMOutputTokensUsed,
 		ActivityHook:              activityHook,
 		Store:                     store,
-	}, log); err != nil {
+		SkillStore:                skillStore,
+	}, log)
+	if err != nil {
 		return nil, err
 	}
 
@@ -190,6 +212,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		LLM:       provider,
 		Activity:  notifier,
 		StatePush: stateEmitter,
+		Scheduler: wiring.Scheduler,
 	}
 
 	// Live budget refresh: when the provider is budgeted and a refresh endpoint
@@ -216,7 +239,19 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		s.CommandsURL,
 		s.CommandsToken,
 		s.CommandsRefreshSeconds,
-		func(defs []commands.Definition) { ApplyCommands(a, defs, provider, owner, ircCfg.Hostname, log) },
+		func(skills []skill.Skill) { ApplySkills(a, wiring, skills, provider, owner, ircCfg.Hostname, log) },
+		log,
+	)
+
+	// Live flow hot-reload: when FLOWS_URL is set, poll the per-container flows
+	// endpoint and swap the node-graph flow set in place — the same ReplaceFlows
+	// the pooled runtime does from its feed, so a single-instance container picks
+	// up flow add/remove/edit without a respawn/reconnect.
+	built.FlowRefresh = flowrefresh.New(
+		s.FlowsURL,
+		s.FlowsToken,
+		s.FlowsRefreshSeconds,
+		func(flows []flow.Flow) { ApplyFlows(wiring, flows) },
 		log,
 	)
 
@@ -248,7 +283,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 	)
 
 	if s.GatewayEnabled() {
-		gw, err := buildGateway(s, ircConn, a, log, notifier, store, provider)
+		gw, err := buildGateway(s, ircConn, a, log, notifier, store, provider, wiring.FireWebhook)
 		if err != nil {
 			return nil, err
 		}
@@ -262,6 +297,7 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		"gateway", built.Gateway != nil,
 		"llm", provider != nil,
 		"commands", len(cmds),
+		"flows", len(flows),
 	)
 
 	return built, nil
@@ -301,21 +337,37 @@ func buildLLM(s *config.Settings) (llm.Provider, error) {
 	return NewAnthropicProvider(s.AnthropicAPIKey, s.AnthropicModel)
 }
 
-// parseCommands decodes the TURBORG_COMMANDS JSON array into command
-// definitions. Empty input is not an error — it just means no commands.
-func parseCommands(raw string) ([]commands.Definition, error) {
+// parseCommands decodes the TURBORG_COMMANDS JSON array into skill
+// definitions. The flat wire is backward-compatible: a legacy command array
+// decodes to command-kind skills unchanged. Empty input is not an error — it
+// just means no skills.
+func parseCommands(raw string) ([]skill.Skill, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, nil
 	}
-	var defs []commands.Definition
-	if err := json.Unmarshal([]byte(raw), &defs); err != nil {
+	var skills []skill.Skill
+	if err := json.Unmarshal([]byte(raw), &skills); err != nil {
 		return nil, fmt.Errorf("runtime: parsing TURBORG_COMMANDS: %w", err)
 	}
-	return defs, nil
+	return skills, nil
 }
 
-func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, log *slog.Logger, notifier *activity.Notifier, store messages.Store, llmProvider llm.Provider) (*web.Gateway, error) {
+// parseFlows decodes the TURBORG_FLOWS JSON array into node-graph flows. Empty
+// input is not an error — it just means no flows.
+func parseFlows(raw string) ([]flow.Flow, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var flows []flow.Flow
+	if err := json.Unmarshal([]byte(raw), &flows); err != nil {
+		return nil, fmt.Errorf("runtime: parsing TURBORG_FLOWS: %w", err)
+	}
+	return flows, nil
+}
+
+func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, log *slog.Logger, notifier *activity.Notifier, store messages.Store, llmProvider llm.Provider, webhookFire func(name string, bag map[string]string) bool) (*web.Gateway, error) {
 	verifier, err := web.NewStaticPasswordVerifier(s.GatewayPassword)
 	if err != nil {
 		return nil, fmt.Errorf("runtime: gateway verifier: %w", err)
@@ -338,6 +390,7 @@ func buildGateway(s *config.Settings, ircConn *irc.Connector, a *agent.Agent, lo
 		MessageStore:           store,
 		LLMProvider:            llmProvider,
 		TBSummarizeMaxMessages: s.TBSummarizeMaxMessages,
+		WebhookFire:            webhookFire,
 	}
 	if notifier.Enabled() {
 		opts.OnActivity = notifier.Hook
@@ -382,6 +435,22 @@ func buildMessageStore(s *config.Settings, log *slog.Logger) (messages.Store, *m
 	// locally; the sink keeps mirroring writes for whatever consumer
 	// runs on the other side.
 	return messages.NewMemoryStore(0), sink
+}
+
+// buildSkillStore picks the durable state backend for skills + flows.
+// When TURBORG_STATE_URL (+ token) is set it returns an HTTP-backed store so
+// counters, per-user values, and history survive a restart; otherwise it
+// returns nil and each engine falls back to its own in-process store (the
+// default, state lost on restart).
+func buildSkillStore(s *config.Settings, log *slog.Logger) skill.Store {
+	if log == nil {
+		log = slog.Default()
+	}
+	if hs := skill.NewHTTPStore(s.StateURL, s.StateToken, log); hs != nil {
+		log.Info("skill state store enabled (HTTP)", "endpoint", s.StateURL)
+		return hs
+	}
+	return nil
 }
 
 // makeStoreSubmitter returns an EventBus handler that mirrors every
@@ -744,8 +813,14 @@ func Run(ctx context.Context, b *Built) error {
 	if b.CommandRefresh != nil {
 		startRefresher(b.CommandRefresh.Run)
 	}
+	if b.FlowRefresh != nil {
+		startRefresher(b.FlowRefresh.Run)
+	}
 	if b.ConfigRefresh != nil {
 		startRefresher(b.ConfigRefresh.Run)
+	}
+	if b.Scheduler != nil {
+		startRefresher(b.Scheduler.Run)
 	}
 	waitRefresh := func() {
 		for _, done := range refreshDones {

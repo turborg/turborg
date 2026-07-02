@@ -1,4 +1,4 @@
-package commandrefresh
+package flowrefresh
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
-	"github.com/turborg/turborg/internal/skill"
+	"github.com/turborg/turborg/internal/flow"
 )
 
 func TestMain(m *testing.M) {
@@ -23,17 +23,17 @@ func TestMain(m *testing.M) {
 type spyApply struct {
 	mu    sync.Mutex
 	calls int
-	last  []skill.Skill
+	last  []flow.Flow
 }
 
-func (s *spyApply) apply(defs []skill.Skill) {
+func (s *spyApply) apply(flows []flow.Flow) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
-	s.last = defs
+	s.last = flows
 }
 
-func (s *spyApply) snapshot() (int, []skill.Skill) {
+func (s *spyApply) snapshot() (int, []flow.Flow) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.calls, s.last
@@ -47,11 +47,11 @@ func TestNewReturnsNilWhenUnconfigured(t *testing.T) {
 	assert.NotNil(t, New("http://x", "tok", 0, s.apply, nil))
 }
 
-func TestRefreshAppliesCommandsAndSendsAuth(t *testing.T) {
+func TestRefreshAppliesFlowsAndSendsAuth(t *testing.T) {
 	var gotAuth atomic.Value
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth.Store(r.Header.Get("Authorization"))
-		_, _ = w.Write([]byte(`[{"name":"weather","type":"llm","template":"{args}","access":"owner"}]`))
+		_, _ = w.Write([]byte(`[{"name":"greet","trigger":{"kind":"match","match":"(?i)^hi"},"nodes":[{"id":"s","type":"say","config":{"text":"hi"}}],"edges":[{"from":"start","to":"s"}]}]`))
 	}))
 	defer srv.Close()
 
@@ -64,14 +64,15 @@ func TestRefreshAppliesCommandsAndSendsAuth(t *testing.T) {
 	calls, last := s.snapshot()
 	assert.Equal(t, 1, calls)
 	require.Len(t, last, 1)
-	assert.Equal(t, "weather", last[0].Name)
-	assert.Equal(t, skill.AccessOwner, last[0].Access)
+	assert.Equal(t, "greet", last[0].Name)
+	require.Len(t, last[0].Nodes, 1)
+	assert.Equal(t, "say", last[0].Nodes[0].Type)
 	assert.Equal(t, "Bearer secret-tok", gotAuth.Load())
 }
 
 func TestRefreshSkipsApplyWhenUnchanged(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`[{"name":"ping","type":"static","template":"pong","access":"everyone"}]`))
+		_, _ = w.Write([]byte(`[{"name":"greet","trigger":{"kind":"command"},"nodes":[{"id":"s","type":"say","config":{"text":"hi"}}],"edges":[]}]`))
 	}))
 	defer srv.Close()
 
@@ -83,7 +84,7 @@ func TestRefreshSkipsApplyWhenUnchanged(t *testing.T) {
 	r.refreshOnce(context.Background()) // identical response → no second apply
 
 	calls, _ := s.snapshot()
-	assert.Equal(t, 1, calls, "an unchanged command set must not trigger a second swap")
+	assert.Equal(t, 1, calls, "an unchanged flow set must not trigger a second swap")
 }
 
 func TestRefreshKeepsLastSetOnError(t *testing.T) {
@@ -99,7 +100,7 @@ func TestRefreshKeepsLastSetOnError(t *testing.T) {
 	r.refreshOnce(context.Background())
 
 	calls, _ := s.snapshot()
-	assert.Equal(t, 0, calls, "a non-200 must not apply a command set")
+	assert.Equal(t, 0, calls, "a non-200 must not apply a flow set")
 }
 
 func TestRefreshKeepsLastSetOnMalformedBody(t *testing.T) {
@@ -115,7 +116,7 @@ func TestRefreshKeepsLastSetOnMalformedBody(t *testing.T) {
 	r.refreshOnce(context.Background())
 
 	calls, _ := s.snapshot()
-	assert.Equal(t, 0, calls, "a body that fails to decode must not apply a command set")
+	assert.Equal(t, 0, calls, "a body that fails to decode must not apply a flow set")
 }
 
 func TestRunRefreshesImmediatelyAndStopsOnCancel(t *testing.T) {

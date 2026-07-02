@@ -12,6 +12,7 @@ import (
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/config"
 	"github.com/turborg/turborg/internal/messages"
+	"github.com/turborg/turborg/internal/skill"
 )
 
 // White-box tests for the helpers in runtime.go. The full Build flow
@@ -176,4 +177,17 @@ func TestMakeStoreSubmitterOutboundSkipsWhenBotNickEmpty(t *testing.T) {
 	})
 	assert.Equal(t, 0, store.Len("#x"),
 		"empty bot nick → row would 422; must skip rather than write a half-formed entry")
+}
+
+func TestBuildSkillStoreNilWhenUnconfigured(t *testing.T) {
+	s := &config.Settings{} // No STATE_URL configured.
+	assert.Nil(t, buildSkillStore(s, nil), "no state URL → nil (engines default to in-process)")
+}
+
+func TestBuildSkillStoreHTTPWhenConfigured(t *testing.T) {
+	s := &config.Settings{StateURL: "https://state.example/agent", StateToken: "t"}
+	got := buildSkillStore(s, nil)
+	require.NotNil(t, got)
+	_, isHTTP := got.(*skill.HTTPStore)
+	assert.True(t, isHTTP, "with STATE_URL + token set → HTTPStore")
 }
