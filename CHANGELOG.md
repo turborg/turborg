@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.18.0](https://github.com/turborg/turborg/compare/v0.17.0...v0.18.0) (2026-07-02)
+
+
+### Features
+
+* **flow:** dispatch command-triggered flows and split multiline replies ([#166](https://github.com/turborg/turborg/issues/166)) ([f473ef5](https://github.com/turborg/turborg/commit/f473ef500e5b47e9c2a2453abc20887f1670cfc7))
+
 ## [0.17.0](https://github.com/turborg/turborg/compare/v0.16.2...v0.17.0) (2026-07-01)
 
 
