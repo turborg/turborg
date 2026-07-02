@@ -241,6 +241,7 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 		Store:    p.SkillStore,
 		Platform: p.Platform,
 		Owner:    p.Owner.OwnerNick,
+		Prefix:   a.Commands.Prefix(),
 		MaxFlows: p.CustomCommandsMax,
 		Log:      log,
 	})

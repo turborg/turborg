@@ -28,11 +28,31 @@ func NewActor(c *Connector) *Actor { return &Actor{send: c} }
 var _ agent.Actor = (*Actor)(nil)
 
 func (a *Actor) Say(channel, text string) error {
-	return a.send.SendRaw(fmt.Sprintf("%s %s :%s", CmdPrivmsg, channel, text))
+	return a.sendLines(CmdPrivmsg, channel, text)
 }
 
 func (a *Actor) Notice(target, text string) error {
-	return a.send.SendRaw(fmt.Sprintf("%s %s :%s", CmdNotice, target, text))
+	return a.sendLines(CmdNotice, target, text)
+}
+
+// sendLines emits text as one IRC message per line. An embedded newline must
+// never reach the wire intact: CRLF terminates an IRC command, so a multi-line
+// reply would otherwise truncate at the first line and inject the remainder as
+// raw commands (CRLF injection). Splitting here makes a multi-line flow reply
+// render as consecutive messages and neutralizes the injection vector. Blank
+// lines are skipped.
+func (a *Actor) sendLines(cmd, target, text string) error {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if err := a.send.SendRaw(fmt.Sprintf("%s %s :%s", cmd, target, line)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *Actor) Kick(channel, nick, reason string) error {

@@ -24,11 +24,11 @@ const maxSteps = 256
 // webhookTimeout bounds a single webhook node POST.
 const webhookTimeout = 5 * time.Second
 
-// Engine runs event/match-triggered flows: it subscribes to the agent's
-// EventBus, seeds a data bag from each inbound message / lifecycle event, and
-// walks every flow whose trigger matches. The flow set is hot-swappable
-// (ReplaceFlows) under a write lock with a MaxFlows cap, mirroring the skill
-// engine.
+// Engine runs command/event/match-triggered flows: it subscribes to the
+// agent's EventBus, seeds a data bag from each inbound message / lifecycle
+// event, and walks every flow whose trigger matches. The flow set is
+// hot-swappable (ReplaceFlows) under a write lock with a MaxFlows cap,
+// mirroring the skill engine.
 type Engine struct {
 	actor    agent.Actor
 	provider llm.Provider
@@ -36,12 +36,18 @@ type Engine struct {
 	post     PostFunc
 	platform string
 	owner    string
-	log      *slog.Logger
+	// prefix is the command prefix ("!" by default) a command-trigger flow's
+	// word is matched behind, mirroring the agent's CommandRegistry.
+	prefix string
+	log    *slog.Logger
 
 	mu       sync.RWMutex
 	maxFlows int
 	events   []compiled
 	matches  []compiled
+	// commands holds command-trigger flows; onMessage dispatches one when an
+	// inbound message parses as "<prefix><word>" and word matches Trigger.Command.
+	commands []compiled
 	// webhooks indexes inbound-webhook-trigger flows by lowercased name so
 	// FireWebhook can dispatch an external POST in O(1) without leaking the set.
 	webhooks map[string]compiled
@@ -62,6 +68,9 @@ type Options struct {
 	Store    skill.Store
 	Platform string
 	Owner    string
+	// Prefix is the command prefix for command-trigger flows. Empty defaults
+	// to "!", matching the agent's CommandRegistry default.
+	Prefix   string
 	MaxFlows int
 	Post     PostFunc
 	Log      *slog.Logger
@@ -81,6 +90,10 @@ func NewEngine(o Options) *Engine {
 	if post == nil {
 		post = defaultPost
 	}
+	prefix := o.Prefix
+	if prefix == "" {
+		prefix = "!"
+	}
 	return &Engine{
 		actor:    o.Actor,
 		provider: o.Provider,
@@ -88,6 +101,7 @@ func NewEngine(o Options) *Engine {
 		post:     post,
 		platform: o.Platform,
 		owner:    o.Owner,
+		prefix:   prefix,
 		log:      log.With("component", "flow-engine"),
 		maxFlows: o.MaxFlows,
 	}
@@ -144,7 +158,7 @@ func (e *Engine) ReplaceFlows(flows []Flow) {
 	limit := e.maxFlows
 	e.mu.RUnlock()
 
-	var events, matches []compiled
+	var events, matches, commands []compiled
 	webhooks := map[string]compiled{}
 	installed := 0
 	for _, f := range flows {
@@ -156,6 +170,14 @@ func (e *Engine) ReplaceFlows(flows []Flow) {
 			continue
 		}
 		switch f.triggerKind() {
+		case skill.KindCommand:
+			word := strings.ToLower(strings.TrimSpace(f.Trigger.Command))
+			if word == "" {
+				e.log.Warn("skipping command flow: empty command word", "flow", f.Name)
+				continue
+			}
+			commands = append(commands, compiled{flow: f, channels: channelSet(f.Trigger.Channels)})
+			installed++
 		case skill.KindMatch:
 			re, err := regexp.Compile(f.Trigger.Match)
 			if err != nil {
@@ -176,13 +198,14 @@ func (e *Engine) ReplaceFlows(flows []Flow) {
 			webhooks[key] = compiled{flow: f, channels: channelSet(f.Trigger.Channels)}
 			installed++
 		default:
-			// command / schedule flows are not the bus engine's concern.
+			// schedule flows are not the bus engine's concern.
 		}
 	}
 
 	e.mu.Lock()
 	e.events = events
 	e.matches = matches
+	e.commands = commands
 	e.webhooks = webhooks
 	e.mu.Unlock()
 }
@@ -246,10 +269,10 @@ func (e *Engine) onMessage(ctx context.Context, ev *agent.Event) {
 	}
 	e.mu.RLock()
 	matches := e.matches
+	commands := e.commands
+	prefix := e.prefix
 	e.mu.RUnlock()
-	if len(matches) == 0 {
-		return
-	}
+
 	for _, m := range matches {
 		if !channelAllowed(m.channels, env.Channel) {
 			continue
@@ -263,6 +286,42 @@ func (e *Engine) onMessage(ctx context.Context, ev *agent.Event) {
 		}
 		e.run(ctx, m.flow, bag)
 	}
+
+	if len(commands) == 0 {
+		return
+	}
+	name, args, ok := parseCommand(env.Text, prefix)
+	if !ok {
+		return
+	}
+	for _, c := range commands {
+		if !strings.EqualFold(strings.TrimSpace(c.flow.Trigger.Command), name) {
+			continue
+		}
+		if !channelAllowed(c.channels, env.Channel) {
+			continue
+		}
+		bag := Bag{
+			"user": env.Sender, "channel": env.Channel, "text": env.Text,
+			"args": args, "platform": e.platform, "owner": e.owner,
+		}
+		e.run(ctx, c.flow, bag)
+	}
+}
+
+// parseCommand splits an inbound message into a lowercased command word and its
+// remaining argument string when it begins with prefix, mirroring the agent
+// CommandRegistry's Parse. ok is false for a non-command message.
+func parseCommand(text, prefix string) (name, args string, ok bool) {
+	if prefix == "" || !strings.HasPrefix(text, prefix) {
+		return "", "", false
+	}
+	rest := strings.TrimLeft(strings.TrimPrefix(text, prefix), " \t")
+	if rest == "" {
+		return "", "", false
+	}
+	word, remainder, _ := strings.Cut(rest, " ")
+	return strings.ToLower(word), strings.TrimSpace(remainder), true
 }
 
 func (e *Engine) onUserEvent(ctx context.Context, ev *agent.Event) {
