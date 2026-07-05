@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.19.0](https://github.com/turborg/turborg/compare/v0.18.0...v0.19.0) (2026-07-05)
+
+
+### Features
+
+* **connector/web:** add hosted web-chat connector ([#169](https://github.com/turborg/turborg/issues/169)) ([354f00d](https://github.com/turborg/turborg/commit/354f00da5f0aa0ed354636befd58ad1f66fe859b))
+
 ## [0.18.0](https://github.com/turborg/turborg/compare/v0.17.0...v0.18.0) (2026-07-02)
 
 
