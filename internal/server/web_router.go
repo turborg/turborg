@@ -41,6 +41,16 @@ func (s *Server) serveWebGatewayRouter(ctx context.Context, ln net.Listener) err
 			http.Error(w, "no such tenant", http.StatusNotFound)
 		}
 	})
+	// Hosted web-chat surface: an external proxy forwards `/chat/<id>` to the
+	// pool and this routes it to that tenant's web connector, which does the
+	// per-tenant token auth + WS upgrade. Sibling to `/c/<id>` (the IRC-shell
+	// gateway); an unknown tenant is a 404 with no detail, same as the WS route.
+	mux.HandleFunc("GET /chat/{turborg_id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("turborg_id")
+		if id == "" || !s.RouteChat(id, w, r) {
+			http.Error(w, "no such tenant", http.StatusNotFound)
+		}
+	})
 	// Inbound-webhook ingress: an external system POSTs to /c/<id>/hook/<name>
 	// to fire that tenant's per-flow webhook trigger. The tenant gateway does the
 	// auth + dispatch; an unknown tenant is a 404 with no detail (never leaks

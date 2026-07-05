@@ -15,6 +15,7 @@ import (
 
 	"github.com/turborg/turborg/internal/agent"
 	"github.com/turborg/turborg/internal/connector/irc"
+	webconn "github.com/turborg/turborg/internal/connector/web"
 	"github.com/turborg/turborg/internal/flow"
 	"github.com/turborg/turborg/internal/ident"
 	"github.com/turborg/turborg/internal/llm"
@@ -104,6 +105,13 @@ type Tenant struct {
 	// browser client. nil between runs / when the tenant has no web shell → an
 	// inbound WS request is closed with 404.
 	gateway *web.Gateway
+	// webConn is the live hosted web-chat connector for the current run, built
+	// in buildConnectors when the spec carries a "web" connector and cleared
+	// when the run ends. The web router reaches it via ServeChat to upgrade an
+	// attached browser client. nil between runs / when the tenant has no web
+	// connector → an inbound chat request is closed with 404. Distinct from
+	// gateway: that streams an IRC session to a dashboard; this IS the chat.
+	webConn *webconn.Connector
 	// stateEmitter mirrors this tenant's connector state (upstream status,
 	// channels, nick) to the control plane on every transition, so a downstream
 	// UI can reflect connection status for pooled tenants the same way it does
@@ -322,6 +330,7 @@ func (t *Tenant) defaultWork() func(context.Context) error {
 		sink := t.messageSink
 		t.ircConn = nil
 		t.gateway = nil
+		t.webConn = nil
 		t.stateEmitter = nil
 		t.messageSink = nil
 		t.agentRef = nil
@@ -476,6 +485,55 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 				t.gateway = gw
 				t.mu.Unlock()
 			}
+		case "web":
+			// The tenant's gateway_token doubles as the web-chat token signing
+			// key (no fleet-wide key by design). Empty → no web connector.
+			webSettings, verifier, err := webSettingsFromConnectorSpec(cs, gatewayToken)
+			if err != nil {
+				t.log.Error("skipping invalid web connector", "err", err)
+				continue
+			}
+			conn := webconn.New(webSettings, t.log, a.Events, verifier)
+
+			// Durable scrollback + write-through to the control plane, exactly as
+			// the IRC arm — the connector reads it on attach-replay + the history
+			// op, and the shared store submitter (wired by WireCore) writes it.
+			store, sink := t.buildMessageStore()
+			t.mu.Lock()
+			t.messageSink = sink
+			t.mu.Unlock()
+			conn.SetMessageStore(store)
+
+			// Owner presence: an inbound web chat message marks the tenant active
+			// in the pool's coalescing aggregator so a web-only tenant isn't
+			// idle-paused while its owner is talking to it.
+			if t.activity != nil {
+				conn.SetActivityHook(func(string) { t.activity.Mark(t.ID) })
+			}
+
+			// Same shared, connector-agnostic wiring the IRC arm gets — builtins,
+			// command guard, skill engine + scheduler, flow engine, persistence —
+			// via runtime.WireCore, so the two connectors can't drift. The web
+			// Actor + a fixed bot-nick resolver are the only connector-native bits.
+			cp := t.commonParams(cs, caps, webSettings.BotNick, store, ignoredNicks, cmds)
+			cp.Platform = "Web"
+			cp.Flows = t.spec.Flows
+			budgetedProvider := runtime.BuildBudgetedProvider(a, cp.LLM, cp.LLMInputCap, cp.LLMOutputCap, cp.LLMInputUsed, cp.LLMOutputUsed, t.log)
+			cp.LLM = budgetedProvider
+			// AI console: free-text (non-command) messages are answered by the
+			// LLM, with the daily token budget already enforced by the budgeted
+			// provider — a spent budget surfaces as a distinct budget-exhausted
+			// signal. Conversation memory is the shared message store
+			// (SetMessageStore above), bounded by the store's own retention.
+			conn.SetLLMProvider(budgetedProvider)
+			conn.SetCommandPrefix(a.Commands.Prefix())
+			botNick := func() string { return webSettings.BotNick }
+			wiring := runtime.WireCore(a, conn, webconn.NewActor(conn), botNick, budgetedProvider, cp, t.log)
+
+			t.mu.Lock()
+			t.webConn = conn
+			t.wiring = wiring
+			t.mu.Unlock()
 		default:
 			t.log.Warn("connector type not supported in pooled mode yet", "type", cs.Type)
 		}
@@ -946,6 +1004,23 @@ func (t *Tenant) ServeWS(w http.ResponseWriter, r *http.Request) {
 	// (`/c/<id>`) to it. Query (the token) is untouched.
 	r.URL.Path = "/ws"
 	gw.Handler().ServeHTTP(w, r)
+}
+
+// ServeChat hands one browser WebSocket request (the hosted web-chat surface,
+// addressed as `/chat/<id>`) to this tenant's live web connector. The web
+// router calls it after resolving the tenant from the request path. Returns 404
+// when the tenant has no running web connector (between runs / quarantined / no
+// web connector configured); the browser reconnects and the router retries. The
+// connector does the token auth (bound to the tenant id) + WS upgrade.
+func (t *Tenant) ServeChat(w http.ResponseWriter, r *http.Request) {
+	t.mu.Lock()
+	conn := t.webConn
+	t.mu.Unlock()
+	if conn == nil {
+		http.Error(w, "no web chat for tenant", http.StatusNotFound)
+		return
+	}
+	conn.ServeWS(w, r, t.ID)
 }
 
 // ServeHook hands one inbound-webhook request (POST /c/<id>/hook/<name>) to this
