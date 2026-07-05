@@ -326,6 +326,26 @@ func TestNewDefaults(t *testing.T) {
 	assert.NotNil(t, c.log)
 }
 
+func TestSystemPromptTurborgAware(t *testing.T) {
+	c := New(Settings{}, nil, agent.NewEventBus(nil), newVerifier(t, testKey))
+
+	// Default prompt is turborg-aware, mentions the extension surface, and
+	// defaults the command prefix to "!".
+	def := c.systemPrompt()
+	assert.Contains(t, def, "turborg")
+	assert.Contains(t, def, "skills")
+	assert.Contains(t, def, "turboflows")
+	assert.Contains(t, def, `"!"`)
+
+	// The live command prefix flows into the prompt.
+	c.SetCommandPrefix(".")
+	assert.Contains(t, c.systemPrompt(), `"."`)
+
+	// An operator override wins verbatim.
+	c.SetConsolePrompt("just be terse")
+	assert.Equal(t, "just be terse", c.systemPrompt())
+}
+
 // TestBearerHeaderAuth covers the Authorization: Bearer token path.
 func TestBearerHeaderAuth(t *testing.T) {
 	c, _ := newTestConn(t, Settings{BotNick: "helper", Room: "console"})
