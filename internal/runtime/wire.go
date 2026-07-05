@@ -166,7 +166,6 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 		log = slog.Default()
 	}
 
-	a.Commands.SetMaxDynamic(p.CustomCommandsMax)
 	ircConn.SetClientLimits(p.Limits)
 
 	if p.ActivityHook != nil {
@@ -204,10 +203,34 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 	}
 	ircConn.SetBouncerWelcomeReplayDepth(clampReplayDepth(p.BouncerWelcomeReplayDepth))
 
-	a.AddConnector(ircConn)
+	// Everything past the IRC-specific setters above is connector-agnostic —
+	// hand it to WireCore with the IRC Actor + nick so the web connector gets
+	// the identical builtins/persistence/skill/flow path from the same code.
+	return WireCore(a, ircConn, irc.NewActor(ircConn), ircConn.CurrentNick, provider, p, log), nil
+}
+
+// WireCore installs the connector-agnostic half of the agent wiring: the
+// command-registry cap, message-store submitters, the registry-wide command
+// guard, the skill engine + scheduler, the flow engine, and the data-driven
+// skill/flow set. It calls a.AddConnector(conn) itself and returns the live
+// Wiring so the caller can supervise the scheduler and hot-reload the skill set.
+//
+// It is the shared core WireCommon (IRC) and the web connector's wiring both
+// call, so the two surfaces can't drift: a builtin/persistence/skill feature
+// wired here reaches every connector. The caller owns everything genuinely
+// connector-specific (IRC bouncer/throttle setters, the web token verifier)
+// and supplies the connector-native Actor + botNick resolver + budgeted
+// provider this core threads into the engines and store submitters.
+func WireCore(a *agent.Agent, conn agent.Connector, actor agent.Actor, botNick func() string, provider llm.Provider, p CommonParams, log *slog.Logger) *Wiring {
+	if log == nil {
+		log = slog.Default()
+	}
+
+	a.Commands.SetMaxDynamic(p.CustomCommandsMax)
+
+	a.AddConnector(conn)
 
 	if p.Store != nil {
-		botNick := ircConn.CurrentNick
 		a.Events.Subscribe(agent.EventMessage, makeStoreSubmitter(p.Store, botNick, log))
 		a.Events.Subscribe(agent.EventMessageSent, makeStoreSubmitter(p.Store, botNick, log))
 	}
@@ -219,10 +242,10 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 
 	// Skill engine (event/match) + scheduler, sharing the same provider and
 	// owner/platform render context as the command path. The engine acts on the
-	// network through the connector-agnostic IRC Actor and is subscribed to the
+	// network through the connector-native Actor and is subscribed to the
 	// agent's bus; the scheduler is supervised by the caller.
 	engine := skill.NewEngine(skill.Options{
-		Actor:     irc.NewActor(ircConn),
+		Actor:     actor,
 		Provider:  provider,
 		Store:     p.SkillStore,
 		Platform:  p.Platform,
@@ -236,7 +259,7 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 	// Flow engine: the node-graph layer above single-shot skills, sharing the
 	// same actor/provider/owner/platform context and subscribed to the same bus.
 	flowEngine := flow.NewEngine(flow.Options{
-		Actor:    irc.NewActor(ircConn),
+		Actor:    actor,
 		Provider: provider,
 		Store:    p.SkillStore,
 		Platform: p.Platform,
@@ -254,7 +277,7 @@ func WireCommon(a *agent.Agent, ircConn *irc.Connector, p CommonParams, log *slo
 	// swaps all three atomically.
 	ApplySkills(a, wiring, p.Commands, provider, p.Owner, p.Platform, log)
 	ApplyFlows(wiring, p.Flows)
-	return wiring, nil
+	return wiring
 }
 
 // ApplySkills rebuilds the data-driven skill set from skills and swaps it into

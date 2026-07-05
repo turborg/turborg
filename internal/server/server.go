@@ -241,6 +241,22 @@ func (s *Server) RouteWS(turborgID string, w http.ResponseWriter, r *http.Reques
 	return true
 }
 
+// RouteChat hands one browser WebSocket request (the hosted web-chat surface,
+// addressed as `/chat/<id>`) to the named tenant's web connector. Returns false
+// (and does not touch w) when no such tenant is attached, so the router can
+// answer 404. The actual token auth + WS upgrade (and the 404 on a between-runs
+// tenant with no live connector) is the tenant's job.
+func (s *Server) RouteChat(turborgID string, w http.ResponseWriter, r *http.Request) bool {
+	s.mu.Lock()
+	t, ok := s.tenants[turborgID]
+	s.mu.Unlock()
+	if !ok {
+		return false
+	}
+	t.ServeChat(w, r)
+	return true
+}
+
 // RouteHook hands one inbound-webhook request (POST /c/<id>/hook/<name>) to the
 // named tenant's web gateway. Returns false (and does not touch w) when no such
 // tenant is attached, so the router can answer 404 without revealing whether the

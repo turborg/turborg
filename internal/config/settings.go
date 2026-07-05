@@ -12,6 +12,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/caarlos0/env/v11"
@@ -22,6 +23,7 @@ import (
 // runtime.buildConnector.
 var ValidConnectors = map[string]bool{
 	"irc": true,
+	"web": true,
 }
 
 // Settings is the top-level turborg config. Connector-specific knobs
@@ -391,16 +393,30 @@ func (s *Settings) normalizeConnectors() error {
 			continue
 		}
 		if !ValidConnectors[c] {
-			return fmt.Errorf("config: unknown connector %q (valid: irc)", c)
+			return fmt.Errorf("config: unknown connector %q (valid: %s)", c, validConnectorList())
 		}
 		seen[c] = true
 		out = append(out, c)
 	}
 	s.Connectors = out
-	// Cap-exceeded branch will land once a second valid connector exists.
-	// Today the dedup loop above keeps len(s.Connectors) <= 1 with "irc"
-	// the only ValidConnectors entry, so a cap-vs-count compare is unreachable.
+	// Cap the number of distinct connector types when the operator set a
+	// ceiling. Reachable now that more than one connector name is valid.
+	if s.MaxConnectorsPerAgent > 0 && len(out) > s.MaxConnectorsPerAgent {
+		return fmt.Errorf("config: %d connectors listed in TURBORG_CONNECTORS exceeds MAX_CONNECTORS_PER_AGENT=%d",
+			len(out), s.MaxConnectorsPerAgent)
+	}
 	return nil
+}
+
+// validConnectorList renders the supported connector names sorted, for error
+// messages — stays correct as ValidConnectors grows.
+func validConnectorList() string {
+	names := make([]string, 0, len(ValidConnectors))
+	for name := range ValidConnectors {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 // validatePolicyBounds runs the numeric/range checks on operator-policy
