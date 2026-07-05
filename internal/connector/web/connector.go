@@ -19,10 +19,18 @@ import (
 	"github.com/turborg/turborg/internal/messages"
 )
 
-// defaultConsoleSystemPrompt shapes the assistant's voice for free-text chat in
-// a web console. Operators can override it via SetConsolePrompt.
-const defaultConsoleSystemPrompt = "You are a helpful, friendly AI assistant chatting with a user in a web console. " +
-	"Answer directly and concisely. If you don't know something, say so."
+// defaultConsoleSystemPromptFmt shapes the assistant's voice for free-text chat
+// in a web console, and makes it self-aware: it knows it's a turborg agent that
+// answers questions, runs the user's commands, and can help them extend it with
+// skills and turboflows. The single %q is the command prefix. Operators can
+// override the whole prompt via SetConsolePrompt.
+const defaultConsoleSystemPromptFmt = "You are turborg, a friendly AI agent living in this chat. " +
+	"Chat naturally with the user, and answer directly and concisely. " +
+	"You also run commands: a message beginning with %[1]q triggers one of the user's installed skills or turboflows. " +
+	"Users can extend you — they can create new skills (a command that replies or takes an action) and turboflows " +
+	"(multi-step automations that can call external services), or install more from the gallery. " +
+	"When asked what you can do, explain that you can answer questions, run their %[1]q commands, and help them build " +
+	"new skills or turboflows right from this chat. If you don't know something, say so."
 
 // consoleHistoryDepth is how many prior room messages are fed to the model as
 // conversation context, so the console feels like a real multi-turn assistant.
@@ -146,6 +154,20 @@ func (c *Connector) SetConsolePrompt(s string) { c.consolePrompt = s }
 // SetCommandPrefix sets the prefix that routes a message to the agent's command
 // dispatch instead of AI chat. Empty defaults to "!". Call before Start.
 func (c *Connector) SetCommandPrefix(p string) { c.commandPrefix = p }
+
+// systemPrompt is the assistant system prompt for a free-text reply: the
+// operator override when set, otherwise the default turborg-aware prompt with
+// the live command prefix substituted in.
+func (c *Connector) systemPrompt() string {
+	if c.consolePrompt != "" {
+		return c.consolePrompt
+	}
+	prefix := c.commandPrefix
+	if prefix == "" {
+		prefix = "!"
+	}
+	return fmt.Sprintf(defaultConsoleSystemPromptFmt, prefix)
+}
 
 // SetHistoryDepth sets how many prior messages of conversation memory the AI
 // chat feeds the model (the plan's conversation-memory capability). <= 0 keeps
@@ -380,10 +402,7 @@ func (c *Connector) answerWithLLM(userText string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	system := c.consolePrompt
-	if system == "" {
-		system = defaultConsoleSystemPrompt
-	}
+	system := c.systemPrompt()
 
 	id := uuid.NewString()
 	c.broadcast(map[string]any{
