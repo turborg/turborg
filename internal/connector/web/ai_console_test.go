@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"iter"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,8 +15,9 @@ import (
 	"github.com/turborg/turborg/internal/messages"
 )
 
-// stubProvider is a minimal llm.Provider for console tests: Ask returns a canned
-// reply (or a canned error, e.g. ErrBudgetExhausted) and counts invocations.
+// stubProvider is a minimal llm.Provider for console tests. Stream yields the
+// canned reply (or a canned error, e.g. ErrBudgetExhausted) and counts
+// invocations across Ask + Stream.
 type stubProvider struct {
 	mu    sync.Mutex
 	calls int
@@ -33,7 +35,26 @@ func (s *stubProvider) Ask(context.Context, string, ...llm.CallOption) (string, 
 }
 
 func (s *stubProvider) Stream(context.Context, string, ...llm.CallOption) iter.Seq2[string, error] {
-	return func(func(string, error) bool) {}
+	s.mu.Lock()
+	s.calls++
+	reply, err := s.reply, s.err
+	s.mu.Unlock()
+	return func(yield func(string, error) bool) {
+		if err != nil {
+			yield("", err)
+			return
+		}
+		// Stream in two chunks to exercise multi-delta assembly.
+		mid := len(reply) / 2
+		for _, chunk := range []string{reply[:mid], reply[mid:]} {
+			if chunk == "" {
+				continue
+			}
+			if !yield(chunk, nil) {
+				return
+			}
+		}
+	}
 }
 
 func (s *stubProvider) callCount() int {
@@ -45,7 +66,7 @@ func (s *stubProvider) callCount() int {
 // readUntil reads frames until one has op == want (or times out).
 func readUntil(t *testing.T, conn *websocket.Conn, want string) map[string]any {
 	t.Helper()
-	for i := 0; i < 8; i++ {
+	for i := 0; i < 10; i++ {
 		f := readFrame(t, conn)
 		if f["op"] == want {
 			return f
@@ -55,12 +76,32 @@ func readUntil(t *testing.T, conn *websocket.Conn, want string) map[string]any {
 	return nil
 }
 
-// TestConsoleAnswersFreeTextViaLLM: a non-command message is answered by the
-// assistant as a bot message.
-func TestConsoleAnswersFreeTextViaLLM(t *testing.T) {
+// readStreamedReply assembles a streamed assistant message: it waits for
+// message_start, concatenates message_delta text, and returns at message_end.
+func readStreamedReply(t *testing.T, conn *websocket.Conn) string {
+	t.Helper()
+	_ = readUntil(t, conn, "message_start")
+	var sb strings.Builder
+	for i := 0; i < 20; i++ {
+		f := readFrame(t, conn)
+		switch f["op"] {
+		case "message_delta":
+			if s, ok := f["text"].(string); ok {
+				sb.WriteString(s)
+			}
+		case "message_end":
+			return sb.String()
+		}
+	}
+	t.Fatal("no message_end frame")
+	return ""
+}
+
+// TestConsoleStreamsFreeTextViaLLM: a non-command message is answered by the
+// assistant, streamed token-by-token.
+func TestConsoleStreamsFreeTextViaLLM(t *testing.T) {
 	c, _ := newTestConn(t, Settings{BotNick: "helper", Room: "console"})
-	// Seed prior turns so buildChatPrompt feeds real conversation memory
-	// (a user line + a bot line → both role branches).
+	// Seed prior turns so buildChatPrompt feeds real conversation memory.
 	ctx := context.Background()
 	require.NoError(t, c.store.Submit(ctx, storeMsg("owner", "hi")))
 	require.NoError(t, c.store.Submit(ctx, storeMsg("helper", "hello, how can I help?")))
@@ -71,23 +112,19 @@ func TestConsoleAnswersFreeTextViaLLM(t *testing.T) {
 	base := serveConn(t, c, "tenant-a")
 	conn := dial(t, base, validToken(t, "tenant-a", "console", "owner"))
 	_ = readFrame(t, conn) // state
+	_ = readFrame(t, conn) // replay: "hi"
+	_ = readFrame(t, conn) // replay: "hello, how can I help?"
 
 	require.NoError(t, conn.Write(context.Background(), websocket.MessageText,
 		[]byte(`{"op":"say","text":"what are you"}`)))
+	_ = readUntil(t, conn, "message") // user echo (kind user)
 
-	// Skip the replayed history frames and the user echo; land on the live bot
-	// reply from the LLM.
-	bot := readUntil(t, conn, "message")
-	for bot["kind"] != "bot" || bot["replayed"] == true {
-		bot = readUntil(t, conn, "message")
-	}
-	assert.Equal(t, "I'm your turborg assistant.", bot["text"])
-	assert.Equal(t, "helper", bot["sender"])
+	assert.Equal(t, "I'm your turborg assistant.", readStreamedReply(t, conn))
 	assert.Equal(t, 1, prov.callCount())
 }
 
-// TestConsoleCommandNotSentToLLM: a `!command` message is NOT answered by the
-// LLM (it goes to the agent's command dispatch instead).
+// TestConsoleCommandNotSentToLLM: a `!command` message is not answered by the
+// LLM (it routes to the agent's command dispatch instead).
 func TestConsoleCommandNotSentToLLM(t *testing.T) {
 	c, _ := newTestConn(t, Settings{BotNick: "helper", Room: "console"})
 	prov := &stubProvider{reply: "should not be called"}
@@ -100,7 +137,6 @@ func TestConsoleCommandNotSentToLLM(t *testing.T) {
 	require.NoError(t, conn.Write(context.Background(), websocket.MessageText,
 		[]byte(`{"op":"say","text":"!btc"}`)))
 
-	// Give any (erroneous) async LLM call time to land, then assert none did.
 	assert.Never(t, func() bool { return prov.callCount() > 0 }, 300*time.Millisecond, 30*time.Millisecond)
 	<-c.Inbound() // drain the command envelope for a clean teardown
 }
@@ -109,13 +145,11 @@ func TestConsoleCommandNotSentToLLM(t *testing.T) {
 // distinct budget_exhausted frame the client can act on.
 func TestConsoleBudgetExhaustedSignal(t *testing.T) {
 	c, _ := newTestConn(t, Settings{BotNick: "helper", Room: "console"})
-	prov := &stubProvider{err: llm.ErrBudgetExhausted}
-	c.SetLLMProvider(prov)
+	c.SetLLMProvider(&stubProvider{err: llm.ErrBudgetExhausted})
 
 	base := serveConn(t, c, "tenant-a")
 	conn := dial(t, base, validToken(t, "tenant-a", "console", "owner"))
 	_ = readFrame(t, conn) // state
-
 	require.NoError(t, conn.Write(context.Background(), websocket.MessageText,
 		[]byte(`{"op":"say","text":"hello"}`)))
 

@@ -364,28 +364,51 @@ func (c *Connector) handleSay(ctx context.Context, cl *wsClient, claims *Claims,
 	}
 }
 
-// answerWithLLM generates an assistant reply to a free-text console message and
-// delivers it. On a spent daily LLM budget it emits a distinct budget-exhausted
-// signal the client can act on, instead of a generic error.
+// answerWithLLM streams an assistant reply to a free-text console message,
+// token by token, so the client renders it live (like a real assistant) rather
+// than waiting for the whole reply. The wire shape mirrors a streaming chat:
+//
+//	{op:"message_start", id, kind:"bot", sender}
+//	{op:"message_delta", id, text}   (repeated)
+//	{op:"message_end",   id}
+//
+// The full reply is persisted once at the end (MESSAGE_SENT) so it becomes
+// context for the next turn — the deltas already showed it, so it is NOT also
+// re-broadcast as a whole frame. A spent daily budget ends the (empty) message
+// and emits a budget_exhausted signal instead.
 func (c *Connector) answerWithLLM(userText string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-
-	c.broadcast(map[string]any{"op": "status", "state": "thinking"})
 
 	system := c.consolePrompt
 	if system == "" {
 		system = defaultConsoleSystemPrompt
 	}
-	reply, _, err := c.llm.Ask(ctx, c.buildChatPrompt(ctx, userText),
-		llm.WithSystem(system), llm.WithMaxTokens(consoleMaxTokens))
-	if err != nil {
-		if errors.Is(err, llm.ErrBudgetExhausted) {
-			// The daily LLM budget is spent: emit a distinct budget_exhausted
-			// frame so the client can inform the user (a self-host operator can
-			// surface "try again tomorrow"; a downstream product its own
-			// messaging), plus a visible system bubble — not persisted, so it
-			// doesn't pollute the next turn's context.
+
+	id := uuid.NewString()
+	c.broadcast(map[string]any{
+		"op": "message_start", "id": id, "kind": "bot",
+		"sender": c.settings.BotNick, "ts": time.Now().Unix(),
+	})
+
+	var full strings.Builder
+	var streamErr error
+	for text, err := range c.llm.Stream(ctx, c.buildChatPrompt(ctx, userText),
+		llm.WithSystem(system), llm.WithMaxTokens(consoleMaxTokens)) {
+		if err != nil {
+			streamErr = err
+			break
+		}
+		if text == "" {
+			continue
+		}
+		full.WriteString(text)
+		c.broadcast(map[string]any{"op": "message_delta", "id": id, "text": text})
+	}
+
+	if streamErr != nil {
+		c.broadcast(map[string]any{"op": "message_end", "id": id, "aborted": true})
+		if errors.Is(streamErr, llm.ErrBudgetExhausted) {
 			c.broadcast(map[string]any{
 				"op":      "budget_exhausted",
 				"message": "The daily AI budget has been reached.",
@@ -397,14 +420,24 @@ func (c *Connector) answerWithLLM(userText string) {
 			})
 			return
 		}
-		c.log.Debug("console llm", "err", err)
+		c.log.Debug("console llm", "err", streamErr)
 		c.broadcast(map[string]any{"op": "error", "message": "The assistant is unavailable right now."})
 		return
 	}
-	if reply = strings.TrimSpace(reply); reply != "" {
-		// Through the Actor: broadcasts the bot frame, persists it, and publishes
-		// MESSAGE_SENT so it becomes context for the next turn.
-		_ = NewActor(c).Say("", reply)
+
+	c.broadcast(map[string]any{"op": "message_end", "id": id})
+
+	// Persist the assembled reply for history/context (deltas already rendered
+	// it, so don't re-broadcast a full bot frame).
+	if reply := strings.TrimSpace(full.String()); reply != "" && c.events != nil {
+		c.events.Publish(context.Background(), &agent.Event{
+			Type: agent.EventMessageSent,
+			Time: time.Now(),
+			Fields: map[string]any{
+				"connector": "web", "channel": c.settings.Room,
+				"sender": c.settings.BotNick, "text": reply,
+			},
+		})
 	}
 }
 
