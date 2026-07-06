@@ -24,6 +24,11 @@ import (
 // answers. Oldest entries are evicted first.
 const replyRefCap = 512
 
+// newBotAPI builds the Bot API client. It is a package var (defaulting to the
+// library constructor) so tests can point the client at a local stub endpoint
+// instead of the real api.telegram.org, keeping Start/Run hermetic.
+var newBotAPI = tgbotapi.NewBotAPI
+
 // api is the narrow slice of *tgbotapi.BotAPI the connector calls for outbound +
 // moderation. It is an interface so tests inject a fake and never hit the real
 // Bot API. *tgbotapi.BotAPI satisfies it directly.
@@ -57,6 +62,10 @@ type Connector struct {
 	allow    map[string]struct{}
 	closed   bool
 	done     chan struct{}
+	// stopReceiverOnce guards bot.StopReceivingUpdates: both Run's defer (on ctx
+	// cancel) and Stop (on teardown) want to halt the long-poll, but the library
+	// closes an internal channel unconditionally, so a second call would panic.
+	stopReceiverOnce sync.Once
 
 	refMu   sync.Mutex
 	refs    map[uuid.UUID]replyRef
@@ -147,7 +156,7 @@ func (c *Connector) Start(context.Context) error {
 	if preWired {
 		return nil
 	}
-	bot, err := tgbotapi.NewBotAPI(c.settings.Token)
+	bot, err := newBotAPI(c.settings.Token)
 	if err != nil {
 		return err
 	}
@@ -175,7 +184,7 @@ func (c *Connector) Run(ctx context.Context) error {
 	upd := tgbotapi.NewUpdate(0)
 	upd.Timeout = 30
 	updates := bot.GetUpdatesChan(upd)
-	defer bot.StopReceivingUpdates()
+	defer c.stopReceiver(bot)
 	for {
 		select {
 		case <-ctx.Done():
@@ -203,10 +212,17 @@ func (c *Connector) Stop(context.Context) error {
 	close(c.done)
 	bot := c.bot
 	c.mu.Unlock()
-	if bot != nil {
-		bot.StopReceivingUpdates()
-	}
+	c.stopReceiver(bot)
 	return nil
+}
+
+// stopReceiver halts the Bot API long-poll exactly once. Safe to call from both
+// Run's defer and Stop (and safe on a nil bot, e.g. tests / booted suspended).
+func (c *Connector) stopReceiver(bot *tgbotapi.BotAPI) {
+	if bot == nil {
+		return
+	}
+	c.stopReceiverOnce.Do(bot.StopReceivingUpdates)
 }
 
 // onUpdate lifts a Bot API update into the connector's normalization path.

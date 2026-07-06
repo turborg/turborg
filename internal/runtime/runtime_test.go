@@ -137,6 +137,61 @@ func TestBuildRejectsUnknownConnector(t *testing.T) {
 	assert.Contains(t, err.Error(), "not yet implemented in Go")
 }
 
+// TestBuildChatOnlyDiscord exercises the dedicated chat-platform build path:
+// TURBORG_CONNECTORS names exactly one chat connector, so Build takes the
+// buildChatOnly branch (no IRC connector, no gateway/state-push). An LLM key is
+// set so the budgeted-provider refresh branch is covered too. No network is
+// opened — the connector only constructs (Start is never called).
+func TestBuildChatOnlyDiscord(t *testing.T) {
+	t.Setenv("TURBORG_DISCORD_TOKEN", "tok")
+	t.Setenv("TURBORG_DISCORD_GUILD_ID", "g1")
+	s := &config.Settings{
+		CommandPrefix:   "!",
+		Connectors:      []string{"discord"},
+		AnthropicAPIKey:       "sk-test",
+		AnthropicModel:        "claude-sonnet-4-6",
+		LLMInputTokensPerDay:  100000,
+		LLMOutputTokensPerDay: 20000,
+		LLMBudgetURL:          "http://control-plane.invalid/budget",
+		LLMBudgetToken:        "budget-token",
+	}
+	b, err := runtime.Build(s, nil, nil)
+	require.NoError(t, err)
+	assert.NotNil(t, b.Agent)
+	assert.Nil(t, b.IRC, "a chat-only container has no IRC connector")
+	assert.Nil(t, b.Gateway, "a chat-only container has no web gateway")
+	require.NotNil(t, b.LLM)
+	assert.NotNil(t, b.BudgetRefresh, "a budgeted provider + budget URL mints a refresher")
+	assert.NotNil(t, b.Scheduler)
+}
+
+func TestBuildChatOnlyTelegram(t *testing.T) {
+	t.Setenv("TURBORG_TELEGRAM_TOKEN", "tok")
+	s := &config.Settings{CommandPrefix: "!", Connectors: []string{"telegram"}}
+	b, err := runtime.Build(s, nil, nil)
+	require.NoError(t, err)
+	assert.NotNil(t, b.Agent)
+	assert.Nil(t, b.IRC)
+}
+
+func TestBuildChatOnlySlack(t *testing.T) {
+	t.Setenv("TURBORG_SLACK_BOT_TOKEN", "xoxb-1")
+	t.Setenv("TURBORG_SLACK_APP_TOKEN", "xapp-1")
+	s := &config.Settings{CommandPrefix: "!", Connectors: []string{"slack"}}
+	b, err := runtime.Build(s, nil, nil)
+	require.NoError(t, err)
+	assert.NotNil(t, b.Agent)
+	assert.Nil(t, b.IRC)
+}
+
+func TestBuildChatOnlyRejectsInvalidSettings(t *testing.T) {
+	t.Setenv("TURBORG_DISCORD_TOKEN", "")
+	t.Setenv("TURBORG_DISCORD_GUILD_ID", "")
+	s := &config.Settings{CommandPrefix: "!", Connectors: []string{"discord"}}
+	_, err := runtime.Build(s, nil, nil)
+	require.Error(t, err, "a chat container with no credentials fails to build")
+}
+
 // --- guard composition ---------------------------------------------------
 
 func TestGuardEmptySettingsDeniesAll(t *testing.T) {
