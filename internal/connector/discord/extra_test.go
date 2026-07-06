@@ -62,7 +62,7 @@ func TestSetInitialSuspendedThenStartSkipsConnect(t *testing.T) {
 	t.Cleanup(func() { _ = c.Stop(context.Background()) })
 	c.SetInitialSuspended(true)
 	require.NoError(t, c.Start(context.Background()))
-	assert.False(t, fs.opened, "a connector set suspended before Start does not open")
+	assert.False(t, fs.wasOpened(), "a connector set suspended before Start does not open")
 }
 
 func TestSuspendResumeIdempotent(t *testing.T) {
@@ -85,7 +85,7 @@ func TestRunReconnectsOnLifecycleSignal(t *testing.T) {
 
 	// A lifecycle wake while not suspended re-opens the (pre-injected) session.
 	c.signalLifecycle()
-	require.Eventually(t, func() bool { return fs.opened }, time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return fs.wasOpened() }, time.Second, 10*time.Millisecond)
 
 	cancel()
 	select {
@@ -142,7 +142,8 @@ func TestActorSayPropagatesSendError(t *testing.T) {
 }
 
 func TestStopIsIdempotent(t *testing.T) {
-	c, _ := newTestConn(t, &Settings{GuildID: "g1"})
+	c, fs := newTestConn(t, &Settings{GuildID: "g1"})
 	require.NoError(t, c.Stop(context.Background()), "first Stop closes the live session")
+	assert.True(t, fs.wasClosed(), "Stop closes the underlying session")
 	require.NoError(t, c.Stop(context.Background()), "second Stop is a no-op")
 }

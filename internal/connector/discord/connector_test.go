@@ -3,6 +3,7 @@ package discord
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,9 +15,10 @@ import (
 
 // fakeSession is an in-memory stand-in for *discordgo.Session so tests never
 // open a real Gateway socket. It records the last call of each moderation /
-// send method.
+// send method. opened/closed are atomic because Open/Close are driven from the
+// connector's Run goroutine (connect/disconnect) while a test asserts on them.
 type fakeSession struct {
-	opened, closed bool
+	opened, closed atomic.Bool
 	sends          []sentMsg
 	replies        []sentReply
 	kicks          []kickCall
@@ -34,8 +36,12 @@ type kickCall struct{ guild, user, reason string }
 type banCall struct{ guild, user, reason string }
 type topicCall struct{ channel, topic string }
 
-func (f *fakeSession) Open() error  { f.opened = true; return nil }
-func (f *fakeSession) Close() error { f.closed = true; return nil }
+func (f *fakeSession) Open() error  { f.opened.Store(true); return nil }
+func (f *fakeSession) Close() error { f.closed.Store(true); return nil }
+
+// wasOpened / wasClosed are the race-free readers for the atomic lifecycle flags.
+func (f *fakeSession) wasOpened() bool { return f.opened.Load() }
+func (f *fakeSession) wasClosed() bool { return f.closed.Load() }
 
 func (f *fakeSession) ChannelMessageSend(channelID, content string, _ ...discordgo.RequestOption) (*discordgo.Message, error) {
 	if f.failSend {
@@ -220,7 +226,7 @@ func TestActorSayPublishesSent(t *testing.T) {
 func TestSuspendResumeLifecycle(t *testing.T) {
 	c, fs := newTestConn(t, &Settings{GuildID: "g1"})
 	require.NoError(t, c.Start(context.Background()))
-	assert.True(t, fs.opened, "Start opens the (pre-injected) session")
+	assert.True(t, fs.wasOpened(), "Start opens the (pre-injected) session")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -244,7 +250,7 @@ func TestStartSuspendedSkipsConnect(t *testing.T) {
 	c.session = fs
 	t.Cleanup(func() { _ = c.Stop(context.Background()) })
 	require.NoError(t, c.Start(context.Background()))
-	assert.False(t, fs.opened, "a suspended connector does not open on Start")
+	assert.False(t, fs.wasOpened(), "a suspended connector does not open on Start")
 }
 
 func TestNameAndSupervision(t *testing.T) {
