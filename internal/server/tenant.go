@@ -14,7 +14,10 @@ import (
 	"time"
 
 	"github.com/turborg/turborg/internal/agent"
+	discordconn "github.com/turborg/turborg/internal/connector/discord"
 	"github.com/turborg/turborg/internal/connector/irc"
+	slackconn "github.com/turborg/turborg/internal/connector/slack"
+	telegramconn "github.com/turborg/turborg/internal/connector/telegram"
 	webconn "github.com/turborg/turborg/internal/connector/web"
 	"github.com/turborg/turborg/internal/flow"
 	"github.com/turborg/turborg/internal/ident"
@@ -112,6 +115,14 @@ type Tenant struct {
 	// connector → an inbound chat request is closed with 404. Distinct from
 	// gateway: that streams an IRC session to a dashboard; this IS the chat.
 	webConn *webconn.Connector
+	// discordConn / telegramConn / slackConn are the live chat-platform
+	// connectors for the current run, built in buildConnectors when the spec
+	// carries the matching connector and cleared when the run ends. Each dials
+	// OUT to its platform (no inbound port), so — unlike IRC/web — there is no
+	// per-connector router entry point; they are held only for teardown.
+	discordConn  *discordconn.Connector
+	telegramConn *telegramconn.Connector
+	slackConn    *slackconn.Connector
 	// stateEmitter mirrors this tenant's connector state (upstream status,
 	// channels, nick) to the control plane on every transition, so a downstream
 	// UI can reflect connection status for pooled tenants the same way it does
@@ -331,6 +342,9 @@ func (t *Tenant) defaultWork() func(context.Context) error {
 		t.ircConn = nil
 		t.gateway = nil
 		t.webConn = nil
+		t.discordConn = nil
+		t.telegramConn = nil
+		t.slackConn = nil
 		t.stateEmitter = nil
 		t.messageSink = nil
 		t.agentRef = nil
@@ -534,10 +548,70 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			t.webConn = conn
 			t.wiring = wiring
 			t.mu.Unlock()
+		case "discord":
+			settings, err := discordSettingsFromConnectorSpec(cs)
+			if err != nil {
+				t.log.Error("skipping invalid discord connector", "err", err)
+				continue
+			}
+			conn := discordconn.New(settings, t.log, a.Events)
+			conn.SetInitialSuspended(settings.Suspended)
+			wiring := t.wireChatConnector(a, cs, caps, conn, discordconn.NewActor(conn), conn.BotName, "Discord", ignoredNicks, cmds)
+			t.mu.Lock()
+			t.discordConn = conn
+			t.wiring = wiring
+			t.mu.Unlock()
+		case "telegram":
+			settings, err := telegramSettingsFromConnectorSpec(cs)
+			if err != nil {
+				t.log.Error("skipping invalid telegram connector", "err", err)
+				continue
+			}
+			conn := telegramconn.New(settings, t.log, a.Events)
+			conn.SetInitialSuspended(settings.Suspended)
+			wiring := t.wireChatConnector(a, cs, caps, conn, telegramconn.NewActor(conn), conn.BotName, "Telegram", ignoredNicks, cmds)
+			t.mu.Lock()
+			t.telegramConn = conn
+			t.wiring = wiring
+			t.mu.Unlock()
+		case "slack":
+			settings, err := slackSettingsFromConnectorSpec(cs)
+			if err != nil {
+				t.log.Error("skipping invalid slack connector", "err", err)
+				continue
+			}
+			conn := slackconn.New(settings, t.log, a.Events)
+			conn.SetInitialSuspended(settings.Suspended)
+			wiring := t.wireChatConnector(a, cs, caps, conn, slackconn.NewActor(conn), conn.BotName, "Slack", ignoredNicks, cmds)
+			t.mu.Lock()
+			t.slackConn = conn
+			t.wiring = wiring
+			t.mu.Unlock()
 		default:
 			t.log.Warn("connector type not supported in pooled mode yet", "type", cs.Type)
 		}
 	}
+}
+
+// wireChatConnector installs the shared, connector-agnostic agent wiring for a
+// dial-out chat-platform connector (discord / telegram / slack) — the same
+// runtime.WireCore path the web arm uses, so the surfaces can't drift. It builds
+// the durable message store (persisting bot output through to the control plane),
+// the budgeted LLM provider, and the CommonParams from the tenant's caps + spec,
+// then returns the live Wiring. The connector-native Actor + bot-nick resolver
+// are the only per-platform bits the caller supplies.
+func (t *Tenant) wireChatConnector(a *agent.Agent, cs ConnectorSpec, caps *PlanCapabilities, conn agent.Connector, actor agent.Actor, botNick func() string, platform string, ignoredNicks []string, cmds []skill.Skill) *runtime.Wiring {
+	store, sink := t.buildMessageStore()
+	t.mu.Lock()
+	t.messageSink = sink
+	t.mu.Unlock()
+
+	cp := t.commonParams(cs, caps, botNick(), store, ignoredNicks, cmds)
+	cp.Platform = platform
+	cp.Flows = t.spec.Flows
+	budgetedProvider := runtime.BuildBudgetedProvider(a, cp.LLM, cp.LLMInputCap, cp.LLMOutputCap, cp.LLMInputUsed, cp.LLMOutputUsed, t.log)
+	cp.LLM = budgetedProvider
+	return runtime.WireCore(a, conn, actor, botNick, budgetedProvider, cp, t.log)
 }
 
 // applyTierSettings overrides the connector defaults ApplyDefaults filled with

@@ -78,6 +78,17 @@ func Build(s *config.Settings, ircCfg *irc.Settings, log *slog.Logger) (*Built, 
 		log = slog.Default()
 	}
 
+	// Dedicated chat-platform container: TURBORG_CONNECTORS names exactly one of
+	// discord/telegram/slack and nothing else. These dial OUT (no bouncer,
+	// gateway, or IRC state-push) and carry no IRC config, so they take a
+	// dedicated build path that wires the connector via WireCore — the same
+	// connector-agnostic core the IRC and web paths use. Every other shape (the
+	// IRC quickstart default, or any set containing IRC) falls through to the
+	// IRC-primary path below.
+	if name, ok := singlePrimaryChatConnector(s.Connectors); ok {
+		return buildChatOnly(name, s, log)
+	}
+
 	if err := applyOperatorPolicy(s, ircCfg); err != nil {
 		return nil, err
 	}

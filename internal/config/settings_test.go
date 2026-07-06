@@ -44,10 +44,18 @@ func TestLoadConnectorsCSV(t *testing.T) {
 }
 
 func TestLoadRejectsUnknownConnector(t *testing.T) {
-	t.Setenv("TURBORG_CONNECTORS", "discord")
+	t.Setenv("TURBORG_CONNECTORS", "matrix")
 	_, err := config.Load()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown connector")
+}
+
+func TestLoadAcceptsChatPlatformConnectors(t *testing.T) {
+	t.Setenv("TURBORG_CONNECTORS", "discord, telegram, slack")
+	s, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"discord", "telegram", "slack"}, s.Connectors,
+		"the chat-platform connectors are part of the closed valid set")
 }
 
 func TestLoadRespectsAnthropicEnable(t *testing.T) {
@@ -92,10 +100,10 @@ func TestLoadRejectsMalformedLLMTokensEnv(t *testing.T) {
 }
 
 func TestLoadRejectsCSVWithStrayWhitespaceUnknownEntries(t *testing.T) {
-	t.Setenv("TURBORG_CONNECTORS", " irc , ,  discord ")
+	t.Setenv("TURBORG_CONNECTORS", " irc , ,  matrix ")
 	_, err := config.Load()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "discord")
+	assert.Contains(t, err.Error(), "matrix")
 }
 
 func TestLoadAllowsDuplicateEntriesInCSV(t *testing.T) {
