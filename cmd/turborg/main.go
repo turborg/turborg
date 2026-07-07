@@ -84,9 +84,16 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
-	ircSettings, err := runtime.LoadIRCSettings()
-	if err != nil {
-		return err
+	// A dedicated chat-platform container (a single discord/telegram/slack
+	// connector) carries no IRC config, so only load the hard-required IRC env
+	// when the connector set actually needs it (the IRC quickstart default, or
+	// any set containing IRC). ircSettings stays nil on the chat-only path.
+	var ircSettings *irc.Settings
+	if runtime.RequiresIRCSettings(settings) {
+		ircSettings, err = runtime.LoadIRCSettings()
+		if err != nil {
+			return err
+		}
 	}
 
 	log, err := logging.New(stderr, settings.LogLevel, settings.LogFormat)
@@ -110,7 +117,7 @@ func runE(stderr interface{ Write(p []byte) (int, error) }) error {
 		mode = "llm"
 	}
 	bouncerState := "off"
-	if ircSettings.BouncerEnabled() {
+	if ircSettings != nil && ircSettings.BouncerEnabled() {
 		bouncerState = fmt.Sprintf("on@%s:%d", ircSettings.BouncerHost, ircSettings.BouncerPort)
 	}
 	gatewayState := "off"

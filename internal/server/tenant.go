@@ -14,7 +14,10 @@ import (
 	"time"
 
 	"github.com/turborg/turborg/internal/agent"
+	discordconn "github.com/turborg/turborg/internal/connector/discord"
 	"github.com/turborg/turborg/internal/connector/irc"
+	slackconn "github.com/turborg/turborg/internal/connector/slack"
+	telegramconn "github.com/turborg/turborg/internal/connector/telegram"
 	webconn "github.com/turborg/turborg/internal/connector/web"
 	"github.com/turborg/turborg/internal/flow"
 	"github.com/turborg/turborg/internal/ident"
@@ -112,6 +115,14 @@ type Tenant struct {
 	// connector → an inbound chat request is closed with 404. Distinct from
 	// gateway: that streams an IRC session to a dashboard; this IS the chat.
 	webConn *webconn.Connector
+	// discordConn / telegramConn / slackConn are the live chat-platform
+	// connectors for the current run, built in buildConnectors when the spec
+	// carries the matching connector and cleared when the run ends. Each dials
+	// OUT to its platform (no inbound port), so — unlike IRC/web — there is no
+	// per-connector router entry point; they are held only for teardown.
+	discordConn  *discordconn.Connector
+	telegramConn *telegramconn.Connector
+	slackConn    *slackconn.Connector
 	// stateEmitter mirrors this tenant's connector state (upstream status,
 	// channels, nick) to the control plane on every transition, so a downstream
 	// UI can reflect connection status for pooled tenants the same way it does
@@ -331,6 +342,9 @@ func (t *Tenant) defaultWork() func(context.Context) error {
 		t.ircConn = nil
 		t.gateway = nil
 		t.webConn = nil
+		t.discordConn = nil
+		t.telegramConn = nil
+		t.slackConn = nil
 		t.stateEmitter = nil
 		t.messageSink = nil
 		t.agentRef = nil
@@ -375,169 +389,270 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 	for _, cs := range connectors {
 		switch cs.Type {
 		case "irc":
-			settings, err := settingsFromConnectorSpec(cs)
-			if err != nil {
-				t.log.Error("skipping invalid irc connector", "err", err)
-				continue
-			}
-			// Override the connector's ApplyDefaults with the per-instance values
-			// the single-instance binary gets from env (QUIT brand + CTCP / bouncer
-			// auth-failure tightening) — all sourced from the tenant feed's caps.
-			t.applyTierSettings(settings, caps)
-			// Bind the tenant's assigned egress IP so its outbound IRC leaves on
-			// the right public IP (per-tenant egress round-robin). Empty/unresolved
-			// → default route; see egress.go.
-			if egressIP != "" {
-				if src := defaultEgressResolver.resolveSourceIP(egressIP); src != "" {
-					settings.SourceIP = src
-				}
-			}
-			// Wire the connector to the tenant-owned agent bus: the bouncer's
-			// outbound observer and the connector's join/part/topic/state events
-			// publish here, and the web gateway subscribes to the same bus so the
-			// web shell sees the full event stream (not just plain messages,
-			// which arrive via the agent's inbound drain regardless).
-			conn := irc.New(settings, t.log, a.Events)
-			// Never reconnect faster than the upstream reaps our ghost nick
-			// (avoids 433 self-collision storms on the shared egress IP).
-			conn.SetReconnectFloor(irc.DefaultReconnectFloor)
-			// Pooled runtime: the bouncer must not bind its own port — the pool
-			// router feeds it connections via ServeBouncerConn after PROXY-v2
-			// tenant resolution. Set before WireCommon adds the connector.
-			conn.SetBouncerListenerless(true)
-			// Report this tenant's upstream source port → ident so an external
-			// RFC-1413 responder can name it (kills the ~ prefix + satisfies
-			// "identd required" networks). Shared registry across all tenants.
-			conn.SetIdentReporter(t.idents)
-			// Boot already parked when the user has the link disconnected, so a
-			// pool restart of a suspended tenant comes up parked rather than
-			// flapping connect→quit. Live toggles arrive via applySuspend.
-			conn.SetInitialSuspended(boolField(cs.Config, "suspended", false))
-
-			// Durable message store (write-through to the control plane), so the
-			// bouncer welcome replay, web-shell scrollback, and the user's
-			// readable history survive a pool restart. Falls back to in-process
-			// when no control plane is configured. The sink owns a flush
-			// goroutine closed in defaultWork.
-			store, sink := t.buildMessageStore()
-			t.mu.Lock()
-			t.messageSink = sink
-			t.mu.Unlock()
-
-			// The shared, connector-agnostic wiring — identical to the single-instance
-			// runtime, which calls the same runtime.WireCommon. Gives pooled
-			// tenants builtins (!ping/!version/!ask), the owner command guard,
-			// plan limits + outbound throttle, owner nudge, activity reporting,
-			// and message-store submitters, so the two modes can't drift. Owner-
-			// trust config travels in the connector config (the feed reuses the
-			// same connectorList() shape the single-instance spawn payload does).
-			// Build the budgeted provider once so the same budget instance is
-			// shared by the connector/commands (WireCommon) and the web gateway
-			// below. WireCommon's own wrap is idempotent on this.
-			cp := t.commonParams(cs, caps, settings.Nick, store, ignoredNicks, cmds)
-			cp.Platform = settings.Hostname
-			cp.Flows = t.spec.Flows
-			budgetedProvider := runtime.BuildBudgetedProvider(a, cp.LLM, cp.LLMInputCap, cp.LLMOutputCap, cp.LLMInputUsed, cp.LLMOutputUsed, t.log)
-			cp.LLM = budgetedProvider
-			wiring, err := runtime.WireCommon(a, conn, cp, t.log)
-			if err != nil {
-				t.log.Error("skipping irc connector: wiring failed", "err", err)
-				continue
-			}
-
-			t.mu.Lock()
-			t.ircConn = conn
-			t.wiring = wiring
-			t.mu.Unlock()
-
-			// Connector-state sync: mirror upstream status / channels / nick to
-			// the control plane on every transition, so a downstream UI reflects
-			// connection status for pooled tenants the same way it does for
-			// single-instance ones. Inert + nil when no control plane.
-			if em := buildTenantStateEmitter(conn, t.ID, t.controlPlaneURL, t.controlPlaneToken, t.log); em != nil {
-				t.mu.Lock()
-				t.stateEmitter = em
-				t.mu.Unlock()
-			}
-
-			// Web shell: built only when the tenant carries a gateway token (the
-			// feed expresses the "web shell enabled" capability by emitting the
-			// token at all). Listenerless like the bouncer — the web
-			// router dispatches `/c/<id>` to the shared Handler via ServeWS, so the
-			// gateway never binds its own port.
-			if gatewayToken != "" {
-				var tbCap int
-				if caps != nil {
-					tbCap = caps.TBSummarizeMaxMessages
-				}
-				gwActivity := func(string) {
-					if t.activity != nil {
-						t.activity.Mark(t.ID)
-					}
-				}
-				gw, err := buildTenantGateway(conn, gatewayToken, t.log, store, budgetedProvider, tbCap, gwActivity, wiring.FireWebhook)
-				if err != nil {
-					t.log.Error("skipping web gateway", "err", err)
-					continue
-				}
-				gw.Subscribe(a.Events)
-				t.mu.Lock()
-				t.gateway = gw
-				t.mu.Unlock()
-			}
+			t.buildIRCConnector(a, cs, caps, gatewayToken, ignoredNicks, cmds, egressIP)
 		case "web":
-			// The tenant's gateway_token doubles as the web-chat token signing
-			// key (no fleet-wide key by design). Empty → no web connector.
-			webSettings, verifier, err := webSettingsFromConnectorSpec(cs, gatewayToken)
-			if err != nil {
-				t.log.Error("skipping invalid web connector", "err", err)
-				continue
-			}
-			conn := webconn.New(webSettings, t.log, a.Events, verifier)
-
-			// Durable scrollback + write-through to the control plane, exactly as
-			// the IRC arm — the connector reads it on attach-replay + the history
-			// op, and the shared store submitter (wired by WireCore) writes it.
-			store, sink := t.buildMessageStore()
-			t.mu.Lock()
-			t.messageSink = sink
-			t.mu.Unlock()
-			conn.SetMessageStore(store)
-
-			// Owner presence: an inbound web chat message marks the tenant active
-			// in the pool's coalescing aggregator so a web-only tenant isn't
-			// idle-paused while its owner is talking to it.
-			if t.activity != nil {
-				conn.SetActivityHook(func(string) { t.activity.Mark(t.ID) })
-			}
-
-			// Same shared, connector-agnostic wiring the IRC arm gets — builtins,
-			// command guard, skill engine + scheduler, flow engine, persistence —
-			// via runtime.WireCore, so the two connectors can't drift. The web
-			// Actor + a fixed bot-nick resolver are the only connector-native bits.
-			cp := t.commonParams(cs, caps, webSettings.BotNick, store, ignoredNicks, cmds)
-			cp.Platform = "Web"
-			cp.Flows = t.spec.Flows
-			budgetedProvider := runtime.BuildBudgetedProvider(a, cp.LLM, cp.LLMInputCap, cp.LLMOutputCap, cp.LLMInputUsed, cp.LLMOutputUsed, t.log)
-			cp.LLM = budgetedProvider
-			// AI console: free-text (non-command) messages are answered by the
-			// LLM, with the daily token budget already enforced by the budgeted
-			// provider — a spent budget surfaces as a distinct budget-exhausted
-			// signal. Conversation memory is the shared message store
-			// (SetMessageStore above), bounded by the store's own retention.
-			conn.SetLLMProvider(budgetedProvider)
-			conn.SetCommandPrefix(a.Commands.Prefix())
-			botNick := func() string { return webSettings.BotNick }
-			wiring := runtime.WireCore(a, conn, webconn.NewActor(conn), botNick, budgetedProvider, cp, t.log)
-
-			t.mu.Lock()
-			t.webConn = conn
-			t.wiring = wiring
-			t.mu.Unlock()
+			t.buildWebConnector(a, cs, caps, gatewayToken, ignoredNicks, cmds)
+		case "discord":
+			t.buildDiscordConnector(a, cs, caps, ignoredNicks, cmds)
+		case "telegram":
+			t.buildTelegramConnector(a, cs, caps, ignoredNicks, cmds)
+		case "slack":
+			t.buildSlackConnector(a, cs, caps, ignoredNicks, cmds)
 		default:
 			t.log.Warn("connector type not supported in pooled mode yet", "type", cs.Type)
 		}
 	}
+}
+
+// buildIRCConnector constructs the tenant's IRC connector from its spec: it
+// applies the tier/egress overrides, wires the shared connector-agnostic core
+// (runtime.WireCommon — builtins, owner guard, plan limits, throttle, nudge,
+// activity, message-store submitters), mirrors connection state to the control
+// plane, and attaches the (listenerless) web shell when the tenant carries a
+// gateway token. An invalid spec or failed wiring is logged and skipped.
+func (t *Tenant) buildIRCConnector(a *agent.Agent, cs ConnectorSpec, caps *PlanCapabilities, gatewayToken string, ignoredNicks []string, cmds []skill.Skill, egressIP string) {
+	settings, err := settingsFromConnectorSpec(cs)
+	if err != nil {
+		t.log.Error("skipping invalid irc connector", "err", err)
+		return
+	}
+	// Override the connector's ApplyDefaults with the per-instance values
+	// the single-instance binary gets from env (QUIT brand + CTCP / bouncer
+	// auth-failure tightening) — all sourced from the tenant feed's caps.
+	t.applyTierSettings(settings, caps)
+	// Bind the tenant's assigned egress IP so its outbound IRC leaves on
+	// the right public IP (per-tenant egress round-robin). Empty/unresolved
+	// → default route; see egress.go.
+	if egressIP != "" {
+		if src := defaultEgressResolver.resolveSourceIP(egressIP); src != "" {
+			settings.SourceIP = src
+		}
+	}
+	// Wire the connector to the tenant-owned agent bus: the bouncer's
+	// outbound observer and the connector's join/part/topic/state events
+	// publish here, and the web gateway subscribes to the same bus so the
+	// web shell sees the full event stream (not just plain messages,
+	// which arrive via the agent's inbound drain regardless).
+	conn := irc.New(settings, t.log, a.Events)
+	// Never reconnect faster than the upstream reaps our ghost nick
+	// (avoids 433 self-collision storms on the shared egress IP).
+	conn.SetReconnectFloor(irc.DefaultReconnectFloor)
+	// Pooled runtime: the bouncer must not bind its own port — the pool
+	// router feeds it connections via ServeBouncerConn after PROXY-v2
+	// tenant resolution. Set before WireCommon adds the connector.
+	conn.SetBouncerListenerless(true)
+	// Report this tenant's upstream source port → ident so an external
+	// RFC-1413 responder can name it (kills the ~ prefix + satisfies
+	// "identd required" networks). Shared registry across all tenants.
+	conn.SetIdentReporter(t.idents)
+	// Boot already parked when the user has the link disconnected, so a
+	// pool restart of a suspended tenant comes up parked rather than
+	// flapping connect→quit. Live toggles arrive via applySuspend.
+	conn.SetInitialSuspended(boolField(cs.Config, "suspended", false))
+
+	// Durable message store (write-through to the control plane), so the
+	// bouncer welcome replay, web-shell scrollback, and the user's
+	// readable history survive a pool restart. Falls back to in-process
+	// when no control plane is configured. The sink owns a flush
+	// goroutine closed in defaultWork.
+	store, sink := t.buildMessageStore()
+	t.mu.Lock()
+	t.messageSink = sink
+	t.mu.Unlock()
+
+	// The shared, connector-agnostic wiring — identical to the single-instance
+	// runtime, which calls the same runtime.WireCommon. Gives pooled
+	// tenants builtins (!ping/!version/!ask), the owner command guard,
+	// plan limits + outbound throttle, owner nudge, activity reporting,
+	// and message-store submitters, so the two modes can't drift. Owner-
+	// trust config travels in the connector config (the feed reuses the
+	// same connectorList() shape the single-instance spawn payload does).
+	// Build the budgeted provider once so the same budget instance is
+	// shared by the connector/commands (WireCommon) and the web gateway
+	// below. WireCommon's own wrap is idempotent on this.
+	cp := t.commonParams(cs, caps, settings.Nick, store, ignoredNicks, cmds)
+	cp.Platform = settings.Hostname
+	cp.Flows = t.spec.Flows
+	budgetedProvider := runtime.BuildBudgetedProvider(a, cp.LLM, cp.LLMInputCap, cp.LLMOutputCap, cp.LLMInputUsed, cp.LLMOutputUsed, t.log)
+	cp.LLM = budgetedProvider
+	wiring, err := runtime.WireCommon(a, conn, cp, t.log)
+	if err != nil {
+		t.log.Error("skipping irc connector: wiring failed", "err", err)
+		return
+	}
+
+	t.mu.Lock()
+	t.ircConn = conn
+	t.wiring = wiring
+	t.mu.Unlock()
+
+	// Connector-state sync: mirror upstream status / channels / nick to
+	// the control plane on every transition, so a downstream UI reflects
+	// connection status for pooled tenants the same way it does for
+	// single-instance ones. Inert + nil when no control plane.
+	if em := buildTenantStateEmitter(conn, t.ID, t.controlPlaneURL, t.controlPlaneToken, t.log); em != nil {
+		t.mu.Lock()
+		t.stateEmitter = em
+		t.mu.Unlock()
+	}
+
+	// Web shell: built only when the tenant carries a gateway token (the
+	// feed expresses the "web shell enabled" capability by emitting the
+	// token at all).
+	if gatewayToken != "" {
+		t.buildIRCGateway(a, conn, caps, gatewayToken, store, budgetedProvider, wiring)
+	}
+}
+
+// buildIRCGateway attaches the tenant's (listenerless) web shell to a live IRC
+// connector — the web router dispatches `/c/<id>` to the shared Handler via
+// ServeWS, so the gateway never binds its own port. A build failure is logged
+// and skipped, leaving the IRC connector intact.
+func (t *Tenant) buildIRCGateway(a *agent.Agent, conn *irc.Connector, caps *PlanCapabilities, gatewayToken string, store messages.Store, budgetedProvider llm.Provider, wiring *runtime.Wiring) {
+	var tbCap int
+	if caps != nil {
+		tbCap = caps.TBSummarizeMaxMessages
+	}
+	gwActivity := func(string) {
+		if t.activity != nil {
+			t.activity.Mark(t.ID)
+		}
+	}
+	gw, err := buildTenantGateway(conn, gatewayToken, t.log, store, budgetedProvider, tbCap, gwActivity, wiring.FireWebhook)
+	if err != nil {
+		t.log.Error("skipping web gateway", "err", err)
+		return
+	}
+	gw.Subscribe(a.Events)
+	t.mu.Lock()
+	t.gateway = gw
+	t.mu.Unlock()
+}
+
+// buildWebConnector constructs the tenant's hosted web-chat connector: the
+// gateway_token doubles as the web-chat token signing key (no fleet-wide key by
+// design). It wires the same shared connector-agnostic core the IRC arm uses
+// (runtime.WireCore) plus the web-native Actor, LLM console, and durable
+// scrollback. An invalid spec is logged and skipped.
+func (t *Tenant) buildWebConnector(a *agent.Agent, cs ConnectorSpec, caps *PlanCapabilities, gatewayToken string, ignoredNicks []string, cmds []skill.Skill) {
+	webSettings, verifier, err := webSettingsFromConnectorSpec(cs, gatewayToken)
+	if err != nil {
+		t.log.Error("skipping invalid web connector", "err", err)
+		return
+	}
+	conn := webconn.New(webSettings, t.log, a.Events, verifier)
+
+	// Durable scrollback + write-through to the control plane, exactly as
+	// the IRC arm — the connector reads it on attach-replay + the history
+	// op, and the shared store submitter (wired by WireCore) writes it.
+	store, sink := t.buildMessageStore()
+	t.mu.Lock()
+	t.messageSink = sink
+	t.mu.Unlock()
+	conn.SetMessageStore(store)
+
+	// Owner presence: an inbound web chat message marks the tenant active
+	// in the pool's coalescing aggregator so a web-only tenant isn't
+	// idle-paused while its owner is talking to it.
+	if t.activity != nil {
+		conn.SetActivityHook(func(string) { t.activity.Mark(t.ID) })
+	}
+
+	// Same shared, connector-agnostic wiring the IRC arm gets — builtins,
+	// command guard, skill engine + scheduler, flow engine, persistence —
+	// via runtime.WireCore, so the two connectors can't drift. The web
+	// Actor + a fixed bot-nick resolver are the only connector-native bits.
+	cp := t.commonParams(cs, caps, webSettings.BotNick, store, ignoredNicks, cmds)
+	cp.Platform = "Web"
+	cp.Flows = t.spec.Flows
+	budgetedProvider := runtime.BuildBudgetedProvider(a, cp.LLM, cp.LLMInputCap, cp.LLMOutputCap, cp.LLMInputUsed, cp.LLMOutputUsed, t.log)
+	cp.LLM = budgetedProvider
+	// AI console: free-text (non-command) messages are answered by the
+	// LLM, with the daily token budget already enforced by the budgeted
+	// provider — a spent budget surfaces as a distinct budget-exhausted
+	// signal. Conversation memory is the shared message store
+	// (SetMessageStore above), bounded by the store's own retention.
+	conn.SetLLMProvider(budgetedProvider)
+	conn.SetCommandPrefix(a.Commands.Prefix())
+	botNick := func() string { return webSettings.BotNick }
+	wiring := runtime.WireCore(a, conn, webconn.NewActor(conn), botNick, budgetedProvider, cp, t.log)
+
+	t.mu.Lock()
+	t.webConn = conn
+	t.wiring = wiring
+	t.mu.Unlock()
+}
+
+// buildDiscordConnector constructs the tenant's dial-out Discord connector and
+// installs the shared chat wiring. An invalid spec is logged and skipped.
+func (t *Tenant) buildDiscordConnector(a *agent.Agent, cs ConnectorSpec, caps *PlanCapabilities, ignoredNicks []string, cmds []skill.Skill) {
+	settings, err := discordSettingsFromConnectorSpec(cs)
+	if err != nil {
+		t.log.Error("skipping invalid discord connector", "err", err)
+		return
+	}
+	conn := discordconn.New(settings, t.log, a.Events)
+	conn.SetInitialSuspended(settings.Suspended)
+	wiring := t.wireChatConnector(a, cs, caps, conn, discordconn.NewActor(conn), conn.BotName, "Discord", ignoredNicks, cmds)
+	t.mu.Lock()
+	t.discordConn = conn
+	t.wiring = wiring
+	t.mu.Unlock()
+}
+
+// buildTelegramConnector constructs the tenant's dial-out Telegram connector and
+// installs the shared chat wiring. An invalid spec is logged and skipped.
+func (t *Tenant) buildTelegramConnector(a *agent.Agent, cs ConnectorSpec, caps *PlanCapabilities, ignoredNicks []string, cmds []skill.Skill) {
+	settings, err := telegramSettingsFromConnectorSpec(cs)
+	if err != nil {
+		t.log.Error("skipping invalid telegram connector", "err", err)
+		return
+	}
+	conn := telegramconn.New(settings, t.log, a.Events)
+	conn.SetInitialSuspended(settings.Suspended)
+	wiring := t.wireChatConnector(a, cs, caps, conn, telegramconn.NewActor(conn), conn.BotName, "Telegram", ignoredNicks, cmds)
+	t.mu.Lock()
+	t.telegramConn = conn
+	t.wiring = wiring
+	t.mu.Unlock()
+}
+
+// buildSlackConnector constructs the tenant's dial-out Slack connector and
+// installs the shared chat wiring. An invalid spec is logged and skipped.
+func (t *Tenant) buildSlackConnector(a *agent.Agent, cs ConnectorSpec, caps *PlanCapabilities, ignoredNicks []string, cmds []skill.Skill) {
+	settings, err := slackSettingsFromConnectorSpec(cs)
+	if err != nil {
+		t.log.Error("skipping invalid slack connector", "err", err)
+		return
+	}
+	conn := slackconn.New(settings, t.log, a.Events)
+	conn.SetInitialSuspended(settings.Suspended)
+	wiring := t.wireChatConnector(a, cs, caps, conn, slackconn.NewActor(conn), conn.BotName, "Slack", ignoredNicks, cmds)
+	t.mu.Lock()
+	t.slackConn = conn
+	t.wiring = wiring
+	t.mu.Unlock()
+}
+
+// wireChatConnector installs the shared, connector-agnostic agent wiring for a
+// dial-out chat-platform connector (discord / telegram / slack) — the same
+// runtime.WireCore path the web arm uses, so the surfaces can't drift. It builds
+// the durable message store (persisting bot output through to the control plane),
+// the budgeted LLM provider, and the CommonParams from the tenant's caps + spec,
+// then returns the live Wiring. The connector-native Actor + bot-nick resolver
+// are the only per-platform bits the caller supplies.
+func (t *Tenant) wireChatConnector(a *agent.Agent, cs ConnectorSpec, caps *PlanCapabilities, conn agent.Connector, actor agent.Actor, botNick func() string, platform string, ignoredNicks []string, cmds []skill.Skill) *runtime.Wiring {
+	store, sink := t.buildMessageStore()
+	t.mu.Lock()
+	t.messageSink = sink
+	t.mu.Unlock()
+
+	cp := t.commonParams(cs, caps, botNick(), store, ignoredNicks, cmds)
+	cp.Platform = platform
+	cp.Flows = t.spec.Flows
+	budgetedProvider := runtime.BuildBudgetedProvider(a, cp.LLM, cp.LLMInputCap, cp.LLMOutputCap, cp.LLMInputUsed, cp.LLMOutputUsed, t.log)
+	cp.LLM = budgetedProvider
+	return runtime.WireCore(a, conn, actor, botNick, budgetedProvider, cp, t.log)
 }
 
 // applyTierSettings overrides the connector defaults ApplyDefaults filled with

@@ -22,8 +22,11 @@ import (
 // knows how to build. Widen alongside new arms in
 // runtime.buildConnector.
 var ValidConnectors = map[string]bool{
-	"irc": true,
-	"web": true,
+	"irc":      true,
+	"web":      true,
+	"discord":  true,
+	"telegram": true,
+	"slack":    true,
 }
 
 // Settings is the top-level turborg config. Connector-specific knobs
