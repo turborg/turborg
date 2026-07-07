@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.20.0](https://github.com/turborg/turborg/compare/v0.19.0...v0.20.0) (2026-07-07)
+
+
+### Features
+
+* **connector/web:** make the console assistant turborg-aware ([#171](https://github.com/turborg/turborg/issues/171)) ([88d0c57](https://github.com/turborg/turborg/commit/88d0c57f17dec5578e11601d38cf986e3d4fb948))
+* **connector:** add Discord, Telegram & Slack connectors ([#175](https://github.com/turborg/turborg/issues/175)) ([e27742f](https://github.com/turborg/turborg/commit/e27742f304c7e3343082108b0b7bd9baba317f3e))
+
 ## [0.19.0](https://github.com/turborg/turborg/compare/v0.18.0...v0.19.0) (2026-07-05)
 
 
