@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -213,6 +214,26 @@ func TestMakeStoreSubmitterKeepsDistinctMessages(t *testing.T) {
 		sub(context.Background(), &agent.Event{Type: agent.EventMessage, Fields: f})
 	}
 	assert.Equal(t, 3, store.Len("#x"), "distinct text/nick must not be deduped")
+}
+
+// TestStoreDedupeFirstSight exercises the dedupe helper directly: a first
+// sighting persists, an immediate repeat within the window is suppressed, the
+// same key after the window is a fresh sighting again, and once the map grows
+// past the GC threshold a later sighting evicts the stale keys.
+func TestStoreDedupeFirstSight(t *testing.T) {
+	d := &storeDedupe{seen: make(map[string]time.Time)}
+	base := time.Unix(1_700_000_000, 0)
+
+	assert.True(t, d.firstSight("a", base), "first sighting persists")
+	assert.False(t, d.firstSight("a", base.Add(time.Second)), "repeat within window is suppressed")
+	assert.True(t, d.firstSight("a", base.Add(2*storeDedupeWindow)), "same key past the window is fresh again")
+
+	for i := 0; i < 600; i++ {
+		d.firstSight(fmt.Sprintf("k%d", i), base)
+	}
+	assert.True(t, d.firstSight("trigger", base.Add(10*time.Second)),
+		"a new key after the window is a first sighting")
+	assert.Less(t, len(d.seen), 600, "stale keys evicted once the map grew past the GC threshold")
 }
 
 func TestBuildSkillStoreNilWhenUnconfigured(t *testing.T) {
