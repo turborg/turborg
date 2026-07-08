@@ -230,9 +230,15 @@ func WireCore(a *agent.Agent, conn agent.Connector, actor agent.Actor, botNick f
 
 	a.AddConnector(conn)
 
-	if p.Store != nil {
-		a.Events.Subscribe(agent.EventMessage, makeStoreSubmitter(p.Store, botNick, log))
-		a.Events.Subscribe(agent.EventMessageSent, makeStoreSubmitter(p.Store, botNick, log))
+	if p.Store != nil && a.MarkStoreWired() {
+		// ONE submitter closure (with its own short-window dedupe) subscribed
+		// to BOTH events. A message you send surfaces twice — once as
+		// MESSAGE_SENT and again as the IRC self-echo MESSAGE — so the two
+		// subscriptions must share a single dedupe, and the whole thing must
+		// be wired once per agent (MarkStoreWired), or the row multiplies.
+		submit := makeStoreSubmitter(p.Store, botNick, log)
+		a.Events.Subscribe(agent.EventMessage, submit)
+		a.Events.Subscribe(agent.EventMessageSent, submit)
 	}
 
 	// Registry-wide guard: the ignore list + per-sender throttle, applied to

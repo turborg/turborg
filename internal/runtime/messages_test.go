@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -177,6 +178,62 @@ func TestMakeStoreSubmitterOutboundSkipsWhenBotNickEmpty(t *testing.T) {
 	})
 	assert.Equal(t, 0, store.Len("#x"),
 		"empty bot nick → row would 422; must skip rather than write a half-formed entry")
+}
+
+// TestMakeStoreSubmitterDedupesSendAndSelfEcho pins the duplicate-row fix: a
+// message you send arrives on MESSAGE_SENT and again as the IRC self-echo
+// MESSAGE. One submitter closure subscribed to both events must persist it
+// exactly once (previously it wrote both, each with a fresh minted msg_id, so
+// the receiver's msg_id dedupe couldn't collapse them).
+func TestMakeStoreSubmitterDedupesSendAndSelfEcho(t *testing.T) {
+	store := messages.NewMemoryStore(0)
+	sub := makeStoreSubmitter(store, func() string { return "bot" }, nil)
+	sub(context.Background(), &agent.Event{
+		Type:   agent.EventMessageSent,
+		Fields: map[string]any{"envelope": &agent.OutboundEnvelope{Channel: "#x", Text: "hello"}},
+	})
+	sub(context.Background(), &agent.Event{
+		Type:   agent.EventMessage,
+		Fields: map[string]any{"channel": "#x", "sender": "bot", "text": "hello"},
+	})
+	assert.Equal(t, 1, store.Len("#x"), "send + self-echo must collapse to one row")
+}
+
+// TestMakeStoreSubmitterKeepsDistinctMessages guards against the dedupe being
+// too greedy: different text, or the same text from a different nick, are
+// genuinely different messages and must all persist.
+func TestMakeStoreSubmitterKeepsDistinctMessages(t *testing.T) {
+	store := messages.NewMemoryStore(0)
+	sub := makeStoreSubmitter(store, nil, nil)
+	fields := []map[string]any{
+		{"channel": "#x", "sender": "alice", "text": "one"},
+		{"channel": "#x", "sender": "alice", "text": "two"},
+		{"channel": "#x", "sender": "bob", "text": "one"},
+	}
+	for _, f := range fields {
+		sub(context.Background(), &agent.Event{Type: agent.EventMessage, Fields: f})
+	}
+	assert.Equal(t, 3, store.Len("#x"), "distinct text/nick must not be deduped")
+}
+
+// TestStoreDedupeFirstSight exercises the dedupe helper directly: a first
+// sighting persists, an immediate repeat within the window is suppressed, the
+// same key after the window is a fresh sighting again, and once the map grows
+// past the GC threshold a later sighting evicts the stale keys.
+func TestStoreDedupeFirstSight(t *testing.T) {
+	d := &storeDedupe{seen: make(map[string]time.Time)}
+	base := time.Unix(1_700_000_000, 0)
+
+	assert.True(t, d.firstSight("a", base), "first sighting persists")
+	assert.False(t, d.firstSight("a", base.Add(time.Second)), "repeat within window is suppressed")
+	assert.True(t, d.firstSight("a", base.Add(2*storeDedupeWindow)), "same key past the window is fresh again")
+
+	for i := 0; i < 600; i++ {
+		d.firstSight(fmt.Sprintf("k%d", i), base)
+	}
+	assert.True(t, d.firstSight("trigger", base.Add(10*time.Second)),
+		"a new key after the window is a first sighting")
+	assert.Less(t, len(d.seen), 600, "stale keys evicted once the map grew past the GC threshold")
 }
 
 func TestBuildSkillStoreNilWhenUnconfigured(t *testing.T) {
