@@ -14,6 +14,7 @@ type Agent struct {
 	Commands   *CommandRegistry
 	Events     *EventBus
 	log        *slog.Logger
+	storeWired bool
 }
 
 func New(log *slog.Logger) *Agent {
@@ -42,6 +43,21 @@ func NewWithPrefix(log *slog.Logger, prefix string) *Agent {
 
 func (a *Agent) AddConnector(c Connector) {
 	a.connectors = append(a.connectors, c)
+}
+
+// MarkStoreWired reports whether the caller is the first to claim
+// message-store wiring on this agent, flipping the guard so later callers
+// get false. WireCore is invoked once per connector surface but they all
+// share this one agent + EventBus, so the durable-store submitter must be
+// subscribed exactly once — otherwise every message is persisted N times
+// (one row per surface), each with a distinct minted msg_id that defeats
+// the receiver's msg_id dedupe. Setup is single-threaded, so no lock.
+func (a *Agent) MarkStoreWired() bool {
+	if a.storeWired {
+		return false
+	}
+	a.storeWired = true
+	return true
 }
 
 // Log exposes the agent's logger for handlers + runtime composers that

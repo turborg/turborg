@@ -179,6 +179,42 @@ func TestMakeStoreSubmitterOutboundSkipsWhenBotNickEmpty(t *testing.T) {
 		"empty bot nick → row would 422; must skip rather than write a half-formed entry")
 }
 
+// TestMakeStoreSubmitterDedupesSendAndSelfEcho pins the duplicate-row fix: a
+// message you send arrives on MESSAGE_SENT and again as the IRC self-echo
+// MESSAGE. One submitter closure subscribed to both events must persist it
+// exactly once (previously it wrote both, each with a fresh minted msg_id, so
+// the receiver's msg_id dedupe couldn't collapse them).
+func TestMakeStoreSubmitterDedupesSendAndSelfEcho(t *testing.T) {
+	store := messages.NewMemoryStore(0)
+	sub := makeStoreSubmitter(store, func() string { return "bot" }, nil)
+	sub(context.Background(), &agent.Event{
+		Type:   agent.EventMessageSent,
+		Fields: map[string]any{"envelope": &agent.OutboundEnvelope{Channel: "#x", Text: "hello"}},
+	})
+	sub(context.Background(), &agent.Event{
+		Type:   agent.EventMessage,
+		Fields: map[string]any{"channel": "#x", "sender": "bot", "text": "hello"},
+	})
+	assert.Equal(t, 1, store.Len("#x"), "send + self-echo must collapse to one row")
+}
+
+// TestMakeStoreSubmitterKeepsDistinctMessages guards against the dedupe being
+// too greedy: different text, or the same text from a different nick, are
+// genuinely different messages and must all persist.
+func TestMakeStoreSubmitterKeepsDistinctMessages(t *testing.T) {
+	store := messages.NewMemoryStore(0)
+	sub := makeStoreSubmitter(store, nil, nil)
+	fields := []map[string]any{
+		{"channel": "#x", "sender": "alice", "text": "one"},
+		{"channel": "#x", "sender": "alice", "text": "two"},
+		{"channel": "#x", "sender": "bob", "text": "one"},
+	}
+	for _, f := range fields {
+		sub(context.Background(), &agent.Event{Type: agent.EventMessage, Fields: f})
+	}
+	assert.Equal(t, 3, store.Len("#x"), "distinct text/nick must not be deduped")
+}
+
 func TestBuildSkillStoreNilWhenUnconfigured(t *testing.T) {
 	s := &config.Settings{} // No STATE_URL configured.
 	assert.Nil(t, buildSkillStore(s, nil), "no state URL → nil (engines default to in-process)")

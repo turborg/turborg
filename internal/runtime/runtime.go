@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/turborg/turborg/internal/activity"
@@ -479,7 +480,43 @@ func buildSkillStore(s *config.Settings, log *slog.Logger) skill.Store {
 // re-resolve the nick on every event — handy when the bot renames
 // mid-session (NICK changes); avoids stamping the original boot-time
 // nick onto every later reply.
+// storeDedupeWindow is how long an identical (channel, nick, text) is treated
+// as the same logical message. A send and its IRC self-echo arrive well under a
+// second apart; the window only needs to be comfortably longer than that round
+// trip. The trade-off is that a human who sends byte-identical text to the same
+// channel twice inside the window collapses to one row — rare, and far less bad
+// than the 2–4× duplication it prevents.
+const storeDedupeWindow = 3 * time.Second
+
+// storeDedupe collapses the same logical message arriving on more than one
+// event (MESSAGE_SENT + the self-echo MESSAGE) within a short window.
+type storeDedupe struct {
+	mu   sync.Mutex
+	seen map[string]time.Time
+}
+
+// firstSight records key at now and reports whether it had NOT been seen within
+// the window (i.e. this is the copy that should be persisted).
+func (d *storeDedupe) firstSight(key string, now time.Time) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if last, ok := d.seen[key]; ok && now.Sub(last) < storeDedupeWindow {
+		d.seen[key] = now // refresh so a burst stays collapsed
+		return false
+	}
+	d.seen[key] = now
+	if len(d.seen) > 512 { // opportunistic GC of stale keys
+		for k, t := range d.seen {
+			if now.Sub(t) >= storeDedupeWindow {
+				delete(d.seen, k)
+			}
+		}
+	}
+	return true
+}
+
 func makeStoreSubmitter(store messages.Store, botNick func() string, log *slog.Logger) func(ctx context.Context, ev *agent.Event) {
+	dedupe := &storeDedupe{seen: make(map[string]time.Time)}
 	return func(ctx context.Context, ev *agent.Event) {
 		channel, _ := ev.Fields["channel"].(string)
 		nick, _ := ev.Fields["sender"].(string)
@@ -520,11 +557,17 @@ func makeStoreSubmitter(store messages.Store, botNick func() string, log *slog.L
 		if channel == "" || nick == "" || text == "" {
 			return
 		}
+		now := time.Now()
+		// Same message can land on MESSAGE_SENT and again on the self-echo
+		// MESSAGE; persist only the first sighting within the window.
+		if !dedupe.firstSight(channel+"\x00"+nick+"\x00"+text, now) {
+			return
+		}
 		if err := store.Submit(ctx, messages.Message{
 			Channel: channel,
 			Nick:    nick,
 			Text:    text,
-			TS:      time.Now(),
+			TS:      now,
 		}); err != nil {
 			log.Debug("store submit", "err", err, "channel", channel)
 		}
