@@ -241,3 +241,14 @@ type sendFails struct {
 func (s *sendFails) Send(_ *agent.OutboundEnvelope) error {
 	return errors.New("send broken")
 }
+
+// TestMarkStoreWiredOnce pins the once-per-agent guard: WireCore runs once per
+// connector surface but they share one agent + EventBus, so only the first
+// caller may wire the durable-store submitter — otherwise every message is
+// persisted once per surface.
+func TestMarkStoreWiredOnce(t *testing.T) {
+	a := agent.New(nil)
+	assert.True(t, a.MarkStoreWired(), "first call claims the wiring")
+	assert.False(t, a.MarkStoreWired(), "second call is a no-op")
+	assert.False(t, a.MarkStoreWired(), "and stays a no-op")
+}
