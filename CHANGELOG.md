@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 release-please maintains the entries below from Conventional Commits — manual
 edits will survive but the bot will keep adding new entries above.
 
+## [0.21.0](https://github.com/turborg/turborg/compare/v0.20.1...v0.21.0) (2026-07-19)
+
+
+### Features
+
+* **statepush:** report connection state for all connectors ([#179](https://github.com/turborg/turborg/issues/179)) ([afb0a0c](https://github.com/turborg/turborg/commit/afb0a0cff9362f5d348318abae7b161095149641))
+
 ## [0.20.1](https://github.com/turborg/turborg/compare/v0.20.0...v0.20.1) (2026-07-08)
 
 
