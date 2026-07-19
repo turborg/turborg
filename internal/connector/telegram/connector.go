@@ -73,9 +73,48 @@ type Connector struct {
 
 	lifecycleMu sync.Mutex
 	suspended   bool
+
+	stateMu       sync.Mutex
+	state         string
+	stateSince    time.Time
+	stateReason   string
+	onStateChange func()
 }
 
 var _ agent.Connector = (*Connector)(nil)
+var _ agent.StateReporter = (*Connector)(nil)
+var _ agent.StateSubscriber = (*Connector)(nil)
+
+// ConnectorState returns a connector-agnostic snapshot of the live connection
+// state for the state-mirror emitter.
+func (c *Connector) ConnectorState() agent.ConnectorState {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	return agent.ConnectorState{State: c.state, Since: c.stateSince, Reason: c.stateReason}
+}
+
+// OnStateChange registers a callback fired on every state transition so the
+// emitter can be event-driven rather than polled.
+func (c *Connector) OnStateChange(fn func()) {
+	c.stateMu.Lock()
+	c.onStateChange = fn
+	c.stateMu.Unlock()
+}
+
+// setState records a new connection state (and reason) and fires the change
+// hook synchronously when either moved.
+func (c *Connector) setState(state, reason string) {
+	c.stateMu.Lock()
+	changed := c.state != state || c.stateReason != reason
+	if changed {
+		c.state, c.stateReason, c.stateSince = state, reason, time.Now()
+	}
+	fn := c.onStateChange
+	c.stateMu.Unlock()
+	if changed && fn != nil {
+		fn()
+	}
+}
 
 // New builds a Telegram Connector. events is the tenant-owned bus (may be nil in
 // tests that don't need persistence signals).
@@ -89,15 +128,21 @@ func New(s *Settings, log *slog.Logger, events *agent.EventBus) *Connector {
 			allow[ch] = struct{}{}
 		}
 	}
+	initialState := "connecting"
+	if s.Suspended {
+		initialState = "suspended"
+	}
 	return &Connector{
-		settings:  s,
-		log:       log.With("connector", "telegram"),
-		events:    events,
-		inbox:     make(chan *agent.InboundEnvelope, 64),
-		allow:     allow,
-		done:      make(chan struct{}),
-		refs:      map[uuid.UUID]replyRef{},
-		suspended: s.Suspended,
+		settings:   s,
+		log:        log.With("connector", "telegram"),
+		events:     events,
+		inbox:      make(chan *agent.InboundEnvelope, 64),
+		allow:      allow,
+		done:       make(chan struct{}),
+		refs:       map[uuid.UUID]replyRef{},
+		suspended:  s.Suspended,
+		state:      initialState,
+		stateSince: time.Now(),
 	}
 }
 
@@ -128,6 +173,7 @@ func (c *Connector) Suspend() {
 	c.lifecycleMu.Lock()
 	c.suspended = true
 	c.lifecycleMu.Unlock()
+	c.setState("suspended", "")
 }
 
 // Resume clears a user-requested disconnect. Idempotent.
@@ -135,6 +181,7 @@ func (c *Connector) Resume() {
 	c.lifecycleMu.Lock()
 	c.suspended = false
 	c.lifecycleMu.Unlock()
+	c.setState("connected", "")
 }
 
 func (c *Connector) isSuspended() bool {
@@ -148,16 +195,19 @@ func (c *Connector) isSuspended() bool {
 func (c *Connector) Start(context.Context) error {
 	if c.isSuspended() {
 		c.log.Info("telegram connector starting suspended; awaiting resume")
+		c.setState("suspended", "")
 		return nil
 	}
 	c.mu.Lock()
 	preWired := c.bot != nil || c.api != nil
 	c.mu.Unlock()
 	if preWired {
+		c.setState("connected", "")
 		return nil
 	}
 	bot, err := newBotAPI(c.settings.Token)
 	if err != nil {
+		c.setState("error", err.Error())
 		return err
 	}
 	c.mu.Lock()
@@ -166,6 +216,7 @@ func (c *Connector) Start(context.Context) error {
 	c.selfID = bot.Self.ID
 	c.selfName = bot.Self.UserName
 	c.mu.Unlock()
+	c.setState("connected", "")
 	return nil
 }
 

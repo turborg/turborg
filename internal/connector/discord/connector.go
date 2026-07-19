@@ -71,9 +71,48 @@ type Connector struct {
 	lifecycleMu sync.Mutex
 	suspended   bool
 	lifecycleCh chan struct{}
+
+	stateMu       sync.Mutex
+	state         string
+	stateSince    time.Time
+	stateReason   string
+	onStateChange func()
 }
 
 var _ agent.Connector = (*Connector)(nil)
+var _ agent.StateReporter = (*Connector)(nil)
+var _ agent.StateSubscriber = (*Connector)(nil)
+
+// ConnectorState returns a connector-agnostic snapshot of the live connection
+// state for the state-mirror emitter.
+func (c *Connector) ConnectorState() agent.ConnectorState {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	return agent.ConnectorState{State: c.state, Since: c.stateSince, Reason: c.stateReason}
+}
+
+// OnStateChange registers a callback fired on every state transition so the
+// emitter can be event-driven rather than polled.
+func (c *Connector) OnStateChange(fn func()) {
+	c.stateMu.Lock()
+	c.onStateChange = fn
+	c.stateMu.Unlock()
+}
+
+// setState records a new connection state (and reason) and fires the change
+// hook synchronously when either moved.
+func (c *Connector) setState(state, reason string) {
+	c.stateMu.Lock()
+	changed := c.state != state || c.stateReason != reason
+	if changed {
+		c.state, c.stateReason, c.stateSince = state, reason, time.Now()
+	}
+	fn := c.onStateChange
+	c.stateMu.Unlock()
+	if changed && fn != nil {
+		fn()
+	}
+}
 
 // New builds a Discord Connector. events is the tenant-owned bus (may be nil in
 // tests that don't need persistence signals).
@@ -87,6 +126,10 @@ func New(s *Settings, log *slog.Logger, events *agent.EventBus) *Connector {
 			allow[ch] = struct{}{}
 		}
 	}
+	initialState := "connecting"
+	if s.Suspended {
+		initialState = "suspended"
+	}
 	return &Connector{
 		settings:    s,
 		log:         log.With("connector", "discord"),
@@ -97,6 +140,8 @@ func New(s *Settings, log *slog.Logger, events *agent.EventBus) *Connector {
 		refs:        map[uuid.UUID]replyRef{},
 		lifecycleCh: make(chan struct{}, 1),
 		suspended:   s.Suspended,
+		state:       initialState,
+		stateSince:  time.Now(),
 	}
 }
 
@@ -135,6 +180,7 @@ func (c *Connector) Suspend() {
 	c.lifecycleMu.Unlock()
 	c.disconnect()
 	c.signalLifecycle()
+	c.setState("suspended", "")
 }
 
 // Resume clears a user-requested disconnect and wakes Run to reconnect.
@@ -147,6 +193,7 @@ func (c *Connector) Resume() {
 	}
 	c.suspended = false
 	c.lifecycleMu.Unlock()
+	c.setState("connecting", "")
 	c.signalLifecycle()
 }
 
@@ -181,16 +228,23 @@ func (c *Connector) connect() error {
 	existing := c.session
 	c.mu.Unlock()
 	if existing != nil {
-		return existing.Open()
+		if err := existing.Open(); err != nil {
+			c.setState("error", err.Error())
+			return err
+		}
+		c.setState("connected", "")
+		return nil
 	}
 
 	dg, err := discordgo.New("Bot " + c.settings.Token)
 	if err != nil {
+		c.setState("error", err.Error())
 		return err
 	}
 	dg.Identify.Intents = discordgo.IntentGuildMessages | discordgo.IntentDirectMessages | discordgo.IntentMessageContent
 	dg.AddHandler(c.onMessageCreate)
 	if err := dg.Open(); err != nil {
+		c.setState("error", err.Error())
 		return err
 	}
 	c.mu.Lock()
@@ -200,6 +254,7 @@ func (c *Connector) connect() error {
 		c.selfName = dg.State.User.Username
 	}
 	c.mu.Unlock()
+	c.setState("connected", "")
 	return nil
 }
 
@@ -226,6 +281,7 @@ func (c *Connector) Run(ctx context.Context) error {
 			if c.isSuspended() {
 				c.disconnect()
 			} else if err := c.connect(); err != nil {
+				c.setState("error", err.Error())
 				c.log.Warn("discord resume connect failed", "err", err)
 			}
 		}
