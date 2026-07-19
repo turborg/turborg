@@ -402,6 +402,40 @@ func (t *Tenant) buildConnectors(a *agent.Agent) {
 			t.log.Warn("connector type not supported in pooled mode yet", "type", cs.Type)
 		}
 	}
+
+	// Connector-state sync: mirror each built connector's live status (upstream
+	// state, channels, nick) to the control plane on every transition, so a
+	// downstream UI reflects connection status for pooled tenants the same way
+	// it does for single-instance ones. One emitter spans all of the tenant's
+	// connectors. Inert + nil when no control plane / no connectors were built.
+	if em := buildTenantStateEmitter(t.builtConnectors(), t.ID, t.controlPlaneURL, t.controlPlaneToken, t.log); em != nil {
+		t.mu.Lock()
+		t.stateEmitter = em
+		t.mu.Unlock()
+	}
+}
+
+// builtConnectors gathers the tenant's live connectors for the current run into
+// a connector-agnostic slice (only the non-nil ones), for the shared
+// state-mirror emitter. Read under the tenant lock; typed-nil safe (each field
+// is a concrete pointer type, appended only when non-nil).
+func (t *Tenant) builtConnectors() []agent.Connector {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var conns []agent.Connector
+	if t.ircConn != nil {
+		conns = append(conns, t.ircConn)
+	}
+	if t.discordConn != nil {
+		conns = append(conns, t.discordConn)
+	}
+	if t.telegramConn != nil {
+		conns = append(conns, t.telegramConn)
+	}
+	if t.slackConn != nil {
+		conns = append(conns, t.slackConn)
+	}
+	return conns
 }
 
 // buildIRCConnector constructs the tenant's IRC connector from its spec: it
@@ -485,16 +519,6 @@ func (t *Tenant) buildIRCConnector(a *agent.Agent, cs ConnectorSpec, caps *PlanC
 	t.ircConn = conn
 	t.wiring = wiring
 	t.mu.Unlock()
-
-	// Connector-state sync: mirror upstream status / channels / nick to
-	// the control plane on every transition, so a downstream UI reflects
-	// connection status for pooled tenants the same way it does for
-	// single-instance ones. Inert + nil when no control plane.
-	if em := buildTenantStateEmitter(conn, t.ID, t.controlPlaneURL, t.controlPlaneToken, t.log); em != nil {
-		t.mu.Lock()
-		t.stateEmitter = em
-		t.mu.Unlock()
-	}
 
 	// Web shell: built only when the tenant carries a gateway token (the
 	// feed expresses the "web shell enabled" capability by emitting the
