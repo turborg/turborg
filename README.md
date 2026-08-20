@@ -158,6 +158,22 @@ docker run --rm \
 
 LLM providers are **optional**. turborg runs perfectly fine as a pure command-driven bot without any LLM. When you want one, Anthropic (default, with prompt caching) ships in-tree.
 
+## Observability
+
+The gateway exposes two read-only endpoints for liveness checks and Prometheus monitoring:
+
+- `GET /health` returns JSON with `status`, `uptime_seconds`, and the current `ws_clients` count. `HEAD /health` is also supported.
+- `GET /metrics` returns Prometheus text-format metrics, including total WebSocket connections and authentication failures, forwarded messages, current WebSocket clients, and process uptime. `HEAD /metrics` is also supported.
+
+For example, add the gateway to a Prometheus scrape configuration:
+
+```yaml
+scrape_configs:
+  - job_name: turborg
+    static_configs:
+      - targets: ["localhost:8765"]
+```
+
 ## Project layout
 
 ```
