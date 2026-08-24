@@ -2,7 +2,7 @@
 
 # Build stage: pinned Go for reproducibility. Bump in lockstep with
 # .github/workflows/ci.yml + go.mod's go directive.
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 WORKDIR /src
 
