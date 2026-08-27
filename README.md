@@ -58,6 +58,39 @@ In `#turborg-test`, type `!ping` — the bot replies `pong`, because that's the 
 
 See [`docs/connectors/irc.md`](docs/connectors/irc.md) for the IRC connector reference (SASL, NickServ identify, bouncer, rate limits, timing) and [`docs/gateway.md`](docs/gateway.md) for the gateway (WS protocol, auth, idle-shutdown).
 
+### Observability
+
+When the gateway is enabled, `GET /health` returns a JSON liveness response:
+
+```json
+{
+  "status": "ok",
+  "uptime_seconds": 123,
+  "ws_clients": 2
+}
+```
+
+`GET /metrics` returns Prometheus text format with these metrics:
+
+| Metric | Type | Description |
+|---|---|---|
+| `turborg_ws_connections_total` | counter | Successful WebSocket authentications |
+| `turborg_ws_auth_failures_total` | counter | Failed WebSocket authentication attempts |
+| `turborg_messages_forwarded_total` | counter | IRC messages forwarded to WebSocket clients |
+| `turborg_ws_clients_current` | gauge | Currently connected WebSocket clients |
+| `turborg_uptime_seconds` | gauge | Process uptime since gateway initialization |
+
+For a gateway using the default host and port, add it to Prometheus with:
+
+```yaml
+scrape_configs:
+  - job_name: turborg
+    static_configs:
+      - targets: ["127.0.0.1:8765"]
+```
+
+Keep the gateway on loopback or restrict access at the network boundary when exposing these endpoints, since `/health` and `/metrics` are not authentication-gated.
+
 ## Quickstart: a minimal bot in Go
 
 If you want to read the code end-to-end or hack on it, a runnable ~40-line example lives in [`examples/turborg_irc/main.go`](examples/turborg_irc/main.go):
